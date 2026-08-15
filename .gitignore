@@ -1,0 +1,19 @@
+# Build output
+/liftr-server
+/bin/
+/dist/
+
+# Test and coverage output
+*.out
+coverage.*
+
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
