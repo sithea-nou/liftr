@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes Liftr's intended high-level architecture. It is a direction for future development, not a description of components currently implemented. Today, Liftr consists only of a minimal HTTP server and health endpoint.
+This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has a minimal HTTP server, a health endpoint, and the initial provisioner-neutral domain model.
 
 ## Product Boundary
 
@@ -58,11 +58,15 @@ Dependencies point toward Liftr's domain concepts and capability contracts. Adap
 
 Long-running infrastructure work will be modeled asynchronously. A lifecycle request should create an auditable Operation, with Events describing meaningful progress and outcomes. Detailed schemas and execution semantics are intentionally deferred until a later milestone.
 
+The initial domain model keeps Resource developer intent separate from normalized ResourceStatus observations. Operations target a specific desired-state generation. Events carry that generation as append-only audit history; they are not an event-sourcing mechanism. These decisions are recorded in [ADR-0002](adr/0002-core-domain-model.md).
+
 ## Current Implementation
 
-Only the process and HTTP bootstrap exists:
+The process bootstrap and initial core domain model exist:
 
 - `cmd/liftr-server` starts the HTTP server, emits structured logs, and performs graceful shutdown.
 - `internal/server` exposes the `GET /healthz` route.
+- `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
+- `internal/resourcetypes/postgresqldatabase` demonstrates a ResourceType outside the core without provisioning infrastructure.
 
-The remaining components in this document are targets and have not been implemented.
+Lifecycle orchestration, persistence, adapters, provisioning, and public Resource endpoints have not been implemented.

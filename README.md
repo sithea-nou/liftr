@@ -18,9 +18,11 @@ This repository is an initial bootstrap. It currently contains only:
 - A `GET /healthz` endpoint.
 - Graceful shutdown on interrupt and termination signals.
 - Structured JSON logging with `log/slog`.
+- An initial provisioner-neutral core domain model.
+- A non-provisioning PostgreSQLDatabase example ResourceType.
 - Initial tests and continuous integration.
 
-No resource lifecycle platform, provisioner adapters, persistence, authentication, authorization, or orchestration has been implemented yet.
+No lifecycle orchestration, provisioner adapters, persistence, authentication, authorization, infrastructure provisioning, or public Resource endpoints have been implemented yet.
 
 ## Getting Started
 
