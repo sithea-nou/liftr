@@ -58,4 +58,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance and [AGENTS.md](
 
 ## License
 
-A license has not yet been selected. Contributions cannot be accepted until the project adopts one.
+Liftr is licensed under the [Apache License 2.0](LICENSE).

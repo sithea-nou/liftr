@@ -31,6 +31,10 @@ make verify
 
 Describe the problem, the chosen approach, relevant tradeoffs, and any follow-up work. Do not combine unrelated cleanup with functional changes.
 
+## License
+
+Liftr is licensed under the [Apache License 2.0](LICENSE). Unless explicitly stated otherwise, contributions submitted for inclusion in Liftr are provided under the same license.
+
 ## Reporting Issues
 
 Include a concise description, reproduction steps when applicable, expected behavior, actual behavior, and relevant environment details. Security reporting guidance will be added before Liftr handles sensitive workloads.
