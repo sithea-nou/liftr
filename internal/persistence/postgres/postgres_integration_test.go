@@ -219,7 +219,23 @@ func TestPostgresOutboxUsesServerTimeAndFencesClaims(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(30 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		return tx.Outbox().RenewOutbox(ctx, first.ID, "token-one", 30*time.Millisecond)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(15 * time.Millisecond)
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		_, found, err := tx.Outbox().ClaimOutbox(ctx, "token-before-renewed-expiry", time.Minute)
+		if err == nil && found {
+			return errors.New("renewed lease was reclaimed")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
 	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
 		reclaimed, found, err := tx.Outbox().ClaimOutbox(ctx, "token-three", time.Minute)
 		if err == nil && (!found || reclaimed.ID != first.ID || reclaimed.LeaseToken != "token-three") {
@@ -228,6 +244,52 @@ func TestPostgresOutboxUsesServerTimeAndFencesClaims(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPostgresExpiredPendingDispatchRequeuesSameMessage(t *testing.T) {
+	pool, cleanup := migratedPool(t)
+	defer cleanup()
+	ctx := context.Background()
+	store, _ := postgres.NewStore(pool)
+	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
+	service, resolver := postgresService(t, store, provider)
+	command := postgresCreateCommand(t, "resource-pending-dispatch", "operation-pending-dispatch", map[string]any{"v": uint64(1)})
+	if _, err := service.AdmitCreateResource(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	instance, _ := worker.New(store, resolver)
+	for range 3 {
+		if _, err := instance.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	instance.Lease = 10 * time.Millisecond
+	var dispatch application.OutboxMessage
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		var found bool
+		var err error
+		dispatch, found, err = tx.Outbox().ClaimOutbox(ctx, "pending-crash-token", instance.Lease)
+		if err == nil && (!found || dispatch.Kind != application.OutboxDispatch) {
+			return errors.New("Dispatch was not claimed")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if worked, err := instance.RunOnce(ctx); err != nil || !worked {
+		t.Fatalf("pending recovery worked=%t error=%v", worked, err)
+	}
+	var messageState, executionState, attemptState string
+	if err := pool.QueryRow(ctx, `SELECT m.state,e.state,a.state FROM outbox_messages m
+		JOIN provisioning_executions e ON e.operation_id=m.operation_id
+		JOIN provisioning_submission_attempts a ON a.operation_id=e.operation_id AND a.attempt_number=e.current_attempt_number
+		WHERE m.id=$1`, dispatch.ID).Scan(&messageState, &executionState, &attemptState); err != nil {
+		t.Fatal(err)
+	}
+	if messageState != "Pending" || executionState != "Pending" || attemptState != "Pending" {
+		t.Fatalf("message=%s execution=%s attempt=%s", messageState, executionState, attemptState)
 	}
 }
 
@@ -361,39 +423,56 @@ func TestPostgresExpiredDispatchBecomesAmbiguousWithoutResubmission(t *testing.T
 	defer cleanup()
 	ctx := context.Background()
 	store, _ := postgres.NewStore(pool)
-	provider := newPostgresBlockingProvider()
+	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, resolver := postgresService(t, store, provider)
 	command := postgresCreateCommand(t, "resource-expired-dispatch", "operation-expired-dispatch", map[string]any{"v": uint64(1)})
 	if _, err := service.AdmitCreateResource(ctx, command); err != nil {
 		t.Fatal(err)
 	}
 	instance, _ := worker.New(store, resolver)
-	instance.Lease = 10 * time.Millisecond
 	instance.RetryBase = 0
 	for range 3 {
 		if _, err := instance.RunOnce(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
-	staleResult := make(chan error, 1)
-	go func() {
-		_, err := instance.RunOnce(ctx)
-		staleResult <- err
-	}()
-	<-provider.started
+	instance.Lease = 10 * time.Millisecond
+	var dispatch application.OutboxMessage
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		var found bool
+		var err error
+		dispatch, found, err = tx.Outbox().ClaimOutbox(ctx, "dispatching-crash-token", instance.Lease)
+		if err == nil && (!found || dispatch.Kind != application.OutboxDispatch) {
+			return errors.New("Dispatch was not claimed")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		execution, err := tx.Executions().GetExecution(ctx, command.OperationID)
+		if err != nil {
+			return err
+		}
+		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, command.OperationID, 1)
+		if err != nil {
+			return err
+		}
+		attempt.State = application.SubmissionAttemptLeased
+		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptPending); err != nil {
+			return err
+		}
+		execution.State = application.AttemptDispatching
+		return tx.Executions().SaveExecution(ctx, execution, execution.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(20 * time.Millisecond)
 	if worked, err := instance.RunOnce(ctx); err != nil || !worked {
 		t.Fatalf("expired recovery worked=%t error=%v", worked, err)
 	}
-	close(provider.release)
-	if err := <-staleResult; !errors.Is(err, application.ErrConcurrencyConflict) {
-		t.Fatalf("stale dispatch error=%v", err)
-	}
-	provider.mu.Lock()
-	submissions := provider.submissions
-	provider.mu.Unlock()
-	if submissions != 1 {
-		t.Fatalf("submissions=%d, want 1", submissions)
+	if provider.SubmissionCount(command.OperationID) != 0 {
+		t.Fatalf("submissions=%d, want no blind submission", provider.SubmissionCount(command.OperationID))
 	}
 	var executionState, attemptState, terminalReason string
 	if err := pool.QueryRow(ctx, `SELECT e.state,a.state,m.terminal_reason

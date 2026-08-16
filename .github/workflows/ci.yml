@@ -25,6 +25,8 @@ jobs:
           --health-retries 10
     env:
       LIFTR_TEST_DATABASE_URL: postgres://postgres:liftr@localhost:5432/liftr?sslmode=disable
+      LIFTR_TEST_PULUMI_ROOT: /home/runner/.pulumi
+      PULUMI_VERSION: 3.257.0
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -34,6 +36,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Install pinned Pulumi CLI
+        run: |
+          archive="$RUNNER_TEMP/pulumi.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/pulumi/pulumi/releases/download/v${PULUMI_VERSION}/pulumi-v${PULUMI_VERSION}-linux-x64.tar.gz" \
+            --output "$archive"
+          echo "d0e54b4645b98c6e108d90561fe2ef949c67348785ff80f8dc5114a7224f269b  $archive" | sha256sum --check
+          mkdir -p "$LIFTR_TEST_PULUMI_ROOT/bin"
+          tar --extract --gzip --file "$archive" --directory "$LIFTR_TEST_PULUMI_ROOT/bin" --strip-components=1
+          "$LIFTR_TEST_PULUMI_ROOT/bin/pulumi" version
 
       - name: Check formatting
         run: test -z "$(gofmt -l $(git ls-files '*.go'))"

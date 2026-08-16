@@ -181,7 +181,14 @@ func (w *Worker) dispatch(ctx context.Context, message application.OutboxMessage
 	if err != nil {
 		return err
 	}
-	submission, submitErr := prepared.provider.Submit(ctx, executionRequest(prepared.execution))
+	submitCtx, cancel := context.WithCancel(ctx)
+	heartbeat := w.startLeaseHeartbeat(submitCtx, cancel, message)
+	submission, submitErr := prepared.provider.Submit(submitCtx, executionRequest(prepared.execution))
+	heartbeatErr := heartbeat.stop()
+	cancel()
+	if heartbeatErr != nil {
+		return ambiguousDispatchError{cause: fmt.Errorf("dispatch lease ownership lost")}
+	}
 	if err := w.recordDispatch(ctx, message, prepared, submission, submitErr); err != nil {
 		if recoveryErr := w.markDispatchUnknown(ctx, message, prepared, err); recoveryErr == nil {
 			return nil
@@ -189,6 +196,50 @@ func (w *Worker) dispatch(ctx context.Context, message application.OutboxMessage
 		return ambiguousDispatchError{cause: err}
 	}
 	return nil
+}
+
+type leaseHeartbeat struct {
+	stopSignal chan struct{}
+	done       chan error
+}
+
+func (h leaseHeartbeat) stop() error {
+	close(h.stopSignal)
+	return <-h.done
+}
+
+func (w *Worker) startLeaseHeartbeat(ctx context.Context, cancel context.CancelFunc, message application.OutboxMessage) leaseHeartbeat {
+	heartbeat := leaseHeartbeat{stopSignal: make(chan struct{}), done: make(chan error, 1)}
+	interval := w.Lease / 3
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		renew := func() error {
+			return w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
+				return tx.Outbox().RenewOutbox(ctx, message.ID, message.LeaseToken, w.Lease)
+			})
+		}
+		for {
+			select {
+			case <-heartbeat.stopSignal:
+				heartbeat.done <- renew()
+				return
+			case <-ticker.C:
+				if err := renew(); err != nil {
+					cancel()
+					heartbeat.done <- err
+					return
+				}
+			case <-ctx.Done():
+				heartbeat.done <- ctx.Err()
+				return
+			}
+		}
+	}()
+	return heartbeat
 }
 
 type ambiguousDispatchError struct{ cause error }
@@ -291,6 +342,9 @@ func (w *Worker) prepareDispatch(ctx context.Context, message application.Outbox
 		if attempt.State != application.SubmissionAttemptPending || attempt.DispatchMessage != message.ID {
 			return application.ErrConcurrencyConflict
 		}
+		if err := tx.Outbox().RenewOutbox(ctx, message.ID, message.LeaseToken, w.Lease); err != nil {
+			return err
+		}
 		attempt.State = application.SubmissionAttemptLeased
 		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptPending); err != nil {
 			return err
@@ -347,7 +401,9 @@ func (w *Worker) recordDispatch(ctx context.Context, message application.OutboxM
 		backendExecution := submission.Observation.Execution
 		terminalEvidence := backendExecution != nil && (backendExecution.State == provisioning.ExecutionStateSucceeded || backendExecution.State == provisioning.ExecutionStateFailed)
 		validState := backendExecution != nil && validExecutionState(backendExecution.State)
-		if (submitErr != nil && !terminalEvidence) || !validState || backendExecution.State == provisioning.ExecutionStateUnknown {
+		preflightRejected := validState && backendExecution.State == provisioning.ExecutionStateFailed && backendExecution.Failure != nil && submission.Observation.Correlation == provisioning.RequestCorrelationNotFound
+		acceptedRequest := validState && submission.Observation.Correlation == provisioning.RequestCorrelationFound
+		if (submitErr != nil && !terminalEvidence) || !validState || backendExecution.State == provisioning.ExecutionStateUnknown || (!preflightRejected && !acceptedRequest) {
 			execution.State = application.AttemptUnknown
 			if submission.Observation.Correlation == provisioning.RequestCorrelationFound {
 				execution.AcceptanceConfirmed = true
@@ -367,8 +423,7 @@ func (w *Worker) recordDispatch(ctx context.Context, message application.OutboxM
 			}
 			return tx.Outbox().Enqueue(ctx, observe)
 		}
-		rejected := backendExecution.State == provisioning.ExecutionStateFailed && backendExecution.Failure != nil &&
-			(backendExecution.Failure.Kind == provisioning.FailureInvalidRequest || backendExecution.Failure.Kind == provisioning.FailureUnsupported)
+		rejected := preflightRejected
 		attempt.ResolvedAt = observedAt
 		if rejected {
 			attempt.State = application.SubmissionAttemptRejected
@@ -442,14 +497,14 @@ func (w *Worker) observe(ctx context.Context, message application.OutboxMessage)
 	if !validCorrelation(observation.Correlation) {
 		return fmt.Errorf("invalid request correlation %q", observation.Correlation)
 	}
-	if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil {
+	if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil && observation.Execution.State != provisioning.ExecutionStateFailed {
 		return fmt.Errorf("contradictory observation reports NotFound with an execution")
 	}
 	return w.recordObservation(ctx, message, loaded, observation)
 }
 
 func (w *Worker) recordObservation(ctx context.Context, message application.OutboxMessage, loaded application.ProvisioningExecutionRecord, observation provisioning.ExecutionObservation) error {
-	if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil {
+	if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil && observation.Execution.State != provisioning.ExecutionStateFailed {
 		return fmt.Errorf("contradictory observation reports NotFound with an execution")
 	}
 	return w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
@@ -471,6 +526,23 @@ func (w *Worker) recordObservation(ctx context.Context, message application.Outb
 		execution.LastObservation = &observation
 		execution.LastObservedAt = observedAt
 		execution.Correlation = observation.Correlation
+		if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil && observation.Execution.State == provisioning.ExecutionStateFailed {
+			failure := failureFrom(nil, observation.Execution)
+			execution.State = application.AttemptFailed
+			execution.AcceptanceConfirmed = false
+			execution.LastFailure = failure
+			attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, execution.OperationID, execution.CurrentAttempt)
+			if err != nil {
+				return err
+			}
+			attempt.State = application.SubmissionAttemptRejected
+			attempt.Failure = failure
+			attempt.ResolvedAt = observedAt
+			if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptUnknown); err != nil {
+				return err
+			}
+			return w.finishOperation(ctx, tx, message, execution, execution.Version, false, failure.Reason, failure.Message, observedAt, observation.Resource)
+		}
 		if observation.Correlation == provisioning.RequestCorrelationNotFound && execution.State == application.AttemptUnknown && !execution.AcceptanceConfirmed {
 			attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, execution.OperationID, execution.CurrentAttempt)
 			if err != nil {
@@ -508,6 +580,18 @@ func (w *Worker) recordObservation(ctx context.Context, message application.Outb
 				return err
 			}
 			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "ObservedNoCurrentExecution"); err != nil {
+				return err
+			}
+			return tx.Outbox().Enqueue(ctx, next)
+		}
+		if observation.Correlation != provisioning.RequestCorrelationFound {
+			execution.State = application.AttemptUnknown
+			execution.LastFailure = &provisioning.ExecutionFailure{Kind: provisioning.FailureUnknown, Reason: "ExecutionCorrelationUnknown", Message: "terminal execution evidence was not positively correlated"}
+			next := scheduleObserve(&execution, w.RetryBase)
+			if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
+				return err
+			}
+			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "ObservedUncorrelatedExecution"); err != nil {
 				return err
 			}
 			return tx.Outbox().Enqueue(ctx, next)
@@ -644,14 +728,17 @@ func (w *Worker) recoverExpiredDispatch(ctx context.Context) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if execution.CurrentAttempt != message.AttemptNumber || execution.State != application.AttemptDispatching {
+		if execution.CurrentAttempt != message.AttemptNumber {
 			return tx.Outbox().CompleteExpiredOutbox(ctx, message.ID, message.LeaseToken, "StaleExpiredDispatch")
 		}
 		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, message.OperationID, message.AttemptNumber)
 		if err != nil {
 			return err
 		}
-		if attempt.State != application.SubmissionAttemptLeased {
+		if execution.State == application.AttemptPending && attempt.State == application.SubmissionAttemptPending {
+			return tx.Outbox().RequeueExpiredOutbox(ctx, message.ID, message.LeaseToken)
+		}
+		if execution.State != application.AttemptDispatching || attempt.State != application.SubmissionAttemptLeased {
 			return application.ErrConcurrencyConflict
 		}
 		attempt.State = application.SubmissionAttemptUnknown
@@ -684,13 +771,13 @@ func scheduleObserve(execution *application.ProvisioningExecutionRecord, delay t
 }
 
 func executionRequest(execution application.ProvisioningExecutionRecord) provisioning.ExecutionRequest {
-	return provisioning.ExecutionRequest{OperationID: execution.OperationID, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType,
+	return provisioning.ExecutionRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType,
 		Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration}
 }
 
 func observationRequest(execution application.ProvisioningExecutionRecord) provisioning.ObservationRequest {
-	return provisioning.ObservationRequest{OperationID: execution.OperationID, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType,
-		Spec: execution.Spec, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle}
+	return provisioning.ObservationRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType,
+		Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle}
 }
 
 func failureFrom(err error, execution *provisioning.Execution) *provisioning.ExecutionFailure {

@@ -24,17 +24,19 @@ This repository is an initial bootstrap. It currently contains only:
 - An application/orchestration layer with persistence ports and stable private provisioner bindings.
 - A pgx PostgreSQL persistence adapter with explicit checksummed migrations.
 - A transactional outbox and provisioner-neutral `RunOnce` worker with fenced leases and ambiguous-dispatch recovery.
+- A Pulumi Automation API provisioner foundation using isolated local Go programs, deterministic retained stacks, and a filesystem state backend.
 - A non-provisioning PostgreSQLDatabase example ResourceType.
 - Initial tests and continuous integration.
 
-No real provisioner adapters, authentication, authorization, infrastructure provisioning, or public Resource endpoints have been implemented yet.
+No cloud-specific ResourceTypes, production Pulumi programs, authentication, authorization, or public Resource endpoints have been implemented yet.
 
 ## Getting Started
 
 Requirements:
 
-- Go 1.24 or newer.
+- Go 1.25.11 or newer.
 - PostgreSQL 17 for persistence integration tests.
+- Pulumi CLI 3.257.0 for Pulumi adapter integration tests.
 
 Run the server:
 
@@ -65,6 +67,12 @@ PostgreSQL-backed tests run when `LIFTR_TEST_DATABASE_URL` is set. Start the loc
 ```sh
 docker compose up -d postgres
 LIFTR_TEST_DATABASE_URL='postgres://liftr:liftr@localhost:55432/liftr?sslmode=disable' make verify
+```
+
+Pulumi integration tests run when `LIFTR_TEST_PULUMI_ROOT` identifies a preinstalled Pulumi layout containing `bin/pulumi`:
+
+```sh
+LIFTR_TEST_PULUMI_ROOT="$HOME/.pulumi" go test ./internal/provisioning/pulumi -count=1
 ```
 
 Apply migrations explicitly with:

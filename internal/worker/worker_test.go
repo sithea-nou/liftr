@@ -40,6 +40,19 @@ func TestRunOnceDrivesAndDispatchesOperation(t *testing.T) {
 	}
 }
 
+func TestDispatchCarriesProviderNeutralAttemptCorrelation(t *testing.T) {
+	provider := &capturingProvider{}
+	service, _, instance := newHarness(t, provider)
+	command := createCommand(t, "resource-correlation", "operation-correlation")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, instance, 8)
+	if provider.request.OperationID != command.OperationID || provider.request.AttemptNumber != 1 || provider.request.Capability != domain.CapabilityCreate {
+		t.Fatalf("request = %+v", provider.request)
+	}
+}
+
 func TestNotFoundCreatesExactlyOneNewAttempt(t *testing.T) {
 	provider := &recoveryProvider{}
 	service, store, instance := newHarness(t, provider)
@@ -69,9 +82,9 @@ func TestNotFoundCreatesExactlyOneNewAttempt(t *testing.T) {
 	}
 }
 
-func TestExpiredDispatchDoesNotBlindlyResubmit(t *testing.T) {
+func TestLongDispatchRenewsLease(t *testing.T) {
 	provider := newBlockingProvider()
-	service, _, instance := newHarness(t, provider)
+	service, store, instance := newHarness(t, provider)
 	instance.Lease = 5 * time.Millisecond
 	instance.RetryBase = 0
 	command := createCommand(t, "resource-expired", "operation-expired")
@@ -89,13 +102,185 @@ func TestExpiredDispatchDoesNotBlindlyResubmit(t *testing.T) {
 		result <- err
 	}()
 	<-provider.started
+	time.Sleep(20 * time.Millisecond)
+	var message application.OutboxMessage
+	err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
+		var err error
+		message, err = tx.Outbox().GetOutbox(context.Background(), application.DispatchMessage(command.OperationID, 1, 0).ID)
+		return err
+	})
+	if err != nil || message.State != application.OutboxLeased || !message.LeasedUntil.After(time.Now()) {
+		t.Fatalf("dispatch message error=%v state=%s leasedUntil=%v", err, message.State, message.LeasedUntil)
+	}
+	if worked, err := instance.RunOnce(context.Background()); err != nil || worked {
+		t.Fatalf("renewed dispatch was reclaimed worked=%t error=%v", worked, err)
+	}
+	close(provider.release)
+	if err := <-result; err != nil {
+		t.Fatalf("dispatch error=%v", err)
+	}
+	provider.mu.Lock()
+	submissions := provider.submissions
+	provider.mu.Unlock()
+	if submissions != 1 {
+		t.Fatalf("submissions=%d, want no blind resubmission", submissions)
+	}
+}
+
+func TestExpiredPendingDispatchRequeuesSameMessage(t *testing.T) {
+	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
+	service, store, instance := newHarness(t, provider)
+	instance.Lease = 5 * time.Millisecond
+	command := createCommand(t, "resource-pending-crash", "operation-pending-crash")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var claimed application.OutboxMessage
+	if err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
+		var found bool
+		var err error
+		claimed, found, err = tx.Outbox().ClaimOutbox(context.Background(), "crashed-before-dispatching", instance.Lease)
+		if err == nil && (!found || claimed.Kind != application.OutboxDispatch) {
+			return errors.New("Dispatch was not claimed")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(10 * time.Millisecond)
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("pending recovery worked=%t error=%v", worked, err)
+	}
+	message, err := store.GetOutbox(context.Background(), claimed.ID)
+	if err != nil || message.State != application.OutboxPending || message.AttemptNumber != 1 {
+		t.Fatalf("message error=%v state=%s attempt=%d", err, message.State, message.AttemptNumber)
+	}
+	attempt, err := store.GetSubmissionAttempt(context.Background(), command.OperationID, 1)
+	if err != nil || attempt.State != application.SubmissionAttemptPending {
+		t.Fatalf("attempt error=%v state=%s", err, attempt.State)
+	}
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("requeued dispatch worked=%t error=%v", worked, err)
+	}
+	if provider.SubmissionCount(command.OperationID) != 1 {
+		t.Fatalf("submissions=%d, want 1", provider.SubmissionCount(command.OperationID))
+	}
+}
+
+func TestExpiredClaimantCannotTransitionToDispatching(t *testing.T) {
+	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
+	service, store, instance := newHarness(t, provider)
+	command := createCommand(t, "resource-expired-claimant", "operation-expired-claimant")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	delayed := &delayedTransactionRunner{inner: store, delayAfter: 2, delay: 15 * time.Millisecond}
+	resolver := instance.Resolver
+	staleWorker, err := worker.New(delayed, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleWorker.Lease = 5 * time.Millisecond
+	staleWorker.RetryBase = 0
+	if worked, err := staleWorker.RunOnce(context.Background()); err == nil || !worked {
+		t.Fatalf("expired claimant worked=%t error=%v", worked, err)
+	}
+	if provider.SubmissionCount(command.OperationID) != 0 {
+		t.Fatal("expired claimant invoked Submit")
+	}
+	execution, err := store.GetExecution(context.Background(), command.OperationID)
+	if err != nil || execution.State != application.AttemptPending {
+		t.Fatalf("execution error=%v state=%s", err, execution.State)
+	}
+	instance.Lease = 5 * time.Millisecond
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("pending expiry recovery worked=%t error=%v", worked, err)
+	}
+}
+
+func TestUnknownCorrelationCannotCompleteTerminalExecution(t *testing.T) {
+	provider := &unknownTerminalProvider{}
+	service, store, instance := newHarness(t, provider)
+	instance.RetryBase = time.Hour
+	command := createCommand(t, "resource-unknown-terminal", "operation-unknown-terminal")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := store.GetExecution(context.Background(), command.OperationID)
+	if err != nil || execution.State != application.AttemptUnknown || execution.Correlation != provisioning.RequestCorrelationUnknown {
+		t.Fatalf("execution error=%v state=%s correlation=%s", err, execution.State, execution.Correlation)
+	}
+	operation, err := store.GetOperation(context.Background(), command.OperationID)
+	if err != nil || operation.Operation.IsTerminal() {
+		t.Fatalf("operation error=%v state=%s", err, operation.Operation.State())
+	}
+}
+
+func TestLeaseRenewalLossAfterDispatchingBecomesUnknown(t *testing.T) {
+	provider := newStubbornBlockingProvider()
+	service, store, instance := newHarness(t, provider)
+	instance.Lease = 10 * time.Millisecond
+	instance.RetryBase = 0
+	command := createCommand(t, "resource-renewal-loss", "operation-renewal-loss")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := instance.RunOnce(context.Background())
+		result <- err
+	}()
+	<-provider.started
+	locked := make(chan struct{})
+	releaseTransaction := make(chan struct{})
+	transactionDone := make(chan struct{})
+	go func() {
+		_ = store.Within(context.Background(), func(application.UnitOfWork) error {
+			close(locked)
+			<-releaseTransaction
+			return nil
+		})
+		close(transactionDone)
+	}()
+	<-locked
+	time.Sleep(20 * time.Millisecond)
+	close(releaseTransaction)
+	<-transactionDone
+	time.Sleep(2 * time.Millisecond)
 	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
 		t.Fatalf("expiry recovery worked=%t error=%v", worked, err)
 	}
 	close(provider.release)
-	if err := <-result; !errors.Is(err, application.ErrConcurrencyConflict) {
-		t.Fatalf("stale dispatch error=%v, want concurrency conflict", err)
+	if err := <-result; err == nil {
+		t.Fatal("stale worker returned a conclusive result")
+	}
+	execution, err := store.GetExecution(context.Background(), command.OperationID)
+	if err != nil || execution.State != application.AttemptUnknown || execution.Correlation != provisioning.RequestCorrelationUnknown {
+		t.Fatalf("execution error=%v state=%s correlation=%s", err, execution.State, execution.Correlation)
+	}
+	attempt, err := store.GetSubmissionAttempt(context.Background(), command.OperationID, 1)
+	if err != nil || attempt.State != application.SubmissionAttemptUnknown {
+		t.Fatalf("attempt error=%v state=%s", err, attempt.State)
 	}
 	provider.mu.Lock()
 	submissions := provider.submissions
@@ -255,6 +440,50 @@ type recoveryProvider struct {
 	submissions int
 }
 
+type capturingProvider struct{ request provisioning.ExecutionRequest }
+
+func (*capturingProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
+func (p *capturingProvider) Submit(_ context.Context, request provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	p.request = request
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts()}}, nil
+}
+
+type unknownTerminalProvider struct{}
+
+func (*unknownTerminalProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
+func (*unknownTerminalProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationUnknown,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts()}}, nil
+}
+func (*unknownTerminalProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationUnknown,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts()}, nil
+}
+
+type delayedTransactionRunner struct {
+	inner      application.TransactionRunner
+	mu         sync.Mutex
+	calls      int
+	delayAfter int
+	delay      time.Duration
+}
+
+func (r *delayedTransactionRunner) Within(ctx context.Context, fn func(application.UnitOfWork) error) error {
+	err := r.inner.Within(ctx, fn)
+	r.mu.Lock()
+	r.calls++
+	shouldDelay := r.calls == r.delayAfter
+	r.mu.Unlock()
+	if shouldDelay {
+		time.Sleep(r.delay)
+	}
+	return err
+}
+func (*capturingProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, errors.New("unexpected observation")
+}
+
 func (p *recoveryProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
 
 func (p *recoveryProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
@@ -278,6 +507,7 @@ type blockingProvider struct {
 	submissions int
 	started     chan struct{}
 	release     chan struct{}
+	stubborn    bool
 }
 
 type contradictoryProvider struct{}
@@ -304,6 +534,7 @@ type rejectedProvider struct{}
 func (*rejectedProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
 func (*rejectedProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
 	return provisioning.Submission{Observation: provisioning.ExecutionObservation{
+		Correlation: provisioning.RequestCorrelationNotFound,
 		Execution: &provisioning.Execution{State: provisioning.ExecutionStateFailed, Failure: &provisioning.ExecutionFailure{
 			Kind: provisioning.FailureInvalidRequest, Reason: "Invalid", Message: "request rejected",
 		}},
@@ -321,16 +552,29 @@ func newBlockingProvider() *blockingProvider {
 	return &blockingProvider{started: make(chan struct{}), release: make(chan struct{})}
 }
 
+func newStubbornBlockingProvider() *blockingProvider {
+	return &blockingProvider{started: make(chan struct{}), release: make(chan struct{}), stubborn: true}
+}
+
 func (p *blockingProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
 
-func (p *blockingProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+func (p *blockingProvider) Submit(ctx context.Context, _ provisioning.ExecutionRequest) (provisioning.Submission, error) {
 	p.mu.Lock()
 	p.submissions++
 	p.mu.Unlock()
 	close(p.started)
-	<-p.release
-	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
-		Execution: &provisioning.Execution{State: provisioning.ExecutionStateAccepted}}}, nil
+	if p.stubborn {
+		<-p.release
+		return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+			Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts()}}, nil
+	}
+	select {
+	case <-p.release:
+		return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+			Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts()}}, nil
+	case <-ctx.Done():
+		return provisioning.Submission{}, ctx.Err()
+	}
 }
 
 func (p *blockingProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {

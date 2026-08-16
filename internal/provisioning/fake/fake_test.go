@@ -254,6 +254,7 @@ func testRequest(id domain.OperationID, capability domain.Capability) provisioni
 	spec, _ := domain.NewResourceSpec(map[string]any{"intent": "test"})
 	return provisioning.ExecutionRequest{
 		OperationID:      id,
+		AttemptNumber:    1,
 		ResourceID:       "resource-1",
 		ResourceType:     fake.ResourceType(),
 		Spec:             spec,
@@ -264,11 +265,16 @@ func testRequest(id domain.OperationID, capability domain.Capability) provisioni
 
 func testObservationRequest(id domain.OperationID) provisioning.ObservationRequest {
 	spec, _ := domain.NewResourceSpec(map[string]any{"intent": "test"})
-	return provisioning.ObservationRequest{
+	request := provisioning.ObservationRequest{
 		OperationID:      id,
 		ResourceID:       "resource-1",
 		ResourceType:     fake.ResourceType(),
 		Spec:             spec,
 		TargetGeneration: 1,
 	}
+	if id != "" {
+		request.AttemptNumber = 1
+		request.Capability = domain.CapabilityCreate
+	}
+	return request
 }

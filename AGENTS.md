@@ -22,7 +22,7 @@ This file defines the architectural guardrails for contributors and coding agent
 
 ## Current Scope
 
-The repository contains the core domain model, pure lifecycle semantics, provider-neutral provisioning contract, and application orchestration ports, but no persistence implementation, execution infrastructure, real provisioner adapters, or public Resource API. Add capabilities incrementally, with tests, and avoid introducing implementation technologies before a concrete milestone requires them.
+The repository contains the core domain model, pure lifecycle semantics, provider-neutral provisioning contract, application orchestration, durable PostgreSQL execution, and a Pulumi Automation API adapter foundation. It has no production Pulumi programs, cloud-specific ResourceTypes, continuously running worker process, or public Resource API. Add capabilities incrementally, with tests, and avoid introducing implementation technologies before a concrete milestone requires them.
 
 ## Development Expectations
 

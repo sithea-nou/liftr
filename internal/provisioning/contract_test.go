@@ -70,6 +70,25 @@ func TestExecutionRequestContainsNoLifecyclePhase(t *testing.T) {
 	}
 }
 
+func TestProvisioningContractsContainNoPulumiSurface(t *testing.T) {
+	types := []reflect.Type{
+		reflect.TypeOf(provisioning.ExecutionRequest{}),
+		reflect.TypeOf(provisioning.ObservationRequest{}),
+		reflect.TypeOf(provisioning.ExecutionObservation{}),
+	}
+	for _, typ := range types {
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			value := strings.ToLower(field.Name + " " + field.Type.String() + " " + field.Type.PkgPath())
+			for _, forbidden := range []string{"pulumi", "stack", "workspace", "backend", "projectpath", "clioutput"} {
+				if strings.Contains(value, forbidden) {
+					t.Fatalf("%s.%s exposes %q", typ.Name(), field.Name, forbidden)
+				}
+			}
+		}
+	}
+}
+
 func TestNormalizedFailureError(t *testing.T) {
 	failure := provisioning.ExecutionFailure{
 		Kind:    provisioning.FailureUnavailable,
@@ -81,10 +100,30 @@ func TestNormalizedFailureError(t *testing.T) {
 	}
 }
 
+func TestObservationCorrelationFieldsAreJointlyPresentOrAbsent(t *testing.T) {
+	operation := testObservationRequest("operation-1")
+	if err := operation.Validate(); err != nil {
+		t.Fatalf("operation observation rejected: %v", err)
+	}
+	passive := operation
+	passive.OperationID = ""
+	passive.AttemptNumber = 0
+	passive.Capability = ""
+	if err := passive.Validate(); err != nil {
+		t.Fatalf("passive observation rejected: %v", err)
+	}
+	partial := operation
+	partial.AttemptNumber = 0
+	if err := partial.Validate(); err == nil {
+		t.Fatal("partial operation correlation was accepted")
+	}
+}
+
 func testRequest(id domain.OperationID, capability domain.Capability) provisioning.ExecutionRequest {
 	spec, _ := domain.NewResourceSpec(map[string]any{"intent": "test"})
 	return provisioning.ExecutionRequest{
 		OperationID:      id,
+		AttemptNumber:    1,
 		ResourceID:       "resource-1",
 		ResourceType:     domain.ResourceTypeRef{Name: "FakeResource", Version: "v1"},
 		Spec:             spec,
@@ -97,9 +136,11 @@ func testObservationRequest(id domain.OperationID) provisioning.ObservationReque
 	spec, _ := domain.NewResourceSpec(map[string]any{"intent": "test"})
 	return provisioning.ObservationRequest{
 		OperationID:      id,
+		AttemptNumber:    1,
 		ResourceID:       "resource-1",
 		ResourceType:     domain.ResourceTypeRef{Name: "FakeResource", Version: "v1"},
 		Spec:             spec,
+		Capability:       domain.CapabilityCreate,
 		TargetGeneration: 1,
 	}
 }

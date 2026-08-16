@@ -341,6 +341,36 @@ func (s *Store) FindExpiredDispatch(_ context.Context) (application.OutboxMessag
 	return application.OutboxMessage{}, false, nil
 }
 
+func (s *Store) RenewOutbox(_ context.Context, id, token string, lease time.Duration) error {
+	message, ok := s.outbox[id]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now()
+	if message.State != application.OutboxLeased || message.LeaseToken != token || !message.LeasedUntil.After(now) {
+		return application.ErrConcurrencyConflict
+	}
+	message.LeasedUntil = now.Add(lease)
+	s.outbox[id] = message
+	return nil
+}
+
+func (s *Store) RequeueExpiredOutbox(_ context.Context, id, token string) error {
+	message, ok := s.outbox[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if message.State != application.OutboxLeased || message.LeaseToken != token || message.LeasedUntil.After(time.Now()) {
+		return application.ErrConcurrencyConflict
+	}
+	message.State = application.OutboxPending
+	message.LeaseToken = ""
+	message.LeasedUntil = time.Time{}
+	message.AvailableAt = time.Now()
+	s.outbox[id] = message
+	return nil
+}
+
 func (s *Store) CompleteOutbox(_ context.Context, id, token, reason string) error {
 	message, ok := s.outbox[id]
 	if !ok {

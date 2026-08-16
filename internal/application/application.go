@@ -503,7 +503,7 @@ func (s *Service) ObserveOperation(ctx context.Context, cmd ObserveOperationComm
 	if err != nil || isNilInterface(provider) {
 		return Result{}, fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
 	}
-	request := provisioning.ObservationRequest{OperationID: execution.OperationID, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType, Spec: execution.Spec, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle}
+	request := provisioning.ObservationRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType, Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle}
 	observation, observeErr := provider.Observe(ctx, request)
 	if observeErr != nil && !explicitTerminalObservation(observation) {
 		execution.LastFailure = normalizeExecutionFailure(failureFromError(observeErr))
@@ -1433,7 +1433,7 @@ func (s *Service) claimPendingDispatch(ctx context.Context, operationID domain.O
 
 func executionRequest(execution ProvisioningExecutionRecord) provisioning.ExecutionRequest {
 	return provisioning.ExecutionRequest{
-		OperationID: execution.OperationID, ResourceID: execution.ResourceID,
+		OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID,
 		ResourceType: execution.ResourceType, Spec: execution.Spec,
 		Capability: execution.Capability, TargetGeneration: execution.TargetGeneration,
 	}

@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has a minimal HTTP server, a health endpoint, the provisioner-neutral domain and lifecycle model, and application orchestration ports with deterministic fakes and tests. Persistence, workers, transport APIs, and real provisioner adapters remain future work.
+This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has the provisioner-neutral domain and lifecycle model, durable PostgreSQL orchestration, a fenced outbox worker, and a Pulumi Automation API adapter foundation. Public transport APIs and cloud-specific ResourceTypes remain future work.
 
 ## Product Boundary
 
@@ -70,8 +70,10 @@ The process bootstrap, core domain model, pure lifecycle semantics, provider-neu
 - `internal/server` exposes the `GET /healthz` route.
 - `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
 - `internal/lifecycle` defines deterministic create, update, and delete orchestration rules without executing infrastructure.
-- `internal/provisioning` defines the provider-neutral Submit/Observe boundary and a deterministic contract fake; it does not implement a real provider.
-- `internal/application` coordinates lifecycle, provisioning, stable private provisioner bindings, repository ports, and passive observation without implementing persistence.
+- `internal/provisioning` defines the provider-neutral Submit/Observe boundary, a deterministic contract fake, and an isolated Pulumi Automation API adapter.
+- `internal/application` coordinates lifecycle, provisioning, stable private provisioner bindings, repository ports, and passive observation.
+- `internal/persistence/postgres` implements durable state, immutable submission attempts, migrations, and a transactional outbox.
+- `internal/worker` drives lifecycle work, renews long-running Dispatch leases, and fences ambiguous recovery.
 - `internal/resourcetypes/postgresqldatabase` demonstrates a ResourceType outside the core without provisioning infrastructure.
 
-Real provider adapters, persistence implementations, provisioning execution infrastructure, background execution, and public Resource endpoints have not been implemented.
+Production Pulumi programs, cloud-specific infrastructure adapters, a continuously running worker process, and public Resource endpoints have not been implemented.

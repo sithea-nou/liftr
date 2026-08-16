@@ -82,6 +82,8 @@ type OutboxRepository interface {
 	GetOutbox(context.Context, string) (OutboxMessage, error)
 	ClaimOutbox(context.Context, string, time.Duration) (OutboxMessage, bool, error)
 	FindExpiredDispatch(context.Context) (OutboxMessage, bool, error)
+	RenewOutbox(context.Context, string, string, time.Duration) error
+	RequeueExpiredOutbox(context.Context, string, string) error
 	CompleteOutbox(context.Context, string, string, string) error
 	CompleteExpiredOutbox(context.Context, string, string, string) error
 	RetryOutbox(context.Context, string, string, time.Duration, string, int) error

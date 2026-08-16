@@ -37,6 +37,7 @@ type ProvisionerCapability struct {
 // provisioner needs. It does not contain Liftr Operation state or phase.
 type ExecutionRequest struct {
 	OperationID      domain.OperationID
+	AttemptNumber    uint64
 	ResourceID       domain.ResourceID
 	ResourceType     domain.ResourceTypeRef
 	Spec             domain.ResourceSpec
@@ -47,6 +48,9 @@ type ExecutionRequest struct {
 func (r ExecutionRequest) Validate() error {
 	if strings.TrimSpace(string(r.OperationID)) == "" {
 		return fmt.Errorf("operation ID is required")
+	}
+	if r.AttemptNumber == 0 {
+		return fmt.Errorf("attempt number must be greater than zero")
 	}
 	if strings.TrimSpace(string(r.ResourceID)) == "" {
 		return fmt.Errorf("resource ID is required")
@@ -92,9 +96,11 @@ type Submission struct {
 // is optional for declarative backends that observe by resource identity.
 type ObservationRequest struct {
 	OperationID      domain.OperationID
+	AttemptNumber    uint64
 	ResourceID       domain.ResourceID
 	ResourceType     domain.ResourceTypeRef
 	Spec             domain.ResourceSpec
+	Capability       domain.Capability
 	TargetGeneration uint64
 	Handle           *ExecutionHandle
 }
@@ -108,6 +114,12 @@ func (r ObservationRequest) Validate() error {
 	}
 	if r.TargetGeneration == 0 {
 		return fmt.Errorf("target generation must be greater than zero")
+	}
+	hasOperation := strings.TrimSpace(string(r.OperationID)) != ""
+	hasAttempt := r.AttemptNumber != 0
+	hasCapability := strings.TrimSpace(string(r.Capability)) != ""
+	if hasOperation != hasAttempt || hasOperation != hasCapability {
+		return fmt.Errorf("operation ID, attempt number, and capability must be provided together")
 	}
 	return nil
 }
