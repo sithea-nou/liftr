@@ -9,7 +9,7 @@ Liftr's domain model and lifecycle engine are intentionally independent from inf
 
 These systems do not share a universal execution workflow. Some expose planning and applying, while others accept desired state and converge asynchronously. A contract based on provider-native methods would either exclude valid implementations or leak implementation concepts into Liftr.
 
-The contract also needs to represent a ready existing resource when there is no current backend execution. An absent execution is different from an execution whose state cannot be determined.
+The contract also needs to represent a ready existing resource when there is no current backend execution. An absent execution is different from an execution whose state cannot be determined. Presence, readiness, and drift are Liftr-owned normalized facts rather than provider-owned resource status.
 
 ## Decision
 
@@ -31,11 +31,13 @@ Observe(ObservationRequest) (ExecutionObservation, error)
 
 ExecutionRequest contains only the Resource identity, ResourceTypeRef, opaque ResourceSpec, domain Capability, TargetGeneration, and OperationID used for correlation and submission idempotency. A provisioner does not receive or control the complete Liftr Operation, OperationState, OperationPhase, ResourceStatus, or Event.
 
-ExecutionObservation contains an optional Execution object alongside ResourceObservation facts. A nil Execution means no current execution exists. A non-nil Execution with state Unknown means an execution exists but its state is unknown. These meanings must not be conflated.
+ExecutionObservation contains an optional Execution object alongside domain-owned ObservedFacts, exposed through the contract as ResourceObservation. A nil Execution means no current execution exists. A non-nil Execution with state Unknown means an execution exists but its state is unknown. These meanings must not be conflated.
+
+Execution observations for one OperationID are monotonic. Succeeded and Failed are stable terminal execution states; a provisioner must not later report Running or the opposite terminal state for the same execution. A correlated observed Failed state is a terminal execution outcome even when its normalized cause is Timeout or Unavailable. In contrast, a Submit or Observe call error and an ambiguous Submit response do not prove an execution outcome and remain Unknown.
 
 ExecutionHandle is an opaque backend reference used by the provisioner to correlate subsequent observations with submitted intent. It may identify an execution, remote run, resource or reconciliation target, or a Git change. Liftr must never inspect or branch on its contents. Handles do not belong in ResourceSpec or ResourceStatus and will be persisted later at the application or provisioning-attempt boundary.
 
-Execution failures are normalized into provider-neutral kinds such as Unsupported, Unavailable, Timeout, NotFound, ExecutionFailed, and Unknown. Liftr owns the policy that maps these observations to Operation transitions, Conditions, retries, and Events.
+Execution failures are normalized into provider-neutral kinds such as Unsupported, Unavailable, Timeout, NotFound, ExecutionFailed, and Unknown. Liftr owns the policy that maps these observations to Operation transitions, Conditions, retries, and Events. Provisioners do not construct ResourceStatus or own ObservedGeneration.
 
 Planning remains an internal Liftr OperationPhase. It does not require a corresponding provider method. An adapter may perform planning internally, skip it, or use a different workflow before returning a submission result.
 
@@ -46,9 +48,9 @@ Planning remains an internal Liftr OperationPhase. It does not require a corresp
 - GitOps can publish desired intent and return an opaque change reference or no handle, then converge through Observe.
 - Synchronous providers can return Succeeded directly from Submit.
 - Liftr can distinguish no active execution from unknown execution state.
-- Ambiguous submission outcomes require stable OperationID-based retry or observation rather than blindly creating another Operation.
+- Ambiguous submission outcomes retain the stable OperationID and require observation before any same-ID resubmission can be considered. A timeout or transport error does not prove that submission failed.
 - Provider adapters translate backend-specific facts and failures but do not own Liftr lifecycle policy, generation semantics, authorization, approval policy, or Event creation.
-- Durable uniqueness, atomic one-active-operation enforcement, handle persistence, and idempotency remain future application/persistence responsibilities.
+- The application boundary records execution intent, handles, and idempotency metadata. Durable uniqueness, crash recovery, and at-least-once dispatch require Milestone 5 transactional persistence and an outbox or equivalent dispatcher.
 - The initial contract does not standardize cancellation because cancellation is not uniformly available across backend models.
 
 ## Alternatives Considered

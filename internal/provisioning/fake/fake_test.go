@@ -121,6 +121,20 @@ func TestFakeFailureAndObservationOutcomes(t *testing.T) {
 			if submission.Observation.Execution.Failure.Kind != tt.wantKind {
 				t.Fatalf("failure kind = %s, want %s", submission.Observation.Execution.Failure.Kind, tt.wantKind)
 			}
+			if tt.mode == fake.ModeFailure {
+				submission.Observation.Execution.State = provisioning.ExecutionStateSucceeded
+				submission.Observation.Execution.Failure.Reason = "Mutated"
+				observation, observeErr := provider.Observe(context.Background(), testObservationRequest("operation-failure"))
+				if observeErr != nil {
+					t.Fatalf("Observe() error = %v", observeErr)
+				}
+				if observation.Execution == nil || observation.Execution.State != provisioning.ExecutionStateFailed {
+					t.Fatalf("terminal observation = %#v, want Failed", observation.Execution)
+				}
+				if observation.Execution.Failure == nil || observation.Execution.Failure.Reason != "ExecutionFailed" {
+					t.Fatalf("terminal failure = %#v, want original failure", observation.Execution.Failure)
+				}
+			}
 		})
 	}
 

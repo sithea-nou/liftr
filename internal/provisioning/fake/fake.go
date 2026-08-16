@@ -7,7 +7,7 @@ package fake
 import (
 	"context"
 	"fmt"
-	"time"
+	"sync"
 
 	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/provisioning"
@@ -36,6 +36,7 @@ type executionRecord struct {
 }
 
 type Provisioner struct {
+	mu          sync.Mutex
 	mode        Mode
 	executions  map[domain.OperationID]*executionRecord
 	submissions map[domain.OperationID]int
@@ -60,11 +61,13 @@ func (p *Provisioner) Capabilities() []provisioning.ProvisionerCapability {
 }
 
 func (p *Provisioner) Submit(_ context.Context, request provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err := request.Validate(); err != nil {
 		return provisioning.Submission{}, err
 	}
 	if record, ok := p.executions[request.OperationID]; ok {
-		return record.submission, record.submissionErr
+		return cloneSubmission(record.submission), record.submissionErr
 	}
 	p.submissions[request.OperationID]++
 	if request.ResourceType != resourceType {
@@ -88,9 +91,8 @@ func (p *Provisioner) Submit(_ context.Context, request provisioning.ExecutionRe
 		record.submission = provisioning.Submission{Observation: p.observation(handle, provisioning.ExecutionStateAccepted, false, false, false)}
 	case ModeDeclarative:
 		record.submission = provisioning.Submission{Observation: provisioning.ExecutionObservation{
-			Execution:  &provisioning.Execution{State: provisioning.ExecutionStateAccepted, Handle: &handle},
-			Resource:   resourceObservation(false, false, false),
-			ObservedAt: time.Unix(0, 0).UTC(),
+			Execution: &provisioning.Execution{State: provisioning.ExecutionStateAccepted, Handle: &handle},
+			Resource:  resourceObservation(false, false, false),
 		}}
 	case ModeFailure:
 		record.submission = provisioning.Submission{Observation: provisioning.ExecutionObservation{
@@ -99,8 +101,7 @@ func (p *Provisioner) Submit(_ context.Context, request provisioning.ExecutionRe
 				Handle:  &handle,
 				Failure: &provisioning.ExecutionFailure{Kind: provisioning.FailureExecution, Reason: "ExecutionFailed", Message: "fake execution failed"},
 			},
-			Resource:   resourceObservation(false, false, false),
-			ObservedAt: time.Unix(0, 0).UTC(),
+			Resource: resourceObservation(false, false, false),
 		}}
 	case ModeAmbiguous:
 		record.submission = provisioning.Submission{Observation: provisioning.ExecutionObservation{
@@ -109,11 +110,10 @@ func (p *Provisioner) Submit(_ context.Context, request provisioning.ExecutionRe
 				Handle:  &handle,
 				Failure: &provisioning.ExecutionFailure{Kind: provisioning.FailureUnknown, Reason: "SubmissionUnknown", Message: "fake submission outcome is unknown"},
 			},
-			Resource:   resourceObservation(false, false, false),
-			ObservedAt: time.Unix(0, 0).UTC(),
+			Resource: resourceObservation(false, false, false),
 		}}
 		record.submissionErr = provisioning.ErrAmbiguousSubmission
-		return record.submission, record.submissionErr
+		return cloneSubmission(record.submission), record.submissionErr
 	case ModeObservationFailure:
 		record.submission = provisioning.Submission{Observation: p.observation(handle, provisioning.ExecutionStateAccepted, false, false, false)}
 	case ModeDrift:
@@ -122,10 +122,12 @@ func (p *Provisioner) Submit(_ context.Context, request provisioning.ExecutionRe
 		delete(p.executions, request.OperationID)
 		return provisioning.Submission{}, fmt.Errorf("unsupported fake mode %q", p.mode)
 	}
-	return record.submission, nil
+	return cloneSubmission(record.submission), nil
 }
 
 func (p *Provisioner) Observe(_ context.Context, request provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err := request.Validate(); err != nil {
 		return provisioning.ExecutionObservation{}, err
 	}
@@ -136,8 +138,7 @@ func (p *Provisioner) Observe(_ context.Context, request provisioning.Observatio
 	}
 	if p.mode == ModeExisting {
 		return provisioning.ExecutionObservation{
-			Resource:   resourceObservation(true, true, false),
-			ObservedAt: time.Unix(0, 0).UTC(),
+			Resource: resourceObservation(true, true, false),
 		}, nil
 	}
 
@@ -147,8 +148,7 @@ func (p *Provisioner) Observe(_ context.Context, request provisioning.Observatio
 	record, ok := p.executions[request.OperationID]
 	if !ok {
 		return provisioning.ExecutionObservation{
-			Resource:   provisioning.ResourceObservation{Presence: provisioning.ResourcePresenceNotFound, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown},
-			ObservedAt: time.Unix(0, 0).UTC(),
+			Resource: provisioning.ResourceObservation{Presence: provisioning.ResourcePresenceNotFound, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown},
 		}, nil
 	}
 	record.observations++
@@ -160,25 +160,28 @@ func (p *Provisioner) Observe(_ context.Context, request provisioning.Observatio
 		return p.observation(record.handle, provisioning.ExecutionStateSucceeded, true, false, false), nil
 	case ModeDeclarative:
 		if record.observations == 1 {
-			return provisioning.ExecutionObservation{Resource: resourceObservation(true, false, false), ObservedAt: time.Unix(0, 0).UTC()}, nil
+			return provisioning.ExecutionObservation{Resource: resourceObservation(true, false, false)}, nil
 		}
-		return provisioning.ExecutionObservation{Resource: resourceObservation(true, true, false), ObservedAt: time.Unix(0, 0).UTC()}, nil
+		return provisioning.ExecutionObservation{Resource: resourceObservation(true, true, false)}, nil
 	case ModeDrift:
-		return provisioning.ExecutionObservation{Resource: resourceObservation(true, true, true), ObservedAt: time.Unix(0, 0).UTC()}, nil
+		return provisioning.ExecutionObservation{Resource: resourceObservation(true, true, true)}, nil
+	case ModeFailure:
+		return cloneObservation(record.submission.Observation), nil
 	default:
 		return p.observation(record.handle, provisioning.ExecutionStateSucceeded, true, false, false), nil
 	}
 }
 
 func (p *Provisioner) SubmissionCount(operationID domain.OperationID) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.submissions[operationID]
 }
 
 func (p *Provisioner) observation(handle provisioning.ExecutionHandle, state provisioning.ExecutionState, ready, notFound, drifted bool) provisioning.ExecutionObservation {
 	return provisioning.ExecutionObservation{
-		Execution:  &provisioning.Execution{State: state, Handle: &handle},
-		Resource:   resourceObservation(!notFound, ready, drifted),
-		ObservedAt: time.Unix(0, 0).UTC(),
+		Execution: &provisioning.Execution{State: state, Handle: &handle},
+		Resource:  resourceObservation(!notFound, ready, drifted),
 	}
 }
 
@@ -204,8 +207,28 @@ func resourceObservation(present, ready, drifted bool) provisioning.ResourceObse
 
 func failureSubmission(kind provisioning.ExecutionFailureKind, reason, message string) provisioning.Submission {
 	return provisioning.Submission{Observation: provisioning.ExecutionObservation{
-		Execution:  &provisioning.Execution{State: provisioning.ExecutionStateFailed, Failure: &provisioning.ExecutionFailure{Kind: kind, Reason: reason, Message: message}},
-		Resource:   resourceObservation(false, false, false),
-		ObservedAt: time.Unix(0, 0).UTC(),
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateFailed, Failure: &provisioning.ExecutionFailure{Kind: kind, Reason: reason, Message: message}},
+		Resource:  resourceObservation(false, false, false),
 	}}
+}
+
+func cloneSubmission(submission provisioning.Submission) provisioning.Submission {
+	submission.Observation = cloneObservation(submission.Observation)
+	return submission
+}
+
+func cloneObservation(observation provisioning.ExecutionObservation) provisioning.ExecutionObservation {
+	if observation.Execution != nil {
+		execution := *observation.Execution
+		if execution.Handle != nil {
+			handle := *execution.Handle
+			execution.Handle = &handle
+		}
+		if execution.Failure != nil {
+			failure := *execution.Failure
+			execution.Failure = &failure
+		}
+		observation.Execution = &execution
+	}
+	return observation
 }

@@ -22,7 +22,7 @@ This file defines the architectural guardrails for contributors and coding agent
 
 ## Current Scope
 
-The repository contains the initial core domain model and pure lifecycle semantics, but no persistence, execution infrastructure, provisioner adapters, or public Resource API. Add capabilities incrementally, with tests, and avoid introducing implementation technologies before a concrete milestone requires them.
+The repository contains the core domain model, pure lifecycle semantics, provider-neutral provisioning contract, and application orchestration ports, but no persistence implementation, execution infrastructure, real provisioner adapters, or public Resource API. Add capabilities incrementally, with tests, and avoid introducing implementation technologies before a concrete milestone requires them.
 
 ## Development Expectations
 

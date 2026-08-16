@@ -158,43 +158,33 @@ func (f ExecutionFailure) Error() string {
 	return fmt.Sprintf("%s: %s: %s", f.Kind, f.Reason, f.Message)
 }
 
-type ResourcePresence string
-
-const (
-	ResourcePresencePresent  ResourcePresence = "Present"
-	ResourcePresenceNotFound ResourcePresence = "NotFound"
-	ResourcePresenceUnknown  ResourcePresence = "Unknown"
-)
-
-type ResourceReadiness string
-
-const (
-	ResourceReadinessReady    ResourceReadiness = "Ready"
-	ResourceReadinessNotReady ResourceReadiness = "NotReady"
-	ResourceReadinessUnknown  ResourceReadiness = "Unknown"
-)
-
-type ResourceDrift string
-
-const (
-	ResourceDriftInSync  ResourceDrift = "InSync"
-	ResourceDriftDrifted ResourceDrift = "Drifted"
-	ResourceDriftUnknown ResourceDrift = "Unknown"
-)
-
 // ResourceObservation contains normalized resource facts. It does not contain
 // ResourceState, ObservedGeneration, Conditions, or backend-specific data.
-type ResourceObservation struct {
-	Presence  ResourcePresence
-	Readiness ResourceReadiness
-	Drift     ResourceDrift
-}
+type ResourceObservation = domain.ObservedFacts
+
+type ResourcePresence = domain.ResourcePresence
+type ResourceReadiness = domain.ResourceReadiness
+type ResourceDrift = domain.ResourceDrift
+
+const (
+	ResourcePresencePresent   = domain.ResourcePresencePresent
+	ResourcePresenceNotFound  = domain.ResourcePresenceNotFound
+	ResourcePresenceUnknown   = domain.ResourcePresenceUnknown
+	ResourceReadinessReady    = domain.ResourceReadinessReady
+	ResourceReadinessNotReady = domain.ResourceReadinessNotReady
+	ResourceReadinessUnknown  = domain.ResourceReadinessUnknown
+	ResourceDriftInSync       = domain.ResourceDriftInSync
+	ResourceDriftDrifted      = domain.ResourceDriftDrifted
+	ResourceDriftUnknown      = domain.ResourceDriftUnknown
+)
 
 // ExecutionObservation separates current execution from resource facts. A
 // ready existing resource can therefore be observed with Execution == nil.
 type ExecutionObservation struct {
-	Execution  *Execution
-	Resource   ResourceObservation
+	Execution *Execution
+	Resource  ResourceObservation
+	// ObservedAt is an optional backend source timestamp. When absent, the
+	// application uses its caller-supplied observation receipt timestamp.
 	ObservedAt time.Time
 }
 

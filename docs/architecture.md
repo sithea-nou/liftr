@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has a minimal HTTP server, a health endpoint, and the initial provisioner-neutral domain model.
+This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has a minimal HTTP server, a health endpoint, the provisioner-neutral domain and lifecycle model, and application orchestration ports with deterministic fakes and tests. Persistence, workers, transport APIs, and real provisioner adapters remain future work.
 
 ## Product Boundary
 
@@ -64,13 +64,14 @@ The lifecycle engine applies deterministic create, update, and delete rules usin
 
 ## Current Implementation
 
-The process bootstrap, core domain model, pure lifecycle semantics, and provider-neutral provisioning contract exist:
+The process bootstrap, core domain model, pure lifecycle semantics, provider-neutral provisioning contract, and application orchestration ports exist:
 
 - `cmd/liftr-server` starts the HTTP server, emits structured logs, and performs graceful shutdown.
 - `internal/server` exposes the `GET /healthz` route.
 - `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
 - `internal/lifecycle` defines deterministic create, update, and delete orchestration rules without executing infrastructure.
 - `internal/provisioning` defines the provider-neutral Submit/Observe boundary and a deterministic contract fake; it does not implement a real provider.
+- `internal/application` coordinates lifecycle, provisioning, stable private provisioner bindings, repository ports, and passive observation without implementing persistence.
 - `internal/resourcetypes/postgresqldatabase` demonstrates a ResourceType outside the core without provisioning infrastructure.
 
-Real provider adapters, persistence, provisioning execution, background execution, and public Resource endpoints have not been implemented.
+Real provider adapters, persistence implementations, provisioning execution infrastructure, background execution, and public Resource endpoints have not been implemented.
