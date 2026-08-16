@@ -64,12 +64,13 @@ The lifecycle engine applies deterministic create, update, and delete rules usin
 
 ## Current Implementation
 
-The process bootstrap, core domain model, and pure lifecycle semantics exist:
+The process bootstrap, core domain model, pure lifecycle semantics, and provider-neutral provisioning contract exist:
 
 - `cmd/liftr-server` starts the HTTP server, emits structured logs, and performs graceful shutdown.
 - `internal/server` exposes the `GET /healthz` route.
 - `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
 - `internal/lifecycle` defines deterministic create, update, and delete orchestration rules without executing infrastructure.
+- `internal/provisioning` defines the provider-neutral Submit/Observe boundary and a deterministic contract fake; it does not implement a real provider.
 - `internal/resourcetypes/postgresqldatabase` demonstrates a ResourceType outside the core without provisioning infrastructure.
 
-Persistence, adapters, provisioning, background execution, and public Resource endpoints have not been implemented.
+Real provider adapters, persistence, provisioning execution, background execution, and public Resource endpoints have not been implemented.
