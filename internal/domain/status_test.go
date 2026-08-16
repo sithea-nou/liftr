@@ -56,6 +56,7 @@ func TestNewResourceStatus(t *testing.T) {
 		{name: "unknown before observation", resourceID: "resource-1", state: domain.ResourceStateUnknown, updatedAt: now},
 		{name: "pending", resourceID: "resource-1", state: domain.ResourceStatePending, updatedAt: now},
 		{name: "deleting", resourceID: "resource-1", generation: 2, state: domain.ResourceStateDeleting, updatedAt: now},
+		{name: "deleted", resourceID: "resource-1", generation: 2, state: domain.ResourceStateDeleted, updatedAt: now},
 		{name: "failed", resourceID: "resource-1", generation: 2, state: domain.ResourceStateFailed, updatedAt: now},
 		{name: "missing resource ID", generation: 2, state: domain.ResourceStateReady, updatedAt: now, wantErr: true},
 		{name: "invalid state", resourceID: "resource-1", generation: 2, state: "Reconciling", updatedAt: now, wantErr: true},

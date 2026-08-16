@@ -15,12 +15,13 @@ const (
 	ResourceStatePending  ResourceState = "Pending"
 	ResourceStateReady    ResourceState = "Ready"
 	ResourceStateDeleting ResourceState = "Deleting"
+	ResourceStateDeleted  ResourceState = "Deleted"
 	ResourceStateFailed   ResourceState = "Failed"
 )
 
 func (s ResourceState) validate() error {
 	switch s {
-	case ResourceStateUnknown, ResourceStatePending, ResourceStateReady, ResourceStateDeleting, ResourceStateFailed:
+	case ResourceStateUnknown, ResourceStatePending, ResourceStateReady, ResourceStateDeleting, ResourceStateDeleted, ResourceStateFailed:
 		return nil
 	default:
 		return fmt.Errorf("invalid resource state %q", s)
@@ -93,6 +94,8 @@ func (c Condition) ObservedGeneration() uint64  { return c.observedGeneration }
 func (c Condition) LastTransitionAt() time.Time { return c.lastTransitionAt }
 
 // ResourceStatus is Liftr's normalized observation of a Resource.
+// ObservedGeneration is the highest desired generation Liftr has evaluated
+// during lifecycle processing; it does not imply successful reconciliation.
 type ResourceStatus struct {
 	resourceID         ResourceID
 	observedGeneration uint64

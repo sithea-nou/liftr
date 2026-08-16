@@ -44,6 +44,9 @@ func TestNewOperation(t *testing.T) {
 			if operation.TargetGeneration() != tt.generation {
 				t.Fatalf("TargetGeneration() = %d, want %d", operation.TargetGeneration(), tt.generation)
 			}
+			if operation.Phase() != domain.OperationPhaseRequested {
+				t.Fatalf("Phase() = %s, want %s", operation.Phase(), domain.OperationPhaseRequested)
+			}
 		})
 	}
 }
@@ -61,7 +64,9 @@ func TestOperationTransitions(t *testing.T) {
 		{name: "start", transition: func(o *domain.Operation) error { return o.Start(now.Add(time.Minute)) }, wantState: domain.OperationStateRunning},
 		{name: "succeed after start", transition: func(o *domain.Operation) error {
 			_ = o.Start(now.Add(time.Minute))
-			return o.Succeed(now.Add(2 * time.Minute))
+			_ = o.AdvancePhase(domain.OperationPhasePlanning, now.Add(2*time.Minute))
+			_ = o.AdvancePhase(domain.OperationPhaseApplying, now.Add(3*time.Minute))
+			return o.Succeed(now.Add(4 * time.Minute))
 		}, wantState: domain.OperationStateSucceeded},
 		{name: "fail while pending", transition: func(o *domain.Operation) error {
 			return o.Fail("DispatchFailed", "not dispatched", now.Add(time.Minute))
@@ -87,8 +92,10 @@ func TestOperationTransitions(t *testing.T) {
 		{name: "transition before request", transition: func(o *domain.Operation) error { return o.Start(now.Add(-time.Minute)) }, wantState: domain.OperationStatePending, wantErr: true},
 		{name: "missing transition time", transition: func(o *domain.Operation) error { return o.Start(time.Time{}) }, wantState: domain.OperationStatePending, wantErr: true},
 		{name: "completion before start", transition: func(o *domain.Operation) error {
-			_ = o.Start(now.Add(2 * time.Minute))
-			return o.Succeed(now.Add(time.Minute))
+			_ = o.Start(now.Add(time.Minute))
+			_ = o.AdvancePhase(domain.OperationPhasePlanning, now.Add(2*time.Minute))
+			_ = o.AdvancePhase(domain.OperationPhaseApplying, now.Add(3*time.Minute))
+			return o.Succeed(now.Add(2 * time.Minute))
 		}, wantState: domain.OperationStateRunning, wantErr: true},
 		{name: "missing failure reason", transition: func(o *domain.Operation) error { return o.Fail("", "failed", now.Add(time.Minute)) }, wantState: domain.OperationStatePending, wantErr: true},
 	}

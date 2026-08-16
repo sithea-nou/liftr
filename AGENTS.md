@@ -22,7 +22,7 @@ This file defines the architectural guardrails for contributors and coding agent
 
 ## Current Scope
 
-The repository is only bootstrapped. Do not infer that target-architecture components already exist. Add capabilities incrementally, with tests, and avoid introducing implementation technologies before a concrete milestone requires them.
+The repository contains the initial core domain model and pure lifecycle semantics, but no persistence, execution infrastructure, provisioner adapters, or public Resource API. Add capabilities incrementally, with tests, and avoid introducing implementation technologies before a concrete milestone requires them.
 
 ## Development Expectations
 

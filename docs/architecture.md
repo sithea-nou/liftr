@@ -60,13 +60,16 @@ Long-running infrastructure work will be modeled asynchronously. A lifecycle req
 
 The initial domain model keeps Resource developer intent separate from normalized ResourceStatus observations. Operations target a specific desired-state generation. Events carry that generation as append-only audit history; they are not an event-sourcing mechanism. These decisions are recorded in [ADR-0002](adr/0002-core-domain-model.md).
 
+The lifecycle engine applies deterministic create, update, and delete rules using explicit Operation phases. Conditions report normalized facts such as Ready and Reconciled but do not control workflow transitions. Generation concurrency, capability-specific failure semantics, retry attempts, and the Deleted tombstone state are defined in [ADR-0003](adr/0003-deterministic-lifecycle-engine.md).
+
 ## Current Implementation
 
-The process bootstrap and initial core domain model exist:
+The process bootstrap, core domain model, and pure lifecycle semantics exist:
 
 - `cmd/liftr-server` starts the HTTP server, emits structured logs, and performs graceful shutdown.
 - `internal/server` exposes the `GET /healthz` route.
 - `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
+- `internal/lifecycle` defines deterministic create, update, and delete orchestration rules without executing infrastructure.
 - `internal/resourcetypes/postgresqldatabase` demonstrates a ResourceType outside the core without provisioning infrastructure.
 
-Lifecycle orchestration, persistence, adapters, provisioning, and public Resource endpoints have not been implemented.
+Persistence, adapters, provisioning, background execution, and public Resource endpoints have not been implemented.

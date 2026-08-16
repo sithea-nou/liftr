@@ -19,10 +19,11 @@ This repository is an initial bootstrap. It currently contains only:
 - Graceful shutdown on interrupt and termination signals.
 - Structured JSON logging with `log/slog`.
 - An initial provisioner-neutral core domain model.
+- A deterministic, pure lifecycle engine for create, update, and delete semantics.
 - A non-provisioning PostgreSQLDatabase example ResourceType.
 - Initial tests and continuous integration.
 
-No lifecycle orchestration, provisioner adapters, persistence, authentication, authorization, infrastructure provisioning, or public Resource endpoints have been implemented yet.
+No provisioner adapters, persistence, background execution, authentication, authorization, infrastructure provisioning, or public Resource endpoints have been implemented yet.
 
 ## Getting Started
 

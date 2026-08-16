@@ -21,6 +21,16 @@ const (
 	OperationStateCanceled  OperationState = "Canceled"
 )
 
+type OperationPhase string
+
+const (
+	OperationPhaseRequested  OperationPhase = "Requested"
+	OperationPhaseValidating OperationPhase = "Validating"
+	OperationPhasePlanning   OperationPhase = "Planning"
+	OperationPhaseApplying   OperationPhase = "Applying"
+	OperationPhaseDestroying OperationPhase = "Destroying"
+)
+
 var ErrInvalidOperationTransition = errors.New("invalid operation state transition")
 
 type OperationFailure struct {
@@ -38,8 +48,10 @@ type Operation struct {
 	capability       Capability
 	targetGeneration uint64
 	state            OperationState
+	phase            OperationPhase
 	requestedAt      time.Time
 	startedAt        time.Time
+	phaseChangedAt   time.Time
 	completedAt      time.Time
 	failure          *OperationFailure
 }
@@ -67,18 +79,31 @@ func NewOperation(id OperationID, resourceID ResourceID, capability Capability, 
 		capability:       capability,
 		targetGeneration: targetGeneration,
 		state:            OperationStatePending,
+		phase:            OperationPhaseRequested,
 		requestedAt:      requestedAt,
+		phaseChangedAt:   requestedAt,
 	}, nil
 }
 
-func (o Operation) ID() OperationID          { return o.id }
-func (o Operation) ResourceID() ResourceID   { return o.resourceID }
-func (o Operation) Capability() Capability   { return o.capability }
-func (o Operation) TargetGeneration() uint64 { return o.targetGeneration }
-func (o Operation) State() OperationState    { return o.state }
-func (o Operation) RequestedAt() time.Time   { return o.requestedAt }
-func (o Operation) StartedAt() time.Time     { return o.startedAt }
-func (o Operation) CompletedAt() time.Time   { return o.completedAt }
+func (o Operation) ID() OperationID           { return o.id }
+func (o Operation) ResourceID() ResourceID    { return o.resourceID }
+func (o Operation) Capability() Capability    { return o.capability }
+func (o Operation) TargetGeneration() uint64  { return o.targetGeneration }
+func (o Operation) State() OperationState     { return o.state }
+func (o Operation) Phase() OperationPhase     { return o.phase }
+func (o Operation) RequestedAt() time.Time    { return o.requestedAt }
+func (o Operation) StartedAt() time.Time      { return o.startedAt }
+func (o Operation) PhaseChangedAt() time.Time { return o.phaseChangedAt }
+func (o Operation) CompletedAt() time.Time    { return o.completedAt }
+
+func (o Operation) IsTerminal() bool {
+	switch o.state {
+	case OperationStateSucceeded, OperationStateFailed, OperationStateCanceled:
+		return true
+	default:
+		return false
+	}
+}
 
 func (o Operation) Failure() (OperationFailure, bool) {
 	if o.failure == nil {
@@ -88,20 +113,36 @@ func (o Operation) Failure() (OperationFailure, bool) {
 }
 
 func (o *Operation) Start(startedAt time.Time) error {
-	if o.state != OperationStatePending {
-		return fmt.Errorf("%w: cannot start operation in state %s", ErrInvalidOperationTransition, o.state)
+	return o.AdvancePhase(OperationPhaseValidating, startedAt)
+}
+
+// AdvancePhase applies a legal capability-specific execution transition.
+func (o *Operation) AdvancePhase(next OperationPhase, changedAt time.Time) error {
+	if o.IsTerminal() {
+		return fmt.Errorf("%w: cannot change phase of operation in state %s", ErrInvalidOperationTransition, o.state)
 	}
-	if err := o.validateTransitionTime(startedAt); err != nil {
+	if !o.canAdvanceTo(next) {
+		return fmt.Errorf("%w: cannot move %s operation from phase %s to %s", ErrInvalidOperationTransition, o.capability, o.phase, next)
+	}
+	if err := o.validateTransitionTime(changedAt); err != nil {
 		return err
 	}
-	o.state = OperationStateRunning
-	o.startedAt = startedAt
+
+	if o.state == OperationStatePending {
+		o.state = OperationStateRunning
+		o.startedAt = changedAt
+	}
+	o.phase = next
+	o.phaseChangedAt = changedAt
 	return nil
 }
 
 func (o *Operation) Succeed(completedAt time.Time) error {
 	if o.state != OperationStateRunning {
 		return fmt.Errorf("%w: cannot succeed operation in state %s", ErrInvalidOperationTransition, o.state)
+	}
+	if !o.isFinalPhase() {
+		return fmt.Errorf("%w: cannot succeed %s operation in phase %s", ErrInvalidOperationTransition, o.capability, o.phase)
 	}
 	return o.complete(OperationStateSucceeded, completedAt, nil)
 }
@@ -140,8 +181,38 @@ func (o Operation) validateTransitionTime(at time.Time) error {
 	if at.Before(o.requestedAt) {
 		return fmt.Errorf("operation transition cannot precede its request")
 	}
-	if !o.startedAt.IsZero() && at.Before(o.startedAt) {
-		return fmt.Errorf("operation completion cannot precede its start")
+	if at.Before(o.phaseChangedAt) {
+		return fmt.Errorf("operation transition cannot precede its current phase")
 	}
 	return nil
+}
+
+func (o Operation) canAdvanceTo(next OperationPhase) bool {
+	if o.state == OperationStatePending {
+		return o.phase == OperationPhaseRequested && next == OperationPhaseValidating
+	}
+	if o.state != OperationStateRunning {
+		return false
+	}
+
+	switch o.capability {
+	case CapabilityCreate, CapabilityUpdate:
+		return (o.phase == OperationPhaseValidating && next == OperationPhasePlanning) ||
+			(o.phase == OperationPhasePlanning && next == OperationPhaseApplying)
+	case CapabilityDelete:
+		return o.phase == OperationPhaseValidating && next == OperationPhaseDestroying
+	default:
+		return false
+	}
+}
+
+func (o Operation) isFinalPhase() bool {
+	switch o.capability {
+	case CapabilityCreate, CapabilityUpdate:
+		return o.phase == OperationPhaseApplying
+	case CapabilityDelete:
+		return o.phase == OperationPhaseDestroying
+	default:
+		return false
+	}
 }
