@@ -396,7 +396,7 @@ func TestSubmitTimeoutRemainsUnknownAndRecoveryObservesBeforeResubmit(t *testing
 	ref := mustProvisionerRef(t, "provider-timeout")
 	provider := &scriptedProvisioner{
 		submitErr: context.DeadlineExceeded,
-		observe: provisioning.ExecutionObservation{Resource: provisioning.ResourceObservation{
+		observe: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationNotFound, Resource: provisioning.ResourceObservation{
 			Presence: provisioning.ResourcePresenceUnknown, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown,
 		}},
 	}
@@ -438,7 +438,7 @@ func TestSubmitTimeoutRemainsUnknownAndRecoveryObservesBeforeResubmit(t *testing
 
 func TestUnknownAttemptObservesThenResubmitsWithSameOperationID(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-unknown-recovery")
-	provider := &scriptedProvisioner{observe: provisioning.ExecutionObservation{Resource: provisioning.ResourceObservation{
+	provider := &scriptedProvisioner{observe: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationNotFound, Resource: provisioning.ResourceObservation{
 		Presence: provisioning.ResourcePresenceUnknown, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown,
 	}}}
 	service, store, _, _ := newService(t, ref, provider)
@@ -489,7 +489,7 @@ func TestRecoveryAndResubmissionPreserveExistingHandle(t *testing.T) {
 	}
 	provider.mu.Lock()
 	provider.submitErr = nil
-	provider.observe = provisioning.ExecutionObservation{ObservedAt: applicationTime.Add(time.Minute)}
+	provider.observe = provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationNotFound, ObservedAt: applicationTime.Add(time.Minute)}
 	provider.mu.Unlock()
 	if _, err := service.RecoverOperation(context.Background(), command.OperationID, applicationTime.Add(time.Minute)); err != nil {
 		t.Fatalf("RecoverOperation() error = %v", err)
@@ -1729,6 +1729,7 @@ func newService(t *testing.T, ref application.ProvisionerRef, provider provision
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
+	service.EnableEagerExecutionForTesting()
 	return service, store, selector, resolver
 }
 

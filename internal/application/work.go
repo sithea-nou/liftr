@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package application
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/provisioning"
+)
+
+type SubmissionAttemptState string
+
+const (
+	SubmissionAttemptPending  SubmissionAttemptState = "Pending"
+	SubmissionAttemptLeased   SubmissionAttemptState = "Leased"
+	SubmissionAttemptAccepted SubmissionAttemptState = "Accepted"
+	SubmissionAttemptRejected SubmissionAttemptState = "Rejected"
+	SubmissionAttemptNotFound SubmissionAttemptState = "NotFound"
+	SubmissionAttemptUnknown  SubmissionAttemptState = "Unknown"
+)
+
+type SubmissionAttemptRecord struct {
+	OperationID     domain.OperationID
+	AttemptNumber   uint64
+	State           SubmissionAttemptState
+	DispatchMessage string
+	ClaimedAt       time.Time
+	ResolvedAt      time.Time
+	Failure         *provisioning.ExecutionFailure
+}
+
+type SubmissionAttemptRepository interface {
+	GetSubmissionAttempt(context.Context, domain.OperationID, uint64) (SubmissionAttemptRecord, error)
+	CreateSubmissionAttempt(context.Context, SubmissionAttemptRecord) error
+	SaveSubmissionAttempt(context.Context, SubmissionAttemptRecord, SubmissionAttemptState) error
+}
+
+type OutboxKind string
+
+const (
+	OutboxDrive          OutboxKind = "Drive"
+	OutboxDispatch       OutboxKind = "Dispatch"
+	OutboxObserve        OutboxKind = "Observe"
+	OutboxPassiveObserve OutboxKind = "PassiveObserve"
+)
+
+type OutboxState string
+
+const (
+	OutboxPending   OutboxState = "Pending"
+	OutboxLeased    OutboxState = "Leased"
+	OutboxCompleted OutboxState = "Completed"
+	OutboxDead      OutboxState = "Dead"
+)
+
+type OutboxMessage struct {
+	ID              string
+	Kind            OutboxKind
+	OperationID     domain.OperationID
+	ResourceID      domain.ResourceID
+	AttemptNumber   uint64
+	DedupeKey       string
+	ExpectedVersion uint64
+	Sequence        uint64
+	PayloadVersion  int
+	Payload         []byte
+	State           OutboxState
+	Delay           time.Duration
+	AvailableAt     time.Time
+	LeaseToken      string
+	LeasedUntil     time.Time
+	AttemptCount    int
+	LastError       string
+	TerminalReason  string
+}
+
+type OutboxRepository interface {
+	Enqueue(context.Context, OutboxMessage) error
+	GetOutbox(context.Context, string) (OutboxMessage, error)
+	ClaimOutbox(context.Context, string, time.Duration) (OutboxMessage, bool, error)
+	FindExpiredDispatch(context.Context) (OutboxMessage, bool, error)
+	CompleteOutbox(context.Context, string, string, string) error
+	CompleteExpiredOutbox(context.Context, string, string, string) error
+	RetryOutbox(context.Context, string, string, time.Duration, string, int) error
+}
+
+func DriveMessage(operationID domain.OperationID, expectedVersion uint64) OutboxMessage {
+	key := fmt.Sprintf("drive:%s:%d", operationID, expectedVersion)
+	return OutboxMessage{ID: key, Kind: OutboxDrive, OperationID: operationID, DedupeKey: key, ExpectedVersion: expectedVersion, PayloadVersion: 1, Payload: []byte(`{}`), State: OutboxPending}
+}
+
+func DispatchMessage(operationID domain.OperationID, attemptNumber, expectedVersion uint64) OutboxMessage {
+	key := fmt.Sprintf("dispatch:%s:%d", operationID, attemptNumber)
+	return OutboxMessage{ID: key, Kind: OutboxDispatch, OperationID: operationID, AttemptNumber: attemptNumber, DedupeKey: key, ExpectedVersion: expectedVersion, PayloadVersion: 1, Payload: []byte(`{}`), State: OutboxPending}
+}
+
+func ObserveMessage(operationID domain.OperationID, sequence, expectedVersion uint64) OutboxMessage {
+	key := fmt.Sprintf("observe:%s:%d", operationID, sequence)
+	return OutboxMessage{ID: key, Kind: OutboxObserve, OperationID: operationID, DedupeKey: key, ExpectedVersion: expectedVersion, Sequence: sequence, PayloadVersion: 1, Payload: []byte(`{}`), State: OutboxPending}
+}
+
+func PassiveObserveMessage(resourceID domain.ResourceID, sequence, expectedVersion uint64) OutboxMessage {
+	key := fmt.Sprintf("passive-observe:%s:%d", resourceID, sequence)
+	return OutboxMessage{ID: key, Kind: OutboxPassiveObserve, ResourceID: resourceID, DedupeKey: key, ExpectedVersion: expectedVersion, Sequence: sequence, PayloadVersion: 1, Payload: []byte(`{}`), State: OutboxPending}
+}

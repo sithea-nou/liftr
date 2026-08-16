@@ -122,6 +122,17 @@ const (
 	ExecutionStateUnknown   ExecutionState = "Unknown"
 )
 
+// RequestCorrelation reports whether the backend can correlate the submitted
+// OperationID or durable handle. It is independent from current execution and
+// resource presence.
+type RequestCorrelation string
+
+const (
+	RequestCorrelationFound    RequestCorrelation = "Found"
+	RequestCorrelationNotFound RequestCorrelation = "NotFound"
+	RequestCorrelationUnknown  RequestCorrelation = "Unknown"
+)
+
 // Execution is present when a current backend execution exists. A nil
 // Execution in ExecutionObservation means there is no current execution, not
 // that the execution state is unknown.
@@ -181,8 +192,9 @@ const (
 // ExecutionObservation separates current execution from resource facts. A
 // ready existing resource can therefore be observed with Execution == nil.
 type ExecutionObservation struct {
-	Execution *Execution
-	Resource  ResourceObservation
+	Correlation RequestCorrelation
+	Execution   *Execution
+	Resource    ResourceObservation
 	// ObservedAt is an optional backend source timestamp. When absent, the
 	// application uses its caller-supplied observation receipt timestamp.
 	ObservedAt time.Time

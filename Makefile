@@ -1,7 +1,7 @@
-.PHONY: build fmt fmt-check test vet verify
+.PHONY: build fmt fmt-check test test-integration vet verify
 
 build:
-	go build ./cmd/liftr-server
+	go build ./cmd/...
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
@@ -12,6 +12,10 @@ fmt-check:
 
 test:
 	go test ./...
+
+test-integration:
+	@test -n "$$LIFTR_TEST_DATABASE_URL" || (echo "LIFTR_TEST_DATABASE_URL is required." && exit 1)
+	go test ./internal/persistence/postgres -count=1
 
 vet:
 	go vet ./...

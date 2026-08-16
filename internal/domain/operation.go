@@ -56,6 +56,85 @@ type Operation struct {
 	failure          *OperationFailure
 }
 
+// OperationSnapshot is the persistence representation of an Operation.
+type OperationSnapshot struct {
+	ID               OperationID
+	ResourceID       ResourceID
+	Capability       Capability
+	TargetGeneration uint64
+	State            OperationState
+	Phase            OperationPhase
+	RequestedAt      time.Time
+	StartedAt        time.Time
+	PhaseChangedAt   time.Time
+	CompletedAt      time.Time
+	FailureReason    string
+	FailureMessage   string
+}
+
+func RestoreOperation(snapshot OperationSnapshot) (Operation, error) {
+	operation, err := NewOperation(snapshot.ID, snapshot.ResourceID, snapshot.Capability, snapshot.TargetGeneration, snapshot.RequestedAt)
+	if err != nil {
+		return Operation{}, err
+	}
+	if snapshot.PhaseChangedAt.IsZero() || snapshot.PhaseChangedAt.Before(snapshot.RequestedAt) {
+		return Operation{}, fmt.Errorf("operation phase change time is invalid")
+	}
+	if !validOperationState(snapshot.State) || !validOperationPhase(snapshot.Phase) {
+		return Operation{}, fmt.Errorf("invalid persisted operation state or phase")
+	}
+	if snapshot.State == OperationStatePending {
+		if snapshot.Phase != OperationPhaseRequested || !snapshot.StartedAt.IsZero() || !snapshot.CompletedAt.IsZero() {
+			return Operation{}, fmt.Errorf("invalid pending operation snapshot")
+		}
+	} else if snapshot.State == OperationStateRunning || snapshot.State == OperationStateSucceeded {
+		if snapshot.StartedAt.IsZero() || snapshot.StartedAt.Before(snapshot.RequestedAt) {
+			return Operation{}, fmt.Errorf("invalid operation start time")
+		}
+	} else if !snapshot.StartedAt.IsZero() && snapshot.StartedAt.Before(snapshot.RequestedAt) {
+		return Operation{}, fmt.Errorf("invalid operation start time")
+	}
+	terminal := snapshot.State == OperationStateSucceeded || snapshot.State == OperationStateFailed || snapshot.State == OperationStateCanceled
+	if terminal != !snapshot.CompletedAt.IsZero() {
+		return Operation{}, fmt.Errorf("operation completion time does not match terminal state")
+	}
+	if terminal && snapshot.CompletedAt.Before(snapshot.PhaseChangedAt) {
+		return Operation{}, fmt.Errorf("operation completion precedes its phase")
+	}
+	if snapshot.State == OperationStateFailed {
+		if strings.TrimSpace(snapshot.FailureReason) == "" {
+			return Operation{}, fmt.Errorf("failed operation reason is required")
+		}
+		operation.failure = &OperationFailure{reason: snapshot.FailureReason, message: snapshot.FailureMessage}
+	} else if snapshot.FailureReason != "" || snapshot.FailureMessage != "" {
+		return Operation{}, fmt.Errorf("non-failed operation cannot contain failure")
+	}
+	operation.state = snapshot.State
+	operation.phase = snapshot.Phase
+	operation.startedAt = snapshot.StartedAt
+	operation.phaseChangedAt = snapshot.PhaseChangedAt
+	operation.completedAt = snapshot.CompletedAt
+	return operation, nil
+}
+
+func validOperationState(state OperationState) bool {
+	switch state {
+	case OperationStatePending, OperationStateRunning, OperationStateSucceeded, OperationStateFailed, OperationStateCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
+func validOperationPhase(phase OperationPhase) bool {
+	switch phase {
+	case OperationPhaseRequested, OperationPhaseValidating, OperationPhasePlanning, OperationPhaseApplying, OperationPhaseDestroying:
+		return true
+	default:
+		return false
+	}
+}
+
 func NewOperation(id OperationID, resourceID ResourceID, capability Capability, targetGeneration uint64, requestedAt time.Time) (Operation, error) {
 	if strings.TrimSpace(string(id)) == "" {
 		return Operation{}, fmt.Errorf("operation ID is required")

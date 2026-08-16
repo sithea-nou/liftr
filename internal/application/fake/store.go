@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
@@ -23,6 +24,8 @@ type Store struct {
 	events      map[domain.EventID]domain.Event
 	executions  map[domain.OperationID]application.ProvisioningExecutionRecord
 	idempotency map[string]application.IdempotencyRecord
+	attempts    map[string]application.SubmissionAttemptRecord
+	outbox      map[string]application.OutboxMessage
 }
 
 func NewStore() *Store {
@@ -32,6 +35,8 @@ func NewStore() *Store {
 		events:      make(map[domain.EventID]domain.Event),
 		executions:  make(map[domain.OperationID]application.ProvisioningExecutionRecord),
 		idempotency: make(map[string]application.IdempotencyRecord),
+		attempts:    make(map[string]application.SubmissionAttemptRecord),
+		outbox:      make(map[string]application.OutboxMessage),
 	}
 }
 
@@ -44,6 +49,8 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 		events:      cloneMap(s.events),
 		executions:  cloneExecutions(s.executions),
 		idempotency: cloneMap(s.idempotency),
+		attempts:    cloneMap(s.attempts),
+		outbox:      cloneMap(s.outbox),
 	}
 	if err := fn(tx); err != nil {
 		return err
@@ -53,6 +60,8 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 	s.events = tx.events
 	s.executions = tx.executions
 	s.idempotency = tx.idempotency
+	s.attempts = tx.attempts
+	s.outbox = tx.outbox
 	return nil
 }
 
@@ -113,11 +122,13 @@ func cloneMap[K comparable, V any](source map[K]V) map[K]V {
 	return cloned
 }
 
-func (s *Store) Resources() application.ResourceRepository      { return s }
-func (s *Store) Operations() application.OperationRepository    { return s }
-func (s *Store) Events() application.EventRepository            { return s }
-func (s *Store) Executions() application.ExecutionRepository    { return s }
-func (s *Store) Idempotency() application.IdempotencyRepository { return s }
+func (s *Store) Resources() application.ResourceRepository                   { return s }
+func (s *Store) Operations() application.OperationRepository                 { return s }
+func (s *Store) Events() application.EventRepository                         { return s }
+func (s *Store) Executions() application.ExecutionRepository                 { return s }
+func (s *Store) Idempotency() application.IdempotencyRepository              { return s }
+func (s *Store) SubmissionAttempts() application.SubmissionAttemptRepository { return s }
+func (s *Store) Outbox() application.OutboxRepository                        { return s }
 
 func (s *Store) GetResource(_ context.Context, id domain.ResourceID) (application.ResourceRecord, error) {
 	record, ok := s.resources[id]
@@ -245,6 +256,141 @@ func (s *Store) PutIdempotency(_ context.Context, record application.Idempotency
 		return fmt.Errorf("idempotency key already exists")
 	}
 	s.idempotency[record.Key] = record
+	return nil
+}
+
+func attemptKey(operationID domain.OperationID, attempt uint64) string {
+	return fmt.Sprintf("%s:%d", operationID, attempt)
+}
+
+func (s *Store) GetSubmissionAttempt(_ context.Context, operationID domain.OperationID, attempt uint64) (application.SubmissionAttemptRecord, error) {
+	record, ok := s.attempts[attemptKey(operationID, attempt)]
+	if !ok {
+		return application.SubmissionAttemptRecord{}, ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *Store) CreateSubmissionAttempt(_ context.Context, record application.SubmissionAttemptRecord) error {
+	key := attemptKey(record.OperationID, record.AttemptNumber)
+	if _, exists := s.attempts[key]; exists {
+		return fmt.Errorf("submission attempt already exists")
+	}
+	s.attempts[key] = record
+	return nil
+}
+
+func (s *Store) SaveSubmissionAttempt(_ context.Context, record application.SubmissionAttemptRecord, expected application.SubmissionAttemptState) error {
+	key := attemptKey(record.OperationID, record.AttemptNumber)
+	current, exists := s.attempts[key]
+	if !exists {
+		return ErrNotFound
+	}
+	if current.State != expected {
+		return application.ErrConcurrencyConflict
+	}
+	s.attempts[key] = record
+	return nil
+}
+
+func (s *Store) Enqueue(_ context.Context, message application.OutboxMessage) error {
+	if _, exists := s.outbox[message.DedupeKey]; exists {
+		return nil
+	}
+	if message.State == "" {
+		message.State = application.OutboxPending
+	}
+	if message.AvailableAt.IsZero() {
+		message.AvailableAt = time.Now().Add(message.Delay)
+	}
+	s.outbox[message.ID] = message
+	return nil
+}
+
+func (s *Store) GetOutbox(_ context.Context, id string) (application.OutboxMessage, error) {
+	message, ok := s.outbox[id]
+	if !ok {
+		return application.OutboxMessage{}, ErrNotFound
+	}
+	return message, nil
+}
+
+func (s *Store) ClaimOutbox(_ context.Context, token string, lease time.Duration) (application.OutboxMessage, bool, error) {
+	now := time.Now()
+	for id, message := range s.outbox {
+		if message.State != application.OutboxPending || (!message.AvailableAt.IsZero() && message.AvailableAt.After(now)) {
+			continue
+		}
+		message.State = application.OutboxLeased
+		message.LeaseToken = token
+		message.LeasedUntil = now.Add(lease)
+		message.AttemptCount++
+		s.outbox[id] = message
+		return message, true, nil
+	}
+	return application.OutboxMessage{}, false, nil
+}
+
+func (s *Store) FindExpiredDispatch(_ context.Context) (application.OutboxMessage, bool, error) {
+	now := time.Now()
+	for _, message := range s.outbox {
+		if message.Kind == application.OutboxDispatch && message.State == application.OutboxLeased && !message.LeasedUntil.After(now) {
+			return message, true, nil
+		}
+	}
+	return application.OutboxMessage{}, false, nil
+}
+
+func (s *Store) CompleteOutbox(_ context.Context, id, token, reason string) error {
+	message, ok := s.outbox[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if message.State != application.OutboxLeased || message.LeaseToken != token || !message.LeasedUntil.After(time.Now()) {
+		return application.ErrConcurrencyConflict
+	}
+	message.State = application.OutboxCompleted
+	message.LeaseToken = ""
+	message.LeasedUntil = time.Time{}
+	message.TerminalReason = reason
+	s.outbox[id] = message
+	return nil
+}
+
+func (s *Store) CompleteExpiredOutbox(_ context.Context, id, token, reason string) error {
+	message, ok := s.outbox[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if message.State != application.OutboxLeased || message.LeaseToken != token || message.LeasedUntil.After(time.Now()) {
+		return application.ErrConcurrencyConflict
+	}
+	message.State = application.OutboxCompleted
+	message.LeaseToken = ""
+	message.LeasedUntil = time.Time{}
+	message.TerminalReason = reason
+	s.outbox[id] = message
+	return nil
+}
+
+func (s *Store) RetryOutbox(_ context.Context, id, token string, delay time.Duration, messageText string, maxAttempts int) error {
+	message, ok := s.outbox[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if message.State != application.OutboxLeased || message.LeaseToken != token || !message.LeasedUntil.After(time.Now()) {
+		return application.ErrConcurrencyConflict
+	}
+	message.LeaseToken = ""
+	message.LeasedUntil = time.Time{}
+	message.LastError = messageText
+	if message.AttemptCount >= maxAttempts {
+		message.State = application.OutboxDead
+	} else {
+		message.State = application.OutboxPending
+		message.AvailableAt = time.Now().Add(delay)
+	}
+	s.outbox[id] = message
 	return nil
 }
 

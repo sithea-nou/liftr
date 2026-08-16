@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: liftr
+      POSTGRES_PASSWORD: liftr
+      POSTGRES_DB: liftr
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U liftr -d liftr"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

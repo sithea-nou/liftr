@@ -31,6 +31,16 @@ func TestExecutionObservationDistinguishesNoExecutionFromUnknown(t *testing.T) {
 	}
 }
 
+func TestRequestCorrelationIsIndependentFromCurrentExecution(t *testing.T) {
+	observation := provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationNotFound}
+	if observation.Execution != nil {
+		t.Fatal("request lookup unexpectedly reported a current execution")
+	}
+	if observation.Correlation != provisioning.RequestCorrelationNotFound {
+		t.Fatal("request correlation evidence was not retained")
+	}
+}
+
 func TestExecutionHandleHasNoProviderSpecificSurface(t *testing.T) {
 	typ := reflect.TypeOf(provisioning.ExecutionHandle{})
 	for i := 0; i < typ.NumField(); i++ {

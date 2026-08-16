@@ -91,11 +91,13 @@ func (p *Provisioner) Submit(_ context.Context, request provisioning.ExecutionRe
 		record.submission = provisioning.Submission{Observation: p.observation(handle, provisioning.ExecutionStateAccepted, false, false, false)}
 	case ModeDeclarative:
 		record.submission = provisioning.Submission{Observation: provisioning.ExecutionObservation{
-			Execution: &provisioning.Execution{State: provisioning.ExecutionStateAccepted, Handle: &handle},
-			Resource:  resourceObservation(false, false, false),
+			Correlation: provisioning.RequestCorrelationFound,
+			Execution:   &provisioning.Execution{State: provisioning.ExecutionStateAccepted, Handle: &handle},
+			Resource:    resourceObservation(false, false, false),
 		}}
 	case ModeFailure:
 		record.submission = provisioning.Submission{Observation: provisioning.ExecutionObservation{
+			Correlation: provisioning.RequestCorrelationFound,
 			Execution: &provisioning.Execution{
 				State:   provisioning.ExecutionStateFailed,
 				Handle:  &handle,
@@ -105,6 +107,7 @@ func (p *Provisioner) Submit(_ context.Context, request provisioning.ExecutionRe
 		}}
 	case ModeAmbiguous:
 		record.submission = provisioning.Submission{Observation: provisioning.ExecutionObservation{
+			Correlation: provisioning.RequestCorrelationFound,
 			Execution: &provisioning.Execution{
 				State:   provisioning.ExecutionStateUnknown,
 				Handle:  &handle,
@@ -138,7 +141,8 @@ func (p *Provisioner) Observe(_ context.Context, request provisioning.Observatio
 	}
 	if p.mode == ModeExisting {
 		return provisioning.ExecutionObservation{
-			Resource: resourceObservation(true, true, false),
+			Correlation: provisioning.RequestCorrelationUnknown,
+			Resource:    resourceObservation(true, true, false),
 		}, nil
 	}
 
@@ -148,7 +152,8 @@ func (p *Provisioner) Observe(_ context.Context, request provisioning.Observatio
 	record, ok := p.executions[request.OperationID]
 	if !ok {
 		return provisioning.ExecutionObservation{
-			Resource: provisioning.ResourceObservation{Presence: provisioning.ResourcePresenceNotFound, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown},
+			Correlation: provisioning.RequestCorrelationNotFound,
+			Resource:    provisioning.ResourceObservation{Presence: provisioning.ResourcePresenceNotFound, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown},
 		}, nil
 	}
 	record.observations++
@@ -160,11 +165,11 @@ func (p *Provisioner) Observe(_ context.Context, request provisioning.Observatio
 		return p.observation(record.handle, provisioning.ExecutionStateSucceeded, true, false, false), nil
 	case ModeDeclarative:
 		if record.observations == 1 {
-			return provisioning.ExecutionObservation{Resource: resourceObservation(true, false, false)}, nil
+			return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound, Resource: resourceObservation(true, false, false)}, nil
 		}
-		return provisioning.ExecutionObservation{Resource: resourceObservation(true, true, false)}, nil
+		return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound, Resource: resourceObservation(true, true, false)}, nil
 	case ModeDrift:
-		return provisioning.ExecutionObservation{Resource: resourceObservation(true, true, true)}, nil
+		return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound, Resource: resourceObservation(true, true, true)}, nil
 	case ModeFailure:
 		return cloneObservation(record.submission.Observation), nil
 	default:
@@ -180,8 +185,9 @@ func (p *Provisioner) SubmissionCount(operationID domain.OperationID) int {
 
 func (p *Provisioner) observation(handle provisioning.ExecutionHandle, state provisioning.ExecutionState, ready, notFound, drifted bool) provisioning.ExecutionObservation {
 	return provisioning.ExecutionObservation{
-		Execution: &provisioning.Execution{State: state, Handle: &handle},
-		Resource:  resourceObservation(!notFound, ready, drifted),
+		Correlation: provisioning.RequestCorrelationFound,
+		Execution:   &provisioning.Execution{State: state, Handle: &handle},
+		Resource:    resourceObservation(!notFound, ready, drifted),
 	}
 }
 
@@ -207,8 +213,9 @@ func resourceObservation(present, ready, drifted bool) provisioning.ResourceObse
 
 func failureSubmission(kind provisioning.ExecutionFailureKind, reason, message string) provisioning.Submission {
 	return provisioning.Submission{Observation: provisioning.ExecutionObservation{
-		Execution: &provisioning.Execution{State: provisioning.ExecutionStateFailed, Failure: &provisioning.ExecutionFailure{Kind: kind, Reason: reason, Message: message}},
-		Resource:  resourceObservation(false, false, false),
+		Correlation: provisioning.RequestCorrelationFound,
+		Execution:   &provisioning.Execution{State: provisioning.ExecutionStateFailed, Failure: &provisioning.ExecutionFailure{Kind: kind, Reason: reason, Message: message}},
+		Resource:    resourceObservation(false, false, false),
 	}}
 }
 

@@ -53,6 +53,37 @@ type Resource struct {
 	updatedAt  time.Time
 }
 
+// ResourceSnapshot is the persistence representation of a Resource. It exists
+// to restore private domain state without exposing persistence technology.
+type ResourceSnapshot struct {
+	ID         ResourceID
+	Type       ResourceTypeRef
+	Owner      OwnerRef
+	Generation uint64
+	Spec       ResourceSpec
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+func RestoreResource(snapshot ResourceSnapshot) (Resource, error) {
+	if snapshot.Generation == 0 {
+		return Resource{}, fmt.Errorf("resource generation must be greater than zero")
+	}
+	resource, err := NewResource(snapshot.ID, snapshot.Type, snapshot.Owner, snapshot.Spec, snapshot.CreatedAt)
+	if err != nil {
+		return Resource{}, err
+	}
+	if snapshot.UpdatedAt.IsZero() {
+		return Resource{}, fmt.Errorf("resource update time is required")
+	}
+	if snapshot.UpdatedAt.Before(snapshot.CreatedAt) {
+		return Resource{}, fmt.Errorf("resource update time cannot precede creation")
+	}
+	resource.generation = snapshot.Generation
+	resource.updatedAt = snapshot.UpdatedAt
+	return resource, nil
+}
+
 func NewResource(id ResourceID, typeRef ResourceTypeRef, owner OwnerRef, spec ResourceSpec, createdAt time.Time) (Resource, error) {
 	if strings.TrimSpace(string(id)) == "" {
 		return Resource{}, fmt.Errorf("resource ID is required")
