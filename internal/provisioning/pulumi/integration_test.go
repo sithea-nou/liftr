@@ -27,7 +27,15 @@ func TestLocalWorkspaceFilesystemBackendLifecycle(t *testing.T) {
 	packageDir := filepath.Dir(packageFile)
 	source := t.TempDir()
 	programBinary := filepath.Join(source, "noop")
-	build := exec.Command("go", "build", "-o", programBinary, "./testdata/noop")
+	goExecutable, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goExecutable, err = filepath.Abs(goExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command(goExecutable, "build", "-o", programBinary, "./testdata/noop")
 	build.Dir = packageDir
 	build.Env = append(os.Environ(), "GOTOOLCHAIN=local")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -47,7 +55,7 @@ func TestLocalWorkspaceFilesystemBackendLifecycle(t *testing.T) {
 	}
 	workspaceRoot := t.TempDir()
 	backendURL := (&url.URL{Scheme: "file", Path: backend}).String()
-	config := Config{Identity: "integration-v1", PulumiRoot: pulumiRoot, BackendURL: backendURL, StackNamespace: "integration",
+	config := Config{Identity: "integration-v1", PulumiRoot: pulumiRoot, GoExecutable: goExecutable, BackendURL: backendURL, StackNamespace: "integration",
 		WorkspaceRoot: workspaceRoot, HistoryPageSize: 10, HistoryMaximumPages: 10, StaleWorkspaceAge: time.Hour,
 		Environment: func(context.Context) (map[string]string, error) {
 			return map[string]string{"PULUMI_CONFIG_PASSPHRASE": "liftr-non-secret-test-passphrase"}, nil

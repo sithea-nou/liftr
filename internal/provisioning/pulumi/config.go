@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ type Program struct {
 type Config struct {
 	Identity            string
 	PulumiRoot          string
+	GoExecutable        string
 	BackendURL          string
 	StackNamespace      string
 	WorkspaceRoot       string
@@ -72,8 +74,12 @@ func (c Config) validate() (map[programKey]Program, error) {
 	if strings.TrimSpace(c.Identity) == "" || strings.TrimSpace(c.StackNamespace) == "" {
 		return nil, fmt.Errorf("configuration identity and stack namespace are required")
 	}
-	if !filepath.IsAbs(c.PulumiRoot) || !filepath.IsAbs(c.WorkspaceRoot) {
-		return nil, fmt.Errorf("Pulumi and workspace roots must be absolute")
+	if !filepath.IsAbs(c.PulumiRoot) || !filepath.IsAbs(c.GoExecutable) || !filepath.IsAbs(c.WorkspaceRoot) {
+		return nil, fmt.Errorf("Pulumi, Go, and workspace paths must be absolute")
+	}
+	goInfo, err := os.Stat(c.GoExecutable)
+	if err != nil || !goInfo.Mode().IsRegular() || !isExecutable(goInfo.Mode()) {
+		return nil, fmt.Errorf("preinstalled Go runtime is unavailable or not executable")
 	}
 	backend, err := url.Parse(c.BackendURL)
 	if err != nil || backend.Scheme != "file" || backend.Host != "" || !filepath.IsAbs(backend.Path) || backend.User != nil || backend.RawQuery != "" || backend.Fragment != "" {
@@ -110,7 +116,7 @@ func (c Config) validate() (map[programKey]Program, error) {
 			return nil, fmt.Errorf("v0.1 requires a source-relative prebuilt Go program")
 		}
 		binaryInfo, err := os.Stat(filepath.Join(program.SourceDir, binary))
-		if err != nil || !binaryInfo.Mode().IsRegular() || binaryInfo.Mode()&0o100 == 0 {
+		if err != nil || !binaryInfo.Mode().IsRegular() || !isExecutable(binaryInfo.Mode()) {
 			return nil, fmt.Errorf("prebuilt Go program is unavailable or not executable")
 		}
 		digest, err := SourceDigest(program.SourceDir)
@@ -135,6 +141,10 @@ func (c Config) validate() (map[programKey]Program, error) {
 		}
 	}
 	return programs, nil
+}
+
+func isExecutable(mode os.FileMode) bool {
+	return runtime.GOOS == "windows" || mode.Perm()&0o111 != 0
 }
 
 func SourceDigest(root string) (string, error) {

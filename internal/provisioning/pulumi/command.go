@@ -19,16 +19,23 @@ import (
 )
 
 type pinnedCommand struct {
-	path    string
-	version semver.Version
+	path         string
+	goExecutable string
+	version      semver.Version
 }
 
-func newPinnedCommand(root string) (pinnedCommand, error) {
+var minimumGoVersion = semver.MustParse("1.25.11")
+
+func newPinnedCommand(root, goExecutable string) (pinnedCommand, error) {
 	path := filepath.Join(root, "bin", "pulumi")
 	if runtime.GOOS == "windows" {
 		path += ".exe"
 	}
 	version := semver.MustParse(CLIVersion)
+	goName := filepath.Base(goExecutable)
+	if goName != "go" && goName != "go.exe" {
+		return pinnedCommand{}, fmt.Errorf("configured Go runtime executable must be named go")
+	}
 	command := exec.Command(path, "version")
 	command.Env = []string{"PATH=" + filepath.Dir(path), "PULUMI_SKIP_UPDATE_CHECK=true"}
 	output, err := command.Output()
@@ -39,7 +46,21 @@ func newPinnedCommand(root string) (pinnedCommand, error) {
 	if err != nil || !actual.EQ(version) {
 		return pinnedCommand{}, fmt.Errorf("pinned Pulumi CLI version mismatch")
 	}
-	return pinnedCommand{path: path, version: version}, nil
+	goVersionCommand := exec.Command(goExecutable, "version")
+	goVersionCommand.Env = []string{"PATH=" + filepath.Dir(goExecutable)}
+	goVersionOutput, err := goVersionCommand.Output()
+	if err != nil {
+		return pinnedCommand{}, fmt.Errorf("validate preinstalled Go runtime")
+	}
+	fields := strings.Fields(string(goVersionOutput))
+	if len(fields) < 3 || fields[0] != "go" || fields[1] != "version" || !strings.HasPrefix(fields[2], "go") {
+		return pinnedCommand{}, fmt.Errorf("parse preinstalled Go runtime version")
+	}
+	goVersion, err := semver.ParseTolerant(strings.TrimPrefix(fields[2], "go"))
+	if err != nil || goVersion.LT(minimumGoVersion) {
+		return pinnedCommand{}, fmt.Errorf("preinstalled Go runtime version is unsupported")
+	}
+	return pinnedCommand{path: path, goExecutable: goExecutable, version: version}, nil
 }
 
 func (p pinnedCommand) Version() semver.Version { return p.version }
@@ -51,7 +72,7 @@ func (p pinnedCommand) Run(ctx context.Context, workDir string, stdin io.Reader,
 	command := exec.CommandContext(ctx, p.path, args...)
 	command.Dir = workDir
 	command.Stdin = stdin
-	command.Env = sanitizedEnvironment(p.path, additionalEnvironment)
+	command.Env = sanitizedEnvironment(p.path, p.goExecutable, additionalEnvironment)
 	configureProcess(command)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -69,10 +90,13 @@ func (p pinnedCommand) Run(ctx context.Context, workDir string, stdin io.Reader,
 	return stdout.String(), stderr.String(), exitCode, err
 }
 
-func sanitizedEnvironment(pulumiPath string, additional []string) []string {
+func sanitizedEnvironment(pulumiPath, goExecutable string, additional []string) []string {
 	values := map[string]string{
+		"GOPROXY":                  "off",
+		"GOSUMDB":                  "off",
+		"GOTOOLCHAIN":              "local",
 		"NO_COLOR":                 "1",
-		"PATH":                     filepath.Dir(pulumiPath),
+		"PATH":                     filepath.Dir(goExecutable) + string(os.PathListSeparator) + filepath.Dir(pulumiPath),
 		"PULUMI_AUTOMATION_API":    "true",
 		"PULUMI_SKIP_UPDATE_CHECK": "true",
 	}
@@ -87,6 +111,10 @@ func sanitizedEnvironment(pulumiPath string, additional []string) []string {
 			values[key] = value
 		}
 	}
+	values["GOPROXY"] = "off"
+	values["GOSUMDB"] = "off"
+	values["GOTOOLCHAIN"] = "local"
+	values["PATH"] = filepath.Dir(goExecutable) + string(os.PathListSeparator) + filepath.Dir(pulumiPath)
 	values["USER"] = "liftr"
 	values["LOGNAME"] = "liftr"
 	if home := values["PULUMI_HOME"]; home != "" {

@@ -28,7 +28,7 @@ The SDK module requires Go 1.25.11, so Liftr pins that Go language version as pa
 
 Adapter v0.1 supports only a platform-owned `file://` backend. It does not log in to, depend on, or add tags in Pulumi Cloud. The Pulumi v3.257.0 `PULUMI_DIY_BACKEND_IGNORE_DEPRECATION_ERROR` compatibility opt-in and legacy-warning suppression are confined to the constructed child-process environment; they do not select the legacy layout. Backend storage is durable platform infrastructure and is not developer-configurable.
 
-Runtime images contain the pinned CLI, Go dependencies, and every permitted plugin in advance. Runtime module downloads, toolchain downloads, and automatic plugin acquisition or installation are disabled. Missing dependencies or plugins fail preflight rather than causing network access.
+Runtime images contain the pinned CLI, a private adapter-configured `go` executable, Go dependencies, and every permitted plugin in advance. The adapter validates that executable and adds only its directory followed by the Pulumi CLI directory to the child `PATH`, because Pulumi's Go language host performs package discovery even for a prebuilt program. It forces `GOTOOLCHAIN=local`, `GOPROXY=off`, and `GOSUMDB=off`. Runtime module downloads, toolchain downloads, and automatic plugin acquisition or installation are disabled. Missing dependencies or plugins fail preflight rather than causing network access.
 
 ### Private Configuration and Trusted Source
 

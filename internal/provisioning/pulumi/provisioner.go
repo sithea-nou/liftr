@@ -33,7 +33,7 @@ func New(config Config) (*Provisioner, error) {
 	if err != nil {
 		return nil, err
 	}
-	factory, err := newLocalFactory(config.PulumiRoot)
+	factory, err := newLocalFactory(config.PulumiRoot, config.GoExecutable)
 	if err != nil {
 		return nil, err
 	}

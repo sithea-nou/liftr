@@ -308,7 +308,11 @@ func testConfig(t *testing.T) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{Identity: "test-v1", PulumiRoot: filepath.Join(t.TempDir(), "pulumi"), BackendURL: "file://" + filepath.Join(t.TempDir(), "state"),
+	goExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Config{Identity: "test-v1", PulumiRoot: filepath.Join(t.TempDir(), "pulumi"), GoExecutable: goExecutable, BackendURL: "file://" + filepath.Join(t.TempDir(), "state"),
 		StackNamespace: "test", WorkspaceRoot: t.TempDir(), HistoryPageSize: 10, HistoryMaximumPages: 3, StaleWorkspaceAge: time.Hour,
 		Programs: []Program{{ResourceType: testResourceType, Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
 			ProjectName: "noop", SourceDir: source, SourceDigest: digest, SecretInputsUnsupported: true,

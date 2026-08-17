@@ -48,8 +48,8 @@ type automationFactory interface {
 
 type localFactory struct{ command auto.PulumiCommand }
 
-func newLocalFactory(root string) (automationFactory, error) {
-	command, err := newPinnedCommand(root)
+func newLocalFactory(root, goExecutable string) (automationFactory, error) {
+	command, err := newPinnedCommand(root, goExecutable)
 	if err != nil {
 		return nil, err
 	}
