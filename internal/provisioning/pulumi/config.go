@@ -27,6 +27,14 @@ const (
 	inputEnvironment = "LIFTR_INPUT_FILE"
 )
 
+// StackNamingVersion names the algorithm that derives deterministic stack
+// identity. It is immutable adapter configuration; only v1 exists.
+type StackNamingVersion string
+
+const (
+	StackNamingVersionV1 StackNamingVersion = "v1"
+)
+
 type EnvironmentProvider func(context.Context) (map[string]string, error)
 
 type Input struct {
@@ -53,6 +61,7 @@ type Program struct {
 
 type Config struct {
 	Identity            string
+	StackNamingVersion  StackNamingVersion
 	PulumiRoot          string
 	GoExecutable        string
 	BackendURL          string
@@ -65,14 +74,15 @@ type Config struct {
 	StaleWorkspaceAge   time.Duration
 }
 
-type programKey struct {
-	resourceType domain.ResourceTypeRef
-	capability   domain.Capability
-}
-
-func (c Config) validate() (map[programKey]Program, error) {
+func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 	if strings.TrimSpace(c.Identity) == "" || strings.TrimSpace(c.StackNamespace) == "" {
 		return nil, fmt.Errorf("configuration identity and stack namespace are required")
+	}
+	if strings.TrimSpace(string(c.StackNamingVersion)) == "" {
+		return nil, fmt.Errorf("stack naming version is required")
+	}
+	if c.StackNamingVersion != StackNamingVersionV1 {
+		return nil, fmt.Errorf("unsupported stack naming version %q", c.StackNamingVersion)
 	}
 	if !filepath.IsAbs(c.PulumiRoot) || !filepath.IsAbs(c.GoExecutable) || !filepath.IsAbs(c.WorkspaceRoot) {
 		return nil, fmt.Errorf("Pulumi, Go, and workspace paths must be absolute")
@@ -94,7 +104,7 @@ func (c Config) validate() (map[programKey]Program, error) {
 	if len(c.Programs) == 0 {
 		return nil, fmt.Errorf("at least one Pulumi program is required")
 	}
-	programs := make(map[programKey]Program)
+	programs := make(map[domain.ResourceTypeRef]Program)
 	for _, program := range c.Programs {
 		if strings.TrimSpace(program.ResourceType.Name) == "" || strings.TrimSpace(program.ResourceType.Version) == "" ||
 			strings.TrimSpace(program.ProjectName) == "" || !filepath.IsAbs(program.SourceDir) || program.EncodeInput == nil {
@@ -129,16 +139,20 @@ func (c Config) validate() (map[programKey]Program, error) {
 		if len(program.Capabilities) == 0 {
 			return nil, fmt.Errorf("Pulumi program capabilities are required")
 		}
+		seen := make(map[domain.Capability]struct{}, len(program.Capabilities))
 		for _, capability := range program.Capabilities {
 			if capability != domain.CapabilityCreate && capability != domain.CapabilityUpdate && capability != domain.CapabilityDelete {
 				return nil, fmt.Errorf("unsupported Pulumi program capability")
 			}
-			key := programKey{resourceType: program.ResourceType, capability: capability}
-			if _, exists := programs[key]; exists {
-				return nil, fmt.Errorf("duplicate Pulumi program registration")
+			if _, exists := seen[capability]; exists {
+				return nil, fmt.Errorf("Pulumi program capability is duplicated")
 			}
-			programs[key] = program
+			seen[capability] = struct{}{}
 		}
+		if _, exists := programs[program.ResourceType]; exists {
+			return nil, fmt.Errorf("duplicate Pulumi program registration for resource type %s/%s", program.ResourceType.Name, program.ResourceType.Version)
+		}
+		programs[program.ResourceType] = program
 	}
 	return programs, nil
 }

@@ -32,7 +32,7 @@ Runtime images contain the pinned CLI, a private adapter-configured `go` executa
 
 ### Private Configuration and Trusted Source
 
-Pulumi adapter registrations are private, immutable configuration keyed by `ProvisionerRef`. A registration contains the trusted source identity and digest, Pulumi project identity, backend root, deterministic stack-naming version, supported ResourceType and Capability pairs, and runtime requirements. Changing any of these values requires a new `ProvisionerRef`; existing Resources remain resolvable through their original binding. Neither the reference nor its configuration enters ResourceSpec or a developer-facing Resource representation.
+Pulumi adapter registrations are private, immutable configuration keyed by `ProvisionerRef`. A registration contains the trusted source identity and digest, Pulumi project identity, backend root, an explicit immutable stack-naming version, one Pulumi program registration per `ResourceTypeRef`, and runtime requirements. Each program registration declares the `ResourceTypeRef` and the capabilities it supports in a single entry; create, update, and delete are capabilities inside that one registration, never separate registrations. Configuring more than one program for the same `ResourceTypeRef` is rejected. A request resolves its program by `ResourceTypeRef` and then verifies that the program supports the requested capability; an unsupported capability is rejected before any Pulumi invocation. Changing any of these values requires a new `ProvisionerRef`; existing Resources remain resolvable through their original binding. Neither the reference nor its configuration enters ResourceSpec or a developer-facing Resource representation.
 
 Only trusted, platform-managed local Go Pulumi source is supported. Each adapter call copies the registered source into a fresh isolated working directory and uses that copy with `LocalWorkspace`; it does not execute from the registered source directory. The copy is verified against the immutable registration and removed after the call. An advisory lock protects every live workspace from startup cleanup; abandoned unlocked workspaces are removed only after the configured age. User-provided source, shared mutable work directories, inline programs, and source fetched at runtime are not supported.
 
@@ -40,7 +40,7 @@ ResourceSpec has no secret annotations or secret-safe traversal contract. Every 
 
 ### Stack Identity and Retention
 
-Each Liftr Resource has exactly one deterministic Pulumi stack under its immutable `ProvisionerRef`. A private, versioned naming function derives the project and collision-resistant stack name from the registration and ResourceID. OperationID, generation, capability, and attempt number are not part of stack identity. Create, update, retry, observation, and delete therefore address the same stack.
+Each Liftr Resource has exactly one deterministic Pulumi stack under its immutable `ProvisionerRef`. A private, versioned naming function derives the project and collision-resistant stack name from the registration and ResourceID. The naming version is an explicit immutable `StackNamingVersion` configuration value; only `v1` is supported and any other value fails configuration validation before Pulumi is invoked. The `v1` algorithm is the original stack identity contract and must be reproduced byte-for-byte; the version string is never added to the `v1` hash input. OperationID, generation, capability, and attempt number are not part of stack identity. Create, update, retry, observation, and delete therefore address the same stack.
 
 Stacks and their update history are retained. Successful delete invokes `Destroy` but does not remove the stack. Liftr does not call `RemoveStack` or otherwise prune the history needed for correlation. Retention also permits a later create for a newer Resource generation to reuse the deterministic stack after the Deleted tombstone semantics defined by ADR-0003.
 
@@ -117,6 +117,8 @@ The adapter invokes the pinned CLI through Automation API's `PulumiCommand` boun
 ## Scope Exclusions
 
 Adapter v0.1 does not add Git checkout or GitOps workflows, `RemoteWorkspace`, Pulumi Deployments, Pulumi Cloud backends or Cloud-specific features, stack tags, provider or cloud resource types, runtime provider installation, secret-store or encryption design, secret-aware ResourceSpec support, readiness evaluation, drift detection, or provider-specific resource-presence inference. It also does not add Refresh, raw Pulumi artifact APIs, stack removal, cancellation, or automated resolution of indefinitely Unknown attempts.
+
+Cancellation semantics are excluded from adapter v0.1 and are not a cross-platform guarantee. The child process is configured per-platform only as required for safe lifecycle handling; on Unix the child is placed in its own process group and cancellation sends SIGINT to that group, while Windows performs no process-tree cancellation. Cross-platform process-tree cancellation (for example Windows Job Objects) is deferred hardening and is not implemented.
 
 ## Alternatives Considered
 

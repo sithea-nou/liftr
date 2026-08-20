@@ -312,7 +312,7 @@ func testConfig(t *testing.T) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{Identity: "test-v1", PulumiRoot: filepath.Join(t.TempDir(), "pulumi"), GoExecutable: goExecutable, BackendURL: "file://" + filepath.Join(t.TempDir(), "state"),
+	return Config{Identity: "test-v1", StackNamingVersion: StackNamingVersionV1, PulumiRoot: filepath.Join(t.TempDir(), "pulumi"), GoExecutable: goExecutable, BackendURL: "file://" + filepath.Join(t.TempDir(), "state"),
 		StackNamespace: "test", WorkspaceRoot: t.TempDir(), HistoryPageSize: 10, HistoryMaximumPages: 3, StaleWorkspaceAge: time.Hour,
 		Programs: []Program{{ResourceType: testResourceType, Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
 			ProjectName: "noop", SourceDir: source, SourceDigest: digest, SecretInputsUnsupported: true,
@@ -362,14 +362,17 @@ type fakeWorkspace struct {
 	stack       automationStack
 	selectErr   error
 	createCalls int
+	stackNames  []string
 }
 
-func (w *fakeWorkspace) SelectStack(context.Context, string) (automationStack, error) {
+func (w *fakeWorkspace) SelectStack(_ context.Context, name string) (automationStack, error) {
+	w.stackNames = append(w.stackNames, name)
 	return w.stack, w.selectErr
 }
 
-func (w *fakeWorkspace) CreateStack(context.Context, string) (automationStack, error) {
+func (w *fakeWorkspace) CreateStack(_ context.Context, name string) (automationStack, error) {
 	w.createCalls++
+	w.stackNames = append(w.stackNames, name)
 	return w.stack, nil
 }
 

@@ -55,7 +55,7 @@ func TestLocalWorkspaceFilesystemBackendLifecycle(t *testing.T) {
 	}
 	workspaceRoot := t.TempDir()
 	backendURL := (&url.URL{Scheme: "file", Path: backend}).String()
-	config := Config{Identity: "integration-v1", PulumiRoot: pulumiRoot, GoExecutable: goExecutable, BackendURL: backendURL, StackNamespace: "integration",
+	config := Config{Identity: "integration-v1", StackNamingVersion: StackNamingVersionV1, PulumiRoot: pulumiRoot, GoExecutable: goExecutable, BackendURL: backendURL, StackNamespace: "integration",
 		WorkspaceRoot: workspaceRoot, HistoryPageSize: 10, HistoryMaximumPages: 10, StaleWorkspaceAge: time.Hour,
 		Environment: func(context.Context) (map[string]string, error) {
 			return map[string]string{"PULUMI_CONFIG_PASSPHRASE": "liftr-non-secret-test-passphrase"}, nil

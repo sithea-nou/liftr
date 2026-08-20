@@ -19,7 +19,7 @@ import (
 
 type Provisioner struct {
 	config   Config
-	programs map[programKey]Program
+	programs map[domain.ResourceTypeRef]Program
 	factory  automationFactory
 }
 
@@ -56,8 +56,10 @@ func newProvisioner(config Config, factory automationFactory) (*Provisioner, err
 
 func (p *Provisioner) Capabilities() []provisioning.ProvisionerCapability {
 	result := make([]provisioning.ProvisionerCapability, 0, len(p.programs))
-	for key := range p.programs {
-		result = append(result, provisioning.ProvisionerCapability{ResourceType: key.resourceType, Capability: key.capability})
+	for resourceType, program := range p.programs {
+		for _, capability := range program.Capabilities {
+			result = append(result, provisioning.ProvisionerCapability{ResourceType: resourceType, Capability: capability})
+		}
 	}
 	sortCapabilities(result)
 	return result
@@ -67,8 +69,8 @@ func (p *Provisioner) Submit(ctx context.Context, request provisioning.Execution
 	if err := request.Validate(); err != nil {
 		return failedSubmission(provisioning.FailureInvalidRequest, "InvalidExecutionRequest"), nil
 	}
-	program, ok := p.programs[programKey{resourceType: request.ResourceType, capability: request.Capability}]
-	if !ok {
+	program, ok := p.programs[request.ResourceType]
+	if !ok || !supportsCapability(program.Capabilities, request.Capability) {
 		return failedSubmission(provisioning.FailureUnsupported, "CapabilityUnsupported"), nil
 	}
 	encoded, err := program.EncodeInput(Input{OperationID: request.OperationID, AttemptNumber: request.AttemptNumber, ResourceID: request.ResourceID,
@@ -139,8 +141,8 @@ func (p *Provisioner) Observe(ctx context.Context, request provisioning.Observat
 	if request.OperationID == "" {
 		return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationUnknown, Resource: unknownFacts()}, nil
 	}
-	program, ok := p.programs[programKey{resourceType: request.ResourceType, capability: request.Capability}]
-	if !ok {
+	program, ok := p.programs[request.ResourceType]
+	if !ok || !supportsCapability(program.Capabilities, request.Capability) {
 		return provisioning.ExecutionObservation{}, provisioning.ObservationError{Failure: provisioning.ExecutionFailure{Kind: provisioning.FailureUnsupported, Reason: "CapabilityUnsupported", Message: "provisioning capability is unsupported"}}
 	}
 	encoded, err := program.EncodeInput(Input{OperationID: request.OperationID, AttemptNumber: request.AttemptNumber, ResourceID: request.ResourceID,
@@ -239,10 +241,28 @@ func isTruthy(value string) bool {
 }
 
 func (p *Provisioner) stackName(project string, resourceID domain.ResourceID) string {
-	namespace := sha256.Sum256([]byte(p.config.Identity + "\x00" + p.config.StackNamespace))
+	switch p.config.StackNamingVersion {
+	case StackNamingVersionV1:
+		return stackNameV1(p.config.Identity, p.config.StackNamespace, project, resourceID)
+	default:
+		panic("unreachable: stack naming version is validated before execution")
+	}
+}
+
+func stackNameV1(identity, stackNamespace, project string, resourceID domain.ResourceID) string {
+	namespace := sha256.Sum256([]byte(identity + "\x00" + stackNamespace))
 	resource := sha256.Sum256([]byte(resourceID))
 	name := fmt.Sprintf("liftr-%x-%x", namespace[:6], resource[:20])
 	return auto.FullyQualifiedStackName("organization", project, name)
+}
+
+func supportsCapability(capabilities []domain.Capability, capability domain.Capability) bool {
+	for _, supported := range capabilities {
+		if supported == capability {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Provisioner) handle(operationID domain.OperationID, attempt uint64, resourceID domain.ResourceID) provisioning.ExecutionHandle {

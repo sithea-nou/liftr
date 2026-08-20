@@ -10,15 +10,15 @@ Liftr aims to expose a stable, developer-facing Resource API while allowing plat
 
 The target architecture is described in [docs/architecture.md](docs/architecture.md). Architectural decisions are recorded in [docs/adr](docs/adr).
 
-## What Exists Today
+## Current Implementation
 
-This repository is an initial bootstrap. It currently contains only:
+Liftr is in early development. The repository currently implements:
 
 - A Go HTTP server built with the standard library.
 - A `GET /healthz` endpoint.
 - Graceful shutdown on interrupt and termination signals.
 - Structured JSON logging with `log/slog`.
-- An initial provisioner-neutral core domain model.
+- A provisioner-neutral core domain model.
 - A deterministic, pure lifecycle engine for create, update, and delete semantics.
 - A provider-neutral provisioning contract with a deterministic fake.
 - An application/orchestration layer with persistence ports and stable private provisioner bindings.
@@ -28,7 +28,9 @@ This repository is an initial bootstrap. It currently contains only:
 - A non-provisioning PostgreSQLDatabase example ResourceType.
 - Initial tests and continuous integration.
 
-No cloud-specific ResourceTypes, production Pulumi programs, authentication, authorization, or public Resource endpoints have been implemented yet.
+## Future Direction
+
+No cloud-specific ResourceTypes, production Pulumi programs, authentication, authorization, or public Resource endpoints have been implemented yet. The target architecture is described in [docs/architecture.md](docs/architecture.md), and the decisions that shape future work are recorded in [docs/adr](docs/adr).
 
 ## Getting Started
 
