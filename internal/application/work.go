@@ -86,7 +86,12 @@ type OutboxRepository interface {
 	RequeueExpiredOutbox(context.Context, string, string) error
 	CompleteOutbox(context.Context, string, string, string) error
 	CompleteExpiredOutbox(context.Context, string, string, string) error
-	RetryOutbox(context.Context, string, string, time.Duration, string, int) error
+	// RetryOutbox reschedules retryable work. It never quarantines: work that
+	// exhausts its backoff window keeps retrying at the bounded backoff cap.
+	RetryOutbox(context.Context, string, string, time.Duration, string) error
+	// DeadOutbox quarantines work that is provably invalid and cannot succeed
+	// on retry. It is the only path that moves work to the Dead state.
+	DeadOutbox(context.Context, string, string, string) error
 }
 
 func DriveMessage(operationID domain.OperationID, expectedVersion uint64) OutboxMessage {

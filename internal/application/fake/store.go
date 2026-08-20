@@ -15,6 +15,9 @@ import (
 	"github.com/sithea-nou/liftr/internal/provisioning"
 )
 
+// ErrNotFound reports a missing record from non-repository fakes (catalog,
+// resolver). Repository fakes return the application sentinel errors that the
+// PostgreSQL store surfaces.
 var ErrNotFound = errors.New("fake record not found")
 
 type Store struct {
@@ -133,7 +136,7 @@ func (s *Store) Outbox() application.OutboxRepository                        { r
 func (s *Store) GetResource(_ context.Context, id domain.ResourceID) (application.ResourceRecord, error) {
 	record, ok := s.resources[id]
 	if !ok {
-		return application.ResourceRecord{}, ErrNotFound
+		return application.ResourceRecord{}, application.ErrResourceNotFound
 	}
 	return record, nil
 }
@@ -152,7 +155,7 @@ func (s *Store) CreateResource(_ context.Context, record application.ResourceRec
 func (s *Store) SaveResource(_ context.Context, record application.ResourceRecord, expectedVersion uint64) error {
 	current, ok := s.resources[record.Resource.ID()]
 	if !ok {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	if current.Version != expectedVersion {
 		return application.ErrConcurrencyConflict
@@ -165,7 +168,7 @@ func (s *Store) SaveResource(_ context.Context, record application.ResourceRecor
 func (s *Store) GetOperation(_ context.Context, id domain.OperationID) (application.OperationRecord, error) {
 	record, ok := s.operations[id]
 	if !ok {
-		return application.OperationRecord{}, ErrNotFound
+		return application.OperationRecord{}, application.ErrResourceNotFound
 	}
 	return record, nil
 }
@@ -193,7 +196,7 @@ func (s *Store) CreateOperation(_ context.Context, record application.OperationR
 func (s *Store) SaveOperation(_ context.Context, record application.OperationRecord, expectedVersion uint64) error {
 	current, ok := s.operations[record.Operation.ID()]
 	if !ok {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	if current.Version != expectedVersion {
 		return application.ErrConcurrencyConflict
@@ -211,10 +214,18 @@ func (s *Store) Append(_ context.Context, event domain.Event) error {
 	return nil
 }
 
+func (s *Store) GetEvent(_ context.Context, id domain.EventID) (domain.Event, error) {
+	event, ok := s.events[id]
+	if !ok {
+		return domain.Event{}, ErrNotFound
+	}
+	return event, nil
+}
+
 func (s *Store) GetExecution(_ context.Context, id domain.OperationID) (application.ProvisioningExecutionRecord, error) {
 	record, ok := s.executions[id]
 	if !ok {
-		return application.ProvisioningExecutionRecord{}, ErrNotFound
+		return application.ProvisioningExecutionRecord{}, application.ErrResourceNotFound
 	}
 	return cloneExecution(record), nil
 }
@@ -233,7 +244,7 @@ func (s *Store) CreateExecution(_ context.Context, record application.Provisioni
 func (s *Store) SaveExecution(_ context.Context, record application.ProvisioningExecutionRecord, expectedVersion uint64) error {
 	current, ok := s.executions[record.OperationID]
 	if !ok {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	if current.Version != expectedVersion {
 		return application.ErrConcurrencyConflict
@@ -266,7 +277,7 @@ func attemptKey(operationID domain.OperationID, attempt uint64) string {
 func (s *Store) GetSubmissionAttempt(_ context.Context, operationID domain.OperationID, attempt uint64) (application.SubmissionAttemptRecord, error) {
 	record, ok := s.attempts[attemptKey(operationID, attempt)]
 	if !ok {
-		return application.SubmissionAttemptRecord{}, ErrNotFound
+		return application.SubmissionAttemptRecord{}, application.ErrResourceNotFound
 	}
 	return record, nil
 }
@@ -284,7 +295,7 @@ func (s *Store) SaveSubmissionAttempt(_ context.Context, record application.Subm
 	key := attemptKey(record.OperationID, record.AttemptNumber)
 	current, exists := s.attempts[key]
 	if !exists {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	if current.State != expected {
 		return application.ErrConcurrencyConflict
@@ -310,7 +321,7 @@ func (s *Store) Enqueue(_ context.Context, message application.OutboxMessage) er
 func (s *Store) GetOutbox(_ context.Context, id string) (application.OutboxMessage, error) {
 	message, ok := s.outbox[id]
 	if !ok {
-		return application.OutboxMessage{}, ErrNotFound
+		return application.OutboxMessage{}, application.ErrResourceNotFound
 	}
 	return message, nil
 }
@@ -344,7 +355,7 @@ func (s *Store) FindExpiredDispatch(_ context.Context) (application.OutboxMessag
 func (s *Store) RenewOutbox(_ context.Context, id, token string, lease time.Duration) error {
 	message, ok := s.outbox[id]
 	if !ok {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	now := time.Now()
 	if message.State != application.OutboxLeased || message.LeaseToken != token || !message.LeasedUntil.After(now) {
@@ -358,7 +369,7 @@ func (s *Store) RenewOutbox(_ context.Context, id, token string, lease time.Dura
 func (s *Store) RequeueExpiredOutbox(_ context.Context, id, token string) error {
 	message, ok := s.outbox[id]
 	if !ok {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	if message.State != application.OutboxLeased || message.LeaseToken != token || message.LeasedUntil.After(time.Now()) {
 		return application.ErrConcurrencyConflict
@@ -374,7 +385,7 @@ func (s *Store) RequeueExpiredOutbox(_ context.Context, id, token string) error 
 func (s *Store) CompleteOutbox(_ context.Context, id, token, reason string) error {
 	message, ok := s.outbox[id]
 	if !ok {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	if message.State != application.OutboxLeased || message.LeaseToken != token || !message.LeasedUntil.After(time.Now()) {
 		return application.ErrConcurrencyConflict
@@ -390,7 +401,7 @@ func (s *Store) CompleteOutbox(_ context.Context, id, token, reason string) erro
 func (s *Store) CompleteExpiredOutbox(_ context.Context, id, token, reason string) error {
 	message, ok := s.outbox[id]
 	if !ok {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	if message.State != application.OutboxLeased || message.LeaseToken != token || message.LeasedUntil.After(time.Now()) {
 		return application.ErrConcurrencyConflict
@@ -403,10 +414,10 @@ func (s *Store) CompleteExpiredOutbox(_ context.Context, id, token, reason strin
 	return nil
 }
 
-func (s *Store) RetryOutbox(_ context.Context, id, token string, delay time.Duration, messageText string, maxAttempts int) error {
+func (s *Store) RetryOutbox(_ context.Context, id, token string, delay time.Duration, messageText string) error {
 	message, ok := s.outbox[id]
 	if !ok {
-		return ErrNotFound
+		return application.ErrConcurrencyConflict
 	}
 	if message.State != application.OutboxLeased || message.LeaseToken != token || !message.LeasedUntil.After(time.Now()) {
 		return application.ErrConcurrencyConflict
@@ -414,12 +425,24 @@ func (s *Store) RetryOutbox(_ context.Context, id, token string, delay time.Dura
 	message.LeaseToken = ""
 	message.LeasedUntil = time.Time{}
 	message.LastError = messageText
-	if message.AttemptCount >= maxAttempts {
-		message.State = application.OutboxDead
-	} else {
-		message.State = application.OutboxPending
-		message.AvailableAt = time.Now().Add(delay)
+	message.State = application.OutboxPending
+	message.AvailableAt = time.Now().Add(delay)
+	s.outbox[id] = message
+	return nil
+}
+
+func (s *Store) DeadOutbox(_ context.Context, id, token, reason string) error {
+	message, ok := s.outbox[id]
+	if !ok {
+		return application.ErrConcurrencyConflict
 	}
+	if message.State != application.OutboxLeased || message.LeaseToken != token || !message.LeasedUntil.After(time.Now()) {
+		return application.ErrConcurrencyConflict
+	}
+	message.State = application.OutboxDead
+	message.LeaseToken = ""
+	message.LeasedUntil = time.Time{}
+	message.TerminalReason = reason
 	s.outbox[id] = message
 	return nil
 }

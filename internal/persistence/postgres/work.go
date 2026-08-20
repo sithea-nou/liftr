@@ -186,14 +186,23 @@ func (r *repositories) CompleteExpiredOutbox(ctx context.Context, id, token, rea
 	return nil
 }
 
-func (r *repositories) RetryOutbox(ctx context.Context, id, token string, delay time.Duration, lastError string, maxAttempts int) error {
+func (r *repositories) RetryOutbox(ctx context.Context, id, token string, delay time.Duration, lastError string) error {
 	command, err := r.tx.Exec(ctx, `UPDATE outbox_messages SET
-		state=CASE WHEN attempt_count >= $5 THEN 'Dead' ELSE 'Pending' END,
-		available_at=CASE WHEN attempt_count >= $5 THEN available_at ELSE clock_timestamp()+($3::bigint * interval '1 millisecond') END,
-		lease_token=NULL,leased_until=NULL,last_error=$4,
-		dead_at=CASE WHEN attempt_count >= $5 THEN clock_timestamp() ELSE NULL END,
-		terminal_reason=CASE WHEN attempt_count >= $5 THEN 'AttemptsExhausted' ELSE NULL END
-		WHERE id=$1 AND state='Leased' AND lease_token=$2 AND leased_until > clock_timestamp()`, id, token, delay.Milliseconds(), lastError, maxAttempts)
+		state='Pending',available_at=clock_timestamp()+($3::bigint * interval '1 millisecond'),
+		lease_token=NULL,leased_until=NULL,last_error=$4,dead_at=NULL,terminal_reason=NULL
+		WHERE id=$1 AND state='Leased' AND lease_token=$2 AND leased_until > clock_timestamp()`, id, token, delay.Milliseconds(), lastError)
+	if err != nil {
+		return translateError(err)
+	}
+	if command.RowsAffected() != 1 {
+		return application.ErrConcurrencyConflict
+	}
+	return nil
+}
+
+func (r *repositories) DeadOutbox(ctx context.Context, id, token, reason string) error {
+	command, err := r.tx.Exec(ctx, `UPDATE outbox_messages SET state='Dead',lease_token=NULL,leased_until=NULL,
+		terminal_reason=$3,dead_at=clock_timestamp() WHERE id=$1 AND state='Leased' AND lease_token=$2 AND leased_until > clock_timestamp()`, id, token, reason)
 	if err != nil {
 		return translateError(err)
 	}

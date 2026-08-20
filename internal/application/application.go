@@ -175,7 +175,6 @@ type CreateResourceCommand struct {
 	EventID        domain.EventID
 	RequestedAt    time.Time
 	IdempotencyKey string
-	Fingerprint    string
 }
 
 type UpdateResourceCommand struct {
@@ -186,7 +185,6 @@ type UpdateResourceCommand struct {
 	EventID            domain.EventID
 	RequestedAt        time.Time
 	IdempotencyKey     string
-	Fingerprint        string
 }
 
 type DeleteResourceCommand struct {
@@ -196,7 +194,6 @@ type DeleteResourceCommand struct {
 	EventID            domain.EventID
 	RequestedAt        time.Time
 	IdempotencyKey     string
-	Fingerprint        string
 }
 
 type AdvanceOperationCommand struct {
@@ -222,7 +219,6 @@ type RetryOperationCommand struct {
 	EventID        domain.EventID
 	RequestedAt    time.Time
 	IdempotencyKey string
-	Fingerprint    string
 }
 
 type Result struct {
@@ -237,18 +233,19 @@ func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCommand)
 	if !s.eager {
 		return s.AdmitCreateResource(ctx, cmd)
 	}
-	if err := validateIdempotency(cmd.IdempotencyKey, cmd.Fingerprint); err != nil {
+	fingerprint, err := createCommandFingerprint(cmd)
+	if err != nil {
 		return Result{}, err
 	}
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
 	}
-	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, cmd.Fingerprint, string(domain.CapabilityCreate)); err != nil {
+	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, fingerprint, string(domain.CapabilityCreate)); err != nil {
 		return Result{}, err
 	} else if found {
 		return replay, nil
 	}
-	result, err := s.persistCreateRequest(ctx, cmd)
+	result, err := s.persistCreateRequest(ctx, cmd, fingerprint)
 	if err != nil {
 		return Result{}, err
 	}
@@ -261,29 +258,31 @@ func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCommand)
 // AdmitCreateResource durably records a create request without executing
 // provider work. A worker advances the resulting outbox message.
 func (s *Service) AdmitCreateResource(ctx context.Context, cmd CreateResourceCommand) (Result, error) {
-	if err := validateIdempotency(cmd.IdempotencyKey, cmd.Fingerprint); err != nil {
+	fingerprint, err := createCommandFingerprint(cmd)
+	if err != nil {
 		return Result{}, err
 	}
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
 	}
-	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, cmd.Fingerprint, string(domain.CapabilityCreate)); err != nil || found {
+	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, fingerprint, string(domain.CapabilityCreate)); err != nil || found {
 		return replay, err
 	}
-	return s.persistCreateRequest(ctx, cmd)
+	return s.persistCreateRequest(ctx, cmd, fingerprint)
 }
 
 func (s *Service) UpdateResource(ctx context.Context, cmd UpdateResourceCommand) (Result, error) {
 	if !s.eager {
 		return s.AdmitUpdateResource(ctx, cmd)
 	}
-	if err := validateIdempotency(cmd.IdempotencyKey, cmd.Fingerprint); err != nil {
+	fingerprint, err := updateCommandFingerprint(cmd)
+	if err != nil {
 		return Result{}, err
 	}
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
 	}
-	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, cmd.Fingerprint, string(domain.CapabilityUpdate)); err != nil {
+	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, fingerprint, string(domain.CapabilityUpdate)); err != nil {
 		return Result{}, err
 	} else if found {
 		return replay, nil
@@ -291,7 +290,7 @@ func (s *Service) UpdateResource(ctx context.Context, cmd UpdateResourceCommand)
 	result, err := s.persistExistingRequest(ctx, existingRequest{
 		id: cmd.ID, expectedGeneration: cmd.ExpectedGeneration, spec: &cmd.Spec,
 		capability: domain.CapabilityUpdate, operationID: cmd.OperationID, eventID: cmd.EventID,
-		requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, fingerprint: cmd.Fingerprint,
+		requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, fingerprint: fingerprint,
 	})
 	if err != nil {
 		return Result{}, err
@@ -303,29 +302,28 @@ func (s *Service) UpdateResource(ctx context.Context, cmd UpdateResourceCommand)
 }
 
 func (s *Service) AdmitUpdateResource(ctx context.Context, cmd UpdateResourceCommand) (Result, error) {
-	if err := validateIdempotency(cmd.IdempotencyKey, cmd.Fingerprint); err != nil {
+	fingerprint, err := updateCommandFingerprint(cmd)
+	if err != nil {
 		return Result{}, err
 	}
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
 	}
-	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, cmd.Fingerprint, string(domain.CapabilityUpdate)); err != nil || found {
+	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, fingerprint, string(domain.CapabilityUpdate)); err != nil || found {
 		return replay, err
 	}
-	return s.persistExistingRequest(ctx, existingRequest{id: cmd.ID, expectedGeneration: cmd.ExpectedGeneration, spec: &cmd.Spec, capability: domain.CapabilityUpdate, operationID: cmd.OperationID, eventID: cmd.EventID, requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, fingerprint: cmd.Fingerprint})
+	return s.persistExistingRequest(ctx, existingRequest{id: cmd.ID, expectedGeneration: cmd.ExpectedGeneration, spec: &cmd.Spec, capability: domain.CapabilityUpdate, operationID: cmd.OperationID, eventID: cmd.EventID, requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, fingerprint: fingerprint})
 }
 
 func (s *Service) DeleteResource(ctx context.Context, cmd DeleteResourceCommand) (Result, error) {
 	if !s.eager {
 		return s.AdmitDeleteResource(ctx, cmd)
 	}
-	if err := validateIdempotency(cmd.IdempotencyKey, cmd.Fingerprint); err != nil {
-		return Result{}, err
-	}
+	fingerprint := deleteCommandFingerprint(cmd)
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
 	}
-	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, cmd.Fingerprint, string(domain.CapabilityDelete)); err != nil {
+	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, fingerprint, string(domain.CapabilityDelete)); err != nil {
 		return Result{}, err
 	} else if found {
 		return replay, nil
@@ -333,7 +331,7 @@ func (s *Service) DeleteResource(ctx context.Context, cmd DeleteResourceCommand)
 	result, err := s.persistExistingRequest(ctx, existingRequest{
 		id: cmd.ID, expectedGeneration: cmd.ExpectedGeneration,
 		capability: domain.CapabilityDelete, operationID: cmd.OperationID, eventID: cmd.EventID,
-		requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, fingerprint: cmd.Fingerprint,
+		requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, fingerprint: fingerprint,
 	})
 	if err != nil {
 		return Result{}, err
@@ -345,16 +343,14 @@ func (s *Service) DeleteResource(ctx context.Context, cmd DeleteResourceCommand)
 }
 
 func (s *Service) AdmitDeleteResource(ctx context.Context, cmd DeleteResourceCommand) (Result, error) {
-	if err := validateIdempotency(cmd.IdempotencyKey, cmd.Fingerprint); err != nil {
-		return Result{}, err
-	}
+	fingerprint := deleteCommandFingerprint(cmd)
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
 	}
-	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, cmd.Fingerprint, string(domain.CapabilityDelete)); err != nil || found {
+	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, fingerprint, string(domain.CapabilityDelete)); err != nil || found {
 		return replay, err
 	}
-	return s.persistExistingRequest(ctx, existingRequest{id: cmd.ID, expectedGeneration: cmd.ExpectedGeneration, capability: domain.CapabilityDelete, operationID: cmd.OperationID, eventID: cmd.EventID, requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, fingerprint: cmd.Fingerprint})
+	return s.persistExistingRequest(ctx, existingRequest{id: cmd.ID, expectedGeneration: cmd.ExpectedGeneration, capability: domain.CapabilityDelete, operationID: cmd.OperationID, eventID: cmd.EventID, requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, fingerprint: fingerprint})
 }
 
 func (s *Service) AdvanceOperation(ctx context.Context, cmd AdvanceOperationCommand) (Result, error) {
@@ -649,6 +645,8 @@ func (s *Service) scheduleResubmission(ctx context.Context, record ResourceRecor
 		current.CurrentAttempt++
 		current.State = AttemptPending
 		current.Correlation = provisioning.RequestCorrelationNotFound
+		current.LastObservation = observed.LastObservation
+		current.LastObservedAt = observed.LastObservedAt
 		message := DispatchMessage(current.OperationID, current.CurrentAttempt, current.Version+1)
 		if err := tx.SubmissionAttempts().CreateSubmissionAttempt(ctx, SubmissionAttemptRecord{OperationID: current.OperationID, AttemptNumber: current.CurrentAttempt, State: SubmissionAttemptPending, DispatchMessage: message.ID}); err != nil {
 			return err
@@ -670,16 +668,8 @@ func (s *Service) RetryOperation(ctx context.Context, cmd RetryOperationCommand)
 	if !s.eager {
 		return s.AdmitRetryOperation(ctx, cmd)
 	}
-	if err := validateIdempotency(cmd.IdempotencyKey, cmd.Fingerprint); err != nil {
-		return Result{}, err
-	}
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
-	}
-	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, cmd.Fingerprint, "retry"); err != nil {
-		return Result{}, err
-	} else if found {
-		return replay, nil
 	}
 	result, err := s.persistRetryRequest(ctx, cmd)
 	if err != nil {
@@ -692,14 +682,8 @@ func (s *Service) RetryOperation(ctx context.Context, cmd RetryOperationCommand)
 }
 
 func (s *Service) AdmitRetryOperation(ctx context.Context, cmd RetryOperationCommand) (Result, error) {
-	if err := validateIdempotency(cmd.IdempotencyKey, cmd.Fingerprint); err != nil {
-		return Result{}, err
-	}
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
-	}
-	if replay, found, err := s.replay(ctx, cmd.IdempotencyKey, cmd.Fingerprint, "retry"); err != nil || found {
-		return replay, err
 	}
 	return s.persistRetryRequest(ctx, cmd)
 }
@@ -707,15 +691,16 @@ func (s *Service) AdmitRetryOperation(ctx context.Context, cmd RetryOperationCom
 func (s *Service) persistRetryRequest(ctx context.Context, cmd RetryOperationCommand) (Result, error) {
 	var result Result
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
-		if replay, found, err := replayWithin(ctx, tx, cmd.IdempotencyKey, cmd.Fingerprint, "retry"); err != nil {
+		failed, err := tx.Operations().GetOperation(ctx, cmd.OperationID)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
+		}
+		fingerprint := retryCommandFingerprint(failed.Operation)
+		if replay, found, err := replayWithin(ctx, tx, cmd.IdempotencyKey, fingerprint, "retry"); err != nil {
 			return err
 		} else if found {
 			result = replay
 			return nil
-		}
-		failed, err := tx.Operations().GetOperation(ctx, cmd.OperationID)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
 		if failed.Operation.State() != domain.OperationStateFailed {
 			return fmt.Errorf("%w: operation is not failed", lifecycle.ErrInvalidTransition)
@@ -742,7 +727,7 @@ func (s *Service) persistRetryRequest(ctx context.Context, cmd RetryOperationCom
 			return err
 		}
 		record.Version++
-		result, err = persistExistingTransition(ctx, tx, record, transition, cmd.IdempotencyKey, cmd.Fingerprint, "retry")
+		result, err = persistExistingTransition(ctx, tx, record, transition, cmd.IdempotencyKey, fingerprint, "retry")
 		return err
 	})
 	return result, err
@@ -756,15 +741,15 @@ func (s *Service) drive(ctx context.Context, operationID domain.OperationID) (Re
 		}
 		switch opRecord.Operation.Phase() {
 		case domain.OperationPhaseRequested:
-			if _, err := s.advanceOperation(ctx, AdvanceOperationCommand{OperationID: operationID, Phase: domain.OperationPhaseValidating, EventID: internalEventID(operationID, "validating"), ChangedAt: opRecord.Operation.RequestedAt().Add(time.Nanosecond)}); err != nil {
+			if _, err := s.advanceOperation(ctx, AdvanceOperationCommand{OperationID: operationID, Phase: domain.OperationPhaseValidating, EventID: internalEventID(operationID, InternalTransitionLabel(domain.OperationPhaseValidating)), ChangedAt: opRecord.Operation.RequestedAt().Add(time.Nanosecond)}); err != nil {
 				return Result{}, err
 			}
 		case domain.OperationPhaseValidating:
-			if _, err := s.advanceOperation(ctx, AdvanceOperationCommand{OperationID: operationID, Phase: nextPhase(opRecord.Operation), EventID: internalEventID(operationID, "next"), ChangedAt: opRecord.Operation.PhaseChangedAt().Add(time.Nanosecond)}); err != nil {
+			if _, err := s.advanceOperation(ctx, AdvanceOperationCommand{OperationID: operationID, Phase: nextPhase(opRecord.Operation), EventID: internalEventID(operationID, InternalTransitionLabel(nextPhase(opRecord.Operation))), ChangedAt: opRecord.Operation.PhaseChangedAt().Add(time.Nanosecond)}); err != nil {
 				return Result{}, err
 			}
 		case domain.OperationPhasePlanning:
-			if _, err := s.advanceOperation(ctx, AdvanceOperationCommand{OperationID: operationID, Phase: domain.OperationPhaseApplying, EventID: internalEventID(operationID, "applying"), ChangedAt: opRecord.Operation.PhaseChangedAt().Add(time.Nanosecond)}); err != nil {
+			if _, err := s.advanceOperation(ctx, AdvanceOperationCommand{OperationID: operationID, Phase: domain.OperationPhaseApplying, EventID: internalEventID(operationID, InternalTransitionLabel(domain.OperationPhaseApplying)), ChangedAt: opRecord.Operation.PhaseChangedAt().Add(time.Nanosecond)}); err != nil {
 				return Result{}, err
 			}
 		case domain.OperationPhaseApplying, domain.OperationPhaseDestroying:
@@ -853,6 +838,16 @@ func (s *Service) DispatchOperation(ctx context.Context, operationID domain.Oper
 	execution.Submission = &submission
 	if submission.Observation.Execution != nil {
 		observationAt := observationTime(submission.Observation.ObservedAt, record.Status.UpdatedAt())
+		if !submission.Observation.ObservedAt.IsZero() && !EvidenceFresh(execution.LastObservedAt, observationAt) {
+			execution.State = AttemptUnknown
+			execution.Correlation = provisioning.RequestCorrelationUnknown
+			execution.LastFailure = &provisioning.ExecutionFailure{Kind: provisioning.FailureUnknown, Reason: "StaleSubmissionEvidence", Message: "submission evidence does not advance the persisted observation timeline"}
+			if saveErr := s.saveExecution(ctx, execution); saveErr != nil {
+				return Result{}, saveErr
+			}
+			execution.Version++
+			return Result{Resource: record, Operation: opRecord.Operation, Execution: &execution}, execution.LastFailure
+		}
 		if observationErr := validateObservationTime(record.Resource, record.Status, observationAt); observationErr != nil {
 			execution.State = AttemptUnknown
 			execution.LastFailure = &provisioning.ExecutionFailure{Kind: provisioning.FailureUnknown, Reason: "StaleSubmissionObservation", Message: observationErr.Error()}
@@ -862,7 +857,9 @@ func (s *Service) DispatchOperation(ctx context.Context, operationID domain.Oper
 			execution.Version++
 			return Result{Resource: record, Operation: opRecord.Operation, Execution: &execution}, observationErr
 		}
-		execution.LastObservedAt = observationAt
+		if EvidenceFresh(execution.LastObservedAt, observationAt) {
+			execution.LastObservedAt = observationAt
+		}
 	}
 	if submitErr != nil && !conclusiveNonAcceptance(submission) && !explicitTerminalExecution(submission) {
 		execution.State = AttemptUnknown
@@ -998,28 +995,16 @@ func (s *Service) finishObserved(ctx context.Context, record ResourceRecord, opR
 			Status    domain.ResourceStatus
 			Event     domain.Event
 		}
+		finished, finishErr := BuildFinishEvidence(s.Lifecycle, currentOperation.Operation, current.Resource, current.Status, Finish{Succeeded: succeeded, Reason: reason, Message: message, Facts: facts}, at)
+		if finishErr != nil {
+			return finishErr
+		}
+		transition.Operation, transition.Status, transition.Event = finished.Operation, finished.Status, finished.Event
 		if succeeded {
-			completed, completeErr := s.Lifecycle.Complete(current.Resource, current.Status, currentOperation.Operation, internalEventID(currentOperation.Operation.ID(), "succeeded"), at)
-			if completeErr != nil {
-				return completeErr
-			}
-			transition.Operation, transition.Status, transition.Event = completed.Operation, completed.Status, completed.Event
 			execution.State = AttemptSucceeded
 			execution.LastFailure = nil
 		} else {
-			failed, failErr := s.Lifecycle.Fail(current.Resource, current.Status, currentOperation.Operation, reason, message, internalEventID(currentOperation.Operation.ID(), "failed"), at)
-			if failErr != nil {
-				return failErr
-			}
-			transition.Operation, transition.Status, transition.Event = failed.Operation, failed.Status, failed.Event
 			execution.State = AttemptFailed
-		}
-		if hasObservedFacts(facts) {
-			observedStatus, observeErr := s.Lifecycle.ApplyPostOperationObservation(current.Resource, transition.Status, facts, at)
-			if observeErr != nil {
-				return observeErr
-			}
-			transition.Status = observedStatus
 		}
 		current.Status = transition.Status
 		if err := tx.Resources().SaveResource(ctx, current, current.Version); err != nil {
@@ -1055,10 +1040,10 @@ type existingRequest struct {
 	fingerprint        string
 }
 
-func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCommand) (Result, error) {
+func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCommand, fingerprint string) (Result, error) {
 	var result Result
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
-		if replay, found, err := replayWithin(ctx, tx, cmd.IdempotencyKey, cmd.Fingerprint, string(domain.CapabilityCreate)); err != nil {
+		if replay, found, err := replayWithin(ctx, tx, cmd.IdempotencyKey, fingerprint, string(domain.CapabilityCreate)); err != nil {
 			return err
 		} else if found {
 			result = replay
@@ -1092,7 +1077,7 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 		if err != nil {
 			return err
 		}
-		result, err = persistNewRequest(ctx, tx, ResourceRecord{Resource: resource, Status: transition.Status, ProvisionerRef: ref, Version: 1}, transition, cmd.IdempotencyKey, cmd.Fingerprint)
+		result, err = persistNewRequest(ctx, tx, ResourceRecord{Resource: resource, Status: transition.Status, ProvisionerRef: ref, Version: 1}, transition, cmd.IdempotencyKey, fingerprint)
 		return err
 	})
 	return result, err
@@ -1486,13 +1471,6 @@ func hasObservedFacts(facts domain.ObservedFacts) bool {
 	return facts.Presence != "" || facts.Readiness != "" || facts.Drift != ""
 }
 
-func validateIdempotency(key, fingerprint string) error {
-	if key != "" && strings.TrimSpace(fingerprint) == "" {
-		return fmt.Errorf("%w: idempotency fingerprint is required when a key is provided", ErrInvalidApplicationCall)
-	}
-	return nil
-}
-
 const internalEventPrefix = "liftr-internal-"
 
 func validateExternalEventID(eventID domain.EventID) error {
@@ -1505,6 +1483,21 @@ func validateExternalEventID(eventID domain.EventID) error {
 func internalEventID(operationID domain.OperationID, transition string) domain.EventID {
 	digest := sha256.Sum256([]byte(string(operationID) + "\x00" + transition))
 	return domain.EventID(fmt.Sprintf("%s%x", internalEventPrefix, digest))
+}
+
+// InternalTransitionLabel renders a lifecycle phase as the canonical internal
+// transition label. Every component that drives an operation through its
+// phases must use it so eager and durable execution produce identical Event
+// IDs for identical transitions.
+func InternalTransitionLabel(phase domain.OperationPhase) string {
+	return strings.ToLower(string(phase))
+}
+
+// InternalEventID is the deterministic Event ID mechanism shared by every
+// Liftr-owned lifecycle transition. The digest is stable for a given
+// (operation, transition) pair regardless of which component drives it.
+func InternalEventID(operationID domain.OperationID, transition string) domain.EventID {
+	return internalEventID(operationID, transition)
 }
 
 func attemptState(state provisioning.ExecutionState) ProvisioningAttemptState {

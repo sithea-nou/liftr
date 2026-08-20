@@ -37,7 +37,11 @@ Each provisioning execution record retains the private submitted intent snapshot
 
 Provisioner `ObservedAt` is an optional backend source timestamp. A nonzero value is authoritative and is rejected if stale. When a backend has no source timestamp, the application uses the caller-supplied observation receipt time; synchronous submission falls back to the current lifecycle cursor supplied by the application.
 
-Internal phase and terminal Events use a reserved, deterministic hash-based ID namespace derived from OperationID and transition. Caller-provided request Event IDs cannot use that namespace, preventing request IDs from colliding with application-generated audit Events.
+Provider evidence must advance the persisted observation timeline. The latest effective observation timestamp is monotonic: evidence whose timestamp does not strictly advance the persisted `LastObservedAt` is stale. Stale submission evidence is never applied — it cannot confirm acceptance, reject an attempt, or transition an Operation — and is recorded as an ambiguous `StaleSubmissionEvidence` outcome so the observe path can recover the truth from the backend. Stale observation evidence likewise never transitions an Operation; the durable worker settles the observation message and schedules a follow-up observation with a bounded retry delay so an active execution is never stranded. Timestamps derived from application receipt time (fallback timestamps) never trigger staleness because they do not claim a backend evidence time.
+
+Observed facts are validated before interpretation. Malformed facts on terminal evidence are sanitized away so a real terminal outcome is never stranded by corrupted condition data. Malformed facts on nonterminal submission evidence produce an ambiguous `MalformedObservedFacts` outcome, and on nonterminal observation evidence a retryable error; neither quarantines the Operation nor poisons the worker message.
+
+Internal phase and terminal Events use a reserved, deterministic hash-based ID namespace derived from OperationID and transition. Caller-provided request Event IDs cannot use that namespace, preventing request IDs from colliding with application-generated audit Events. Every component that drives a lifecycle transition renders the transition label with the same canonical function, so eager and durable execution produce identical Event IDs for identical transitions.
 
 ## Consequences
 

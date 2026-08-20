@@ -191,7 +191,7 @@ func TestCreateIdempotencyReplaysOriginalResult(t *testing.T) {
 	command := application.CreateResourceCommand{
 		ID: "resource-idempotent", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-idempotent", EventID: "event-idempotent", RequestedAt: applicationTime,
-		IdempotencyKey: "key-1", Fingerprint: "fingerprint-1",
+		IdempotencyKey: "key-1",
 	}
 	first, err := service.CreateResource(context.Background(), command)
 	if err != nil {
@@ -209,19 +209,56 @@ func TestCreateIdempotencyReplaysOriginalResult(t *testing.T) {
 	}
 }
 
-func TestIdempotencyKeyRequiresFingerprint(t *testing.T) {
-	ref := mustProvisionerRef(t, "provider-idempotency-validation")
-	service, _, selector, _ := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-	_, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
-		ID: "resource-idempotency-validation", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
-		Spec: testSpec(t), OperationID: "operation-idempotency-validation", EventID: "event-idempotency-validation", RequestedAt: applicationTime,
-		IdempotencyKey: "missing-fingerprint",
-	})
-	if err == nil {
-		t.Fatal("CreateResource() accepted an idempotency key without a fingerprint")
+func TestIdempotencyKeyRejectsDifferentPayload(t *testing.T) {
+	ref := mustProvisionerRef(t, "provider-idempotency-conflict")
+	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
+	service, _, selector, _ := newService(t, ref, provider)
+	command := application.CreateResourceCommand{
+		ID: "resource-idempotency-conflict", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
+		Spec: testSpec(t), OperationID: "operation-idempotency-conflict", EventID: "event-idempotency-conflict", RequestedAt: applicationTime,
+		IdempotencyKey: "conflict-key",
 	}
-	if selector.Calls != 0 {
-		t.Fatalf("selector calls = %d, want 0", selector.Calls)
+	if _, err := service.CreateResource(context.Background(), command); err != nil {
+		t.Fatalf("first CreateResource() error = %v", err)
+	}
+	conflicting := command
+	conflicting.Spec, _ = domain.NewResourceSpec(map[string]any{"size": uint64(9)})
+	conflicting.OperationID = "operation-idempotency-conflict-2"
+	conflicting.EventID = "event-idempotency-conflict-2"
+	if _, err := service.CreateResource(context.Background(), conflicting); !errors.Is(err, application.ErrIdempotencyConflict) {
+		t.Fatalf("different payload with reused key error=%v", err)
+	}
+	if selector.Calls != 1 {
+		t.Fatalf("selector calls = %d, want 1", selector.Calls)
+	}
+}
+
+func TestIdempotencyReplayIgnoresSpecMapOrder(t *testing.T) {
+	ref := mustProvisionerRef(t, "provider-idempotency-order")
+	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
+	service, _, selector, _ := newService(t, ref, provider)
+	firstSpec, _ := domain.NewResourceSpec(map[string]any{"alpha": uint64(1), "beta": uint64(2)})
+	command := application.CreateResourceCommand{
+		ID: "resource-idempotency-order", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
+		Spec: firstSpec, OperationID: "operation-idempotency-order", EventID: "event-idempotency-order", RequestedAt: applicationTime,
+		IdempotencyKey: "order-key",
+	}
+	first, err := service.CreateResource(context.Background(), command)
+	if err != nil {
+		t.Fatalf("first CreateResource() error = %v", err)
+	}
+	reorderedSpec, _ := domain.NewResourceSpec(map[string]any{"beta": uint64(2), "alpha": uint64(1)})
+	reordered := command
+	reordered.Spec = reorderedSpec
+	second, err := service.CreateResource(context.Background(), reordered)
+	if err != nil {
+		t.Fatalf("reordered CreateResource() error = %v", err)
+	}
+	if !second.Replay || second.Operation.ID() != first.Operation.ID() {
+		t.Fatalf("replay=%t operation=%q, want replay and %q", second.Replay, second.Operation.ID(), first.Operation.ID())
+	}
+	if selector.Calls != 1 {
+		t.Fatalf("selector calls = %d, want 1", selector.Calls)
 	}
 }
 
@@ -239,7 +276,7 @@ func TestUpdateIdempotencyReplaysBeforeGenerationValidation(t *testing.T) {
 	command := application.UpdateResourceCommand{
 		ID: "resource-update-idempotent", ExpectedGeneration: created.Resource.Resource.Generation(), Spec: testSpec(t),
 		OperationID: "operation-update-idempotent", EventID: "event-update-idempotent", RequestedAt: applicationTime.Add(time.Minute),
-		IdempotencyKey: "update-key", Fingerprint: "update-fingerprint",
+		IdempotencyKey: "update-key",
 	}
 	first, err := service.UpdateResource(context.Background(), command)
 	if err != nil {
@@ -338,7 +375,7 @@ func TestFakeTransactionRollsBackRequestWhenEventAppendFails(t *testing.T) {
 	_, err = service.CreateResource(context.Background(), application.CreateResourceCommand{
 		ID: "resource-rollback", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-rollback", EventID: collision.ID(), RequestedAt: applicationTime,
-		IdempotencyKey: "rollback-key", Fingerprint: "rollback-fingerprint",
+		IdempotencyKey: "rollback-key",
 	})
 	if err == nil {
 		t.Fatal("CreateResource() succeeded with duplicate event ID")
@@ -404,7 +441,7 @@ func TestSubmitTimeoutRemainsUnknownAndRecoveryObservesBeforeResubmit(t *testing
 	command := application.CreateResourceCommand{
 		ID: "resource-timeout", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-timeout", EventID: "event-timeout", RequestedAt: applicationTime,
-		IdempotencyKey: "timeout-key", Fingerprint: "timeout-fingerprint",
+		IdempotencyKey: "timeout-key",
 	}
 	if _, err := service.CreateResource(context.Background(), command); err == nil {
 		t.Fatal("CreateResource() succeeded despite timeout")
@@ -1395,7 +1432,7 @@ func TestCreateReplayDoesNotConsultChangedDefaults(t *testing.T) {
 	command := application.CreateResourceCommand{
 		ID: "resource-create-replay", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-replay", EventID: "event-create-replay", RequestedAt: applicationTime,
-		IdempotencyKey: "create-replay-key", Fingerprint: "create-replay-fingerprint",
+		IdempotencyKey: "create-replay-key",
 	}
 	first, err := service.CreateResource(context.Background(), command)
 	if err != nil {
@@ -1496,7 +1533,7 @@ func TestDeleteIdempotencyReusesLogicalOperation(t *testing.T) {
 	command := application.DeleteResourceCommand{
 		ID: created.Resource.Resource.ID(), ExpectedGeneration: created.Resource.Resource.Generation(),
 		OperationID: "operation-delete-idempotent", EventID: "event-delete-idempotent", RequestedAt: applicationTime.Add(time.Minute),
-		IdempotencyKey: "delete-key", Fingerprint: "delete-fingerprint",
+		IdempotencyKey: "delete-key",
 	}
 	first, err := service.DeleteResource(context.Background(), command)
 	if err != nil {

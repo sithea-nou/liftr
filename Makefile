@@ -1,4 +1,4 @@
-.PHONY: build fmt fmt-check test test-integration vet verify
+.PHONY: build fmt fmt-check test test-race test-integration vet verify
 
 build:
 	go build ./cmd/...
@@ -12,6 +12,9 @@ fmt-check:
 
 test:
 	go test ./...
+
+test-race:
+	go test -race ./...
 
 test-integration:
 	@test -n "$$LIFTR_TEST_DATABASE_URL" || (echo "LIFTR_TEST_DATABASE_URL is required." && exit 1)

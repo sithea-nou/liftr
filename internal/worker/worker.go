@@ -23,7 +23,6 @@ type Worker struct {
 	Lifecycle    lifecycle.Engine
 	Lease        time.Duration
 	RetryBase    time.Duration
-	MaxAttempts  int
 	Clock        func() time.Time
 }
 
@@ -31,7 +30,7 @@ func New(transactions application.TransactionRunner, resolver application.Provis
 	if transactions == nil || resolver == nil {
 		return nil, fmt.Errorf("worker dependencies are required")
 	}
-	return &Worker{Transactions: transactions, Resolver: resolver, Lease: time.Minute, RetryBase: time.Second, MaxAttempts: 10, Clock: time.Now}, nil
+	return &Worker{Transactions: transactions, Resolver: resolver, Lease: time.Minute, RetryBase: time.Second, Clock: time.Now}, nil
 }
 
 // RunOnce recovers one ambiguous expired Dispatch or processes one claimable
@@ -75,13 +74,62 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		// expiry recovery moves the attempt through Unknown and Observe.
 		return true, err
 	}
-	retryErr := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
-		return tx.Outbox().RetryOutbox(ctx, message.ID, message.LeaseToken, w.backoff(message.AttemptCount), err.Error(), w.MaxAttempts)
-	})
-	if retryErr != nil && !errors.Is(retryErr, application.ErrConcurrencyConflict) {
-		return true, fmt.Errorf("process work: %w; reschedule: %v", err, retryErr)
+	switch classifyFailure(err) {
+	case failureStale:
+		// The work this message represents has already moved on, or another
+		// claimant owns it. Settle it instead of retrying it.
+		if settleErr := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
+			return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "StaleWork")
+		}); settleErr != nil && !errors.Is(settleErr, application.ErrConcurrencyConflict) {
+			return true, fmt.Errorf("process work: %w; settle stale work: %v", err, settleErr)
+		}
+		return true, err
+	case failurePoison:
+		// The work is provably invalid and can never succeed by retrying.
+		// Quarantine it for administrative redrive instead of retrying it
+		// until it strands an active operation.
+		if deadErr := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
+			return tx.Outbox().DeadOutbox(ctx, message.ID, message.LeaseToken, err.Error())
+		}); deadErr != nil && !errors.Is(deadErr, application.ErrConcurrencyConflict) {
+			return true, fmt.Errorf("process work: %w; quarantine work: %v", err, deadErr)
+		}
+		return true, err
+	default:
+		retryErr := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
+			return tx.Outbox().RetryOutbox(ctx, message.ID, message.LeaseToken, w.backoff(message.AttemptCount), err.Error())
+		})
+		if retryErr != nil && !errors.Is(retryErr, application.ErrConcurrencyConflict) {
+			return true, fmt.Errorf("process work: %w; reschedule: %v", err, retryErr)
+		}
+		return true, err
 	}
-	return true, err
+}
+
+type failureClass int
+
+const (
+	failureRetryable failureClass = iota
+	failureStale
+	failurePoison
+)
+
+// classifyFailure maps a worker processing error to its outbox disposition.
+// Errors from ErrConcurrencyConflict mean the loaded work is obsolete or owned
+// by someone else. Domain-invalid errors are deliberate quarantines. Everything
+// else (provider transport, resolver availability, malformed provider
+// observations) is transient and is retried with bounded backoff.
+func classifyFailure(err error) failureClass {
+	switch {
+	case errors.Is(err, application.ErrConcurrencyConflict):
+		return failureStale
+	case errors.Is(err, application.ErrInvalidApplicationCall),
+		errors.Is(err, application.ErrResourceNotFound),
+		errors.Is(err, application.ErrOperationNotFound),
+		errors.Is(err, lifecycle.ErrInvalidTransition):
+		return failurePoison
+	default:
+		return failureRetryable
+	}
 }
 
 func (w *Worker) SchedulePassiveObservation(ctx context.Context, resourceID domain.ResourceID, sequence, expectedVersion uint64) error {
@@ -115,7 +163,7 @@ func (w *Worker) drive(ctx context.Context, message application.OutboxMessage) e
 			return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "AlreadyDispatchable")
 		}
 		changedAt := operation.Operation.PhaseChangedAt().Add(time.Nanosecond)
-		transition, err := w.Lifecycle.Advance(resource.Resource, resource.Status, operation.Operation, next, workerEventID(operation.Operation.ID(), string(next)), changedAt)
+		transition, err := w.Lifecycle.Advance(resource.Resource, resource.Status, operation.Operation, next, application.InternalEventID(operation.Operation.ID(), application.InternalTransitionLabel(next)), changedAt)
 		if err != nil {
 			return err
 		}
@@ -387,78 +435,32 @@ func (w *Worker) recordDispatch(ctx context.Context, message application.OutboxM
 		if attempt.State != application.SubmissionAttemptLeased {
 			return application.ErrConcurrencyConflict
 		}
-		execution.Submission = &submission
-		execution.LastObservation = &submission.Observation
-		execution.Correlation = submission.Observation.Correlation
-		if !validCorrelation(execution.Correlation) {
-			execution.Correlation = provisioning.RequestCorrelationUnknown
-		}
-		if submission.Observation.Execution != nil && submission.Observation.Execution.Handle != nil {
-			execution.Handle = submission.Observation.Execution.Handle
-		}
 		observedAt := w.observedAt(submission.Observation.ObservedAt)
-		execution.LastObservedAt = observedAt
-		backendExecution := submission.Observation.Execution
-		terminalEvidence := backendExecution != nil && (backendExecution.State == provisioning.ExecutionStateSucceeded || backendExecution.State == provisioning.ExecutionStateFailed)
-		validState := backendExecution != nil && validExecutionState(backendExecution.State)
-		preflightRejected := validState && backendExecution.State == provisioning.ExecutionStateFailed && backendExecution.Failure != nil && submission.Observation.Correlation == provisioning.RequestCorrelationNotFound
-		acceptedRequest := validState && submission.Observation.Correlation == provisioning.RequestCorrelationFound
-		if (submitErr != nil && !terminalEvidence) || !validState || backendExecution.State == provisioning.ExecutionStateUnknown || (!preflightRejected && !acceptedRequest) {
-			execution.State = application.AttemptUnknown
-			if submission.Observation.Correlation == provisioning.RequestCorrelationFound {
-				execution.AcceptanceConfirmed = true
-			}
-			execution.LastFailure = failureFrom(submitErr, backendExecution)
-			attempt.State = application.SubmissionAttemptUnknown
-			attempt.Failure = execution.LastFailure
-			if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptLeased); err != nil {
-				return err
-			}
-			observe := scheduleObserve(&execution, w.RetryBase)
-			if err := tx.Executions().SaveExecution(ctx, execution, prepared.version); err != nil {
-				return err
-			}
-			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "AmbiguousSubmission"); err != nil {
-				return err
-			}
-			return tx.Outbox().Enqueue(ctx, observe)
-		}
-		rejected := preflightRejected
-		attempt.ResolvedAt = observedAt
-		if rejected {
-			attempt.State = application.SubmissionAttemptRejected
-			attempt.Failure = failureFrom(nil, backendExecution)
-			execution.Correlation = provisioning.RequestCorrelationNotFound
-			execution.AcceptanceConfirmed = false
-		} else {
-			attempt.State = application.SubmissionAttemptAccepted
-			execution.Correlation = provisioning.RequestCorrelationFound
-			execution.AcceptanceConfirmed = true
+		execution, attempt, outcome, finish, err := application.InterpretSubmission(execution, attempt, submission, submitErr, observedAt)
+		if err != nil {
+			return err
 		}
 		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptLeased); err != nil {
 			return err
 		}
-		switch backendExecution.State {
-		case provisioning.ExecutionStateAccepted, provisioning.ExecutionStateRunning:
-			execution.State = application.AttemptAccepted
+		switch outcome {
+		case application.SubmissionOutcomeAmbiguous, application.SubmissionOutcomeAccepted:
+			reason := "Submitted"
+			if outcome == application.SubmissionOutcomeAmbiguous {
+				reason = "AmbiguousSubmission"
+			}
 			observe := scheduleObserve(&execution, w.RetryBase)
 			if err := tx.Executions().SaveExecution(ctx, execution, prepared.version); err != nil {
 				return err
 			}
-			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "Submitted"); err != nil {
+			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, reason); err != nil {
 				return err
 			}
 			return tx.Outbox().Enqueue(ctx, observe)
-		case provisioning.ExecutionStateSucceeded:
-			execution.State = application.AttemptSucceeded
-			return w.finishOperation(ctx, tx, message, execution, prepared.version, true, "SubmissionSucceeded", "", observedAt, submission.Observation.Resource)
-		case provisioning.ExecutionStateFailed:
-			execution.State = application.AttemptFailed
-			failure := failureFrom(nil, backendExecution)
-			execution.LastFailure = failure
-			return w.finishOperation(ctx, tx, message, execution, prepared.version, false, failure.Reason, failure.Message, observedAt, submission.Observation.Resource)
+		case application.SubmissionOutcomeRejected, application.SubmissionOutcomeSucceeded, application.SubmissionOutcomeFailed:
+			return w.finishOperation(ctx, tx, message, execution, prepared.version, *finish, observedAt)
 		default:
-			return fmt.Errorf("invalid execution state %q", backendExecution.State)
+			return fmt.Errorf("invalid submission outcome %d", outcome)
 		}
 	})
 }
@@ -494,7 +496,7 @@ func (w *Worker) observe(ctx context.Context, message application.OutboxMessage)
 	if observeErr != nil {
 		return observeErr
 	}
-	if !validCorrelation(observation.Correlation) {
+	if !application.ValidCorrelation(observation.Correlation) {
 		return fmt.Errorf("invalid request correlation %q", observation.Correlation)
 	}
 	if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil && observation.Execution.State != provisioning.ExecutionStateFailed {
@@ -504,9 +506,6 @@ func (w *Worker) observe(ctx context.Context, message application.OutboxMessage)
 }
 
 func (w *Worker) recordObservation(ctx context.Context, message application.OutboxMessage, loaded application.ProvisioningExecutionRecord, observation provisioning.ExecutionObservation) error {
-	if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil && observation.Execution.State != provisioning.ExecutionStateFailed {
-		return fmt.Errorf("contradictory observation reports NotFound with an execution")
-	}
 	return w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
 		currentMessage, err := tx.Outbox().GetOutbox(ctx, message.ID)
 		if err != nil {
@@ -522,43 +521,38 @@ func (w *Worker) recordObservation(ctx context.Context, message application.Outb
 		if execution.Version != loaded.Version || execution.CurrentAttempt != loaded.CurrentAttempt || execution.NextObservation != message.Sequence+1 {
 			return application.ErrConcurrencyConflict
 		}
-		observedAt := w.observedAt(observation.ObservedAt)
-		execution.LastObservation = &observation
-		execution.LastObservedAt = observedAt
-		execution.Correlation = observation.Correlation
-		if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil && observation.Execution.State == provisioning.ExecutionStateFailed {
-			failure := failureFrom(nil, observation.Execution)
-			execution.State = application.AttemptFailed
-			execution.AcceptanceConfirmed = false
-			execution.LastFailure = failure
-			attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, execution.OperationID, execution.CurrentAttempt)
-			if err != nil {
-				return err
-			}
-			attempt.State = application.SubmissionAttemptRejected
-			attempt.Failure = failure
-			attempt.ResolvedAt = observedAt
-			if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptUnknown); err != nil {
-				return err
-			}
-			return w.finishOperation(ctx, tx, message, execution, execution.Version, false, failure.Reason, failure.Message, observedAt, observation.Resource)
+		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, execution.OperationID, execution.CurrentAttempt)
+		if err != nil {
+			return err
 		}
-		if observation.Correlation == provisioning.RequestCorrelationNotFound && execution.State == application.AttemptUnknown && !execution.AcceptanceConfirmed {
-			attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, execution.OperationID, execution.CurrentAttempt)
-			if err != nil {
+		observedAt := w.observedAt(observation.ObservedAt)
+		execution, attempt, outcome, finish, err := application.InterpretObservation(execution, attempt, observation, observedAt)
+		if err != nil {
+			return err
+		}
+		switch outcome {
+		case application.ObservationOutcomeStale:
+			// Stale evidence must not terminate the observe loop: the
+			// execution is still nonterminal, so keep observing with a
+			// bounded delay instead of stranding the active operation.
+			next := scheduleObserve(&execution, w.RetryBase)
+			if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
 				return err
 			}
-			if attempt.State != application.SubmissionAttemptUnknown {
-				return application.ErrConcurrencyConflict
+			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "StaleObservation"); err != nil {
+				return err
 			}
-			attempt.State = application.SubmissionAttemptNotFound
-			attempt.ResolvedAt = observedAt
+			return tx.Outbox().Enqueue(ctx, next)
+		case application.ObservationOutcomeRejected:
 			if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptUnknown); err != nil {
 				return err
 			}
-			execution.CurrentAttempt++
-			execution.State = application.AttemptPending
+			return w.finishOperation(ctx, tx, message, execution, execution.Version, *finish, observedAt)
+		case application.ObservationOutcomeRetry:
 			dispatch := application.DispatchMessage(execution.OperationID, execution.CurrentAttempt, execution.Version+1)
+			if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptUnknown); err != nil {
+				return err
+			}
 			if err := tx.SubmissionAttempts().CreateSubmissionAttempt(ctx, application.SubmissionAttemptRecord{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, State: application.SubmissionAttemptPending, DispatchMessage: dispatch.ID}); err != nil {
 				return err
 			}
@@ -569,61 +563,19 @@ func (w *Worker) recordObservation(ctx context.Context, message application.Outb
 				return err
 			}
 			return tx.Outbox().Enqueue(ctx, dispatch)
-		}
-		if observation.Execution == nil {
-			if observation.Correlation == provisioning.RequestCorrelationFound {
-				execution.AcceptanceConfirmed = true
-			}
-			execution.State = application.AttemptUnknown
+		case application.ObservationOutcomeObserve:
 			next := scheduleObserve(&execution, w.RetryBase)
 			if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
 				return err
 			}
-			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "ObservedNoCurrentExecution"); err != nil {
+			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, observeCompletionReason(observation)); err != nil {
 				return err
 			}
 			return tx.Outbox().Enqueue(ctx, next)
-		}
-		if observation.Correlation != provisioning.RequestCorrelationFound {
-			execution.State = application.AttemptUnknown
-			execution.LastFailure = &provisioning.ExecutionFailure{Kind: provisioning.FailureUnknown, Reason: "ExecutionCorrelationUnknown", Message: "terminal execution evidence was not positively correlated"}
-			next := scheduleObserve(&execution, w.RetryBase)
-			if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
-				return err
-			}
-			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "ObservedUncorrelatedExecution"); err != nil {
-				return err
-			}
-			return tx.Outbox().Enqueue(ctx, next)
-		}
-		if observation.Execution.Handle != nil {
-			execution.Handle = observation.Execution.Handle
-		}
-		execution.AcceptanceConfirmed = true
-		switch observation.Execution.State {
-		case provisioning.ExecutionStateAccepted, provisioning.ExecutionStateRunning, provisioning.ExecutionStateUnknown:
-			execution.State = application.AttemptAccepted
-			if observation.Execution.State == provisioning.ExecutionStateUnknown {
-				execution.State = application.AttemptUnknown
-			}
-			next := scheduleObserve(&execution, w.RetryBase)
-			if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
-				return err
-			}
-			if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "ObservedNonterminal"); err != nil {
-				return err
-			}
-			return tx.Outbox().Enqueue(ctx, next)
-		case provisioning.ExecutionStateSucceeded:
-			execution.State = application.AttemptSucceeded
-			return w.finishOperation(ctx, tx, message, execution, execution.Version, true, "ObservationSucceeded", "", observedAt, observation.Resource)
-		case provisioning.ExecutionStateFailed:
-			execution.State = application.AttemptFailed
-			failure := failureFrom(nil, observation.Execution)
-			execution.LastFailure = failure
-			return w.finishOperation(ctx, tx, message, execution, execution.Version, false, failure.Reason, failure.Message, observedAt, observation.Resource)
+		case application.ObservationOutcomeSucceeded, application.ObservationOutcomeFailed:
+			return w.finishOperation(ctx, tx, message, execution, execution.Version, *finish, observedAt)
 		default:
-			return fmt.Errorf("invalid execution state %q", observation.Execution.State)
+			return fmt.Errorf("invalid observation outcome %d", outcome)
 		}
 	})
 }
@@ -664,7 +616,16 @@ func (w *Worker) passiveObserve(ctx context.Context, message application.OutboxM
 		if current.Version != loaded.Version {
 			return application.ErrConcurrencyConflict
 		}
-		status, err := w.Lifecycle.ApplyObservation(current.Resource, current.Status, observation.Resource, w.observedAt(observation.ObservedAt))
+		observedAt := w.observedAt(observation.ObservedAt)
+		if observedAt.Before(current.Resource.UpdatedAt()) || observedAt.Before(current.Status.UpdatedAt()) {
+			return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "StaleObservation")
+		}
+		if _, found, err := tx.Operations().ActiveForResource(ctx, message.ResourceID); err != nil {
+			return err
+		} else if found {
+			return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "StaleObservation")
+		}
+		status, err := w.Lifecycle.ApplyObservation(current.Resource, current.Status, observation.Resource, observedAt)
 		if err != nil {
 			return err
 		}
@@ -676,7 +637,7 @@ func (w *Worker) passiveObserve(ctx context.Context, message application.OutboxM
 	})
 }
 
-func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork, message application.OutboxMessage, execution application.ProvisioningExecutionRecord, expectedExecutionVersion uint64, succeeded bool, reason, failureMessage string, at time.Time, facts domain.ObservedFacts) error {
+func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork, message application.OutboxMessage, execution application.ProvisioningExecutionRecord, expectedExecutionVersion uint64, finish application.Finish, at time.Time) error {
 	operation, err := tx.Operations().GetOperation(ctx, execution.OperationID)
 	if err != nil {
 		return err
@@ -685,20 +646,9 @@ func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork,
 	if err != nil {
 		return err
 	}
-	var result lifecycle.Result
-	if succeeded {
-		result, err = w.Lifecycle.Complete(resource.Resource, resource.Status, operation.Operation, workerEventID(operation.Operation.ID(), "succeeded"), at)
-	} else {
-		result, err = w.Lifecycle.Fail(resource.Resource, resource.Status, operation.Operation, reason, failureMessage, workerEventID(operation.Operation.ID(), "failed"), at)
-	}
+	result, err := application.BuildFinishEvidence(w.Lifecycle, operation.Operation, resource.Resource, resource.Status, finish, at)
 	if err != nil {
 		return err
-	}
-	if facts.Presence != "" || facts.Readiness != "" || facts.Drift != "" {
-		result.Status, err = w.Lifecycle.ApplyPostOperationObservation(resource.Resource, result.Status, facts, at)
-		if err != nil {
-			return err
-		}
 	}
 	resource.Status = result.Status
 	if err := tx.Resources().SaveResource(ctx, resource, resource.Version); err != nil {
@@ -780,42 +730,15 @@ func observationRequest(execution application.ProvisioningExecutionRecord) provi
 		Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle}
 }
 
-func failureFrom(err error, execution *provisioning.Execution) *provisioning.ExecutionFailure {
-	if execution != nil && execution.Failure != nil {
-		failure := *execution.Failure
-		if failure.Reason == "" {
-			failure.Reason = "ExecutionFailed"
-		}
-		return &failure
-	}
-	reason := "SubmissionUnknown"
-	message := "submission outcome is ambiguous"
-	if err != nil {
-		message = err.Error()
-	}
-	return &provisioning.ExecutionFailure{Kind: provisioning.FailureUnknown, Reason: reason, Message: message}
-}
-
-func validExecutionState(state provisioning.ExecutionState) bool {
-	switch state {
-	case provisioning.ExecutionStateAccepted, provisioning.ExecutionStateRunning, provisioning.ExecutionStateSucceeded, provisioning.ExecutionStateFailed, provisioning.ExecutionStateUnknown:
-		return true
+func observeCompletionReason(observation provisioning.ExecutionObservation) string {
+	switch {
+	case observation.Execution == nil:
+		return "ObservedNoCurrentExecution"
+	case observation.Correlation != provisioning.RequestCorrelationFound:
+		return "ObservedUncorrelatedExecution"
 	default:
-		return false
+		return "ObservedNonterminal"
 	}
-}
-
-func validCorrelation(correlation provisioning.RequestCorrelation) bool {
-	switch correlation {
-	case provisioning.RequestCorrelationFound, provisioning.RequestCorrelationNotFound, provisioning.RequestCorrelationUnknown:
-		return true
-	default:
-		return false
-	}
-}
-
-func workerEventID(operationID domain.OperationID, suffix string) domain.EventID {
-	return domain.EventID("liftr-internal-" + string(operationID) + "-worker-" + suffix)
 }
 
 func (w *Worker) observedAt(providerTime time.Time) time.Time {

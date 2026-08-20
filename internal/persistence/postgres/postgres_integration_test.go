@@ -315,14 +315,14 @@ func TestPostgresConcurrentUpdateDeleteLeavesOneActiveOperation(t *testing.T) {
 		<-start
 		_, err := service.AdmitUpdateResource(ctx, application.UpdateResourceCommand{ID: command.ID, ExpectedGeneration: 1, Spec: updatedSpec,
 			OperationID: "operation-concurrent-update", EventID: "event-concurrent-update", RequestedAt: resource.Status.UpdatedAt().Add(time.Hour),
-			IdempotencyKey: "concurrent-update", Fingerprint: "update"})
+			IdempotencyKey: "concurrent-update"})
 		results <- err
 	}()
 	go func() {
 		<-start
 		_, err := service.AdmitDeleteResource(ctx, application.DeleteResourceCommand{ID: command.ID, ExpectedGeneration: 1,
 			OperationID: "operation-concurrent-delete", EventID: "event-concurrent-delete", RequestedAt: resource.Status.UpdatedAt().Add(2 * time.Hour),
-			IdempotencyKey: "concurrent-delete", Fingerprint: "delete"})
+			IdempotencyKey: "concurrent-delete"})
 		results <- err
 	}()
 	close(start)
@@ -365,7 +365,7 @@ func TestPostgresConcurrentCreateIdempotencyPersistsOneAggregate(t *testing.T) {
 	}
 	if _, err := service.AdmitDeleteResource(ctx, application.DeleteResourceCommand{ID: command.ID, ExpectedGeneration: 1,
 		OperationID: "different-operation", EventID: "different-event", RequestedAt: command.RequestedAt.Add(time.Hour),
-		IdempotencyKey: command.IdempotencyKey, Fingerprint: command.Fingerprint}); !errors.Is(err, application.ErrIdempotencyConflict) {
+		IdempotencyKey: command.IdempotencyKey}); !errors.Is(err, application.ErrIdempotencyConflict) {
 		t.Fatalf("cross-command idempotency error=%v", err)
 	}
 	for table, want := range map[string]int{"resources": 1, "operations": 1, "idempotency_records": 1, "outbox_messages": 1} {
@@ -639,7 +639,7 @@ func postgresCreateCommand(t *testing.T, resourceID domain.ResourceID, operation
 	}
 	return application.CreateResourceCommand{ID: resourceID, Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"}, Spec: spec,
 		OperationID: operationID, EventID: domain.EventID("event-" + string(operationID)), RequestedAt: time.Date(2026, 8, 16, 12, 0, 0, 123, time.UTC),
-		IdempotencyKey: "key-" + string(operationID), Fingerprint: "fingerprint-" + string(operationID)}
+		IdempotencyKey: "key-" + string(operationID)}
 }
 
 func getExecution(t *testing.T, store *postgres.Store, operationID domain.OperationID) application.ProvisioningExecutionRecord {

@@ -71,9 +71,9 @@ The process bootstrap, core domain model, pure lifecycle semantics, provider-neu
 - `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
 - `internal/lifecycle` defines deterministic create, update, and delete orchestration rules without executing infrastructure.
 - `internal/provisioning` defines the provider-neutral Submit/Observe boundary, a deterministic contract fake, and an isolated Pulumi Automation API adapter.
-- `internal/application` coordinates lifecycle, provisioning, stable private provisioner bindings, repository ports, and passive observation.
+- `internal/application` coordinates lifecycle, provisioning, stable private provisioner bindings, repository ports, passive observation, evidence monotonicity (stale provider evidence never applies), and malformed-facts sanitization.
 - `internal/persistence/postgres` implements durable state, immutable submission attempts, migrations, and a transactional outbox.
-- `internal/worker` drives lifecycle work, renews long-running Dispatch leases, and fences ambiguous recovery.
+- `internal/worker` drives lifecycle work, renews long-running Dispatch leases, fences ambiguous recovery, and keeps the observe loop alive for active executions when backend evidence is stale or absent.
 - `internal/resourcetypes/postgresqldatabase` demonstrates a ResourceType outside the core without provisioning infrastructure.
 
 Production Pulumi programs, cloud-specific infrastructure adapters, a continuously running worker process, and public Resource endpoints have not been implemented.
