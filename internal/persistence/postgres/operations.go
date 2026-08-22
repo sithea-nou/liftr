@@ -18,14 +18,45 @@ func (r *repositories) GetOperation(ctx context.Context, id domain.OperationID) 
 		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
 		failure_reason, failure_message, record_version::text
 		FROM operations WHERE id=$1 FOR UPDATE`, id)
-	return scanOperation(id, row)
+	record, err := scanOperation(id, row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return application.OperationRecord{}, application.ErrOperationNotFound
+	}
+	if err != nil {
+		return application.OperationRecord{}, translateError(err)
+	}
+	return record, nil
 }
-
 func (r *repositories) ActiveForResource(ctx context.Context, id domain.ResourceID) (application.OperationRecord, bool, error) {
 	row := r.tx.QueryRow(ctx, `SELECT id, capability, target_generation::text, state, phase,
 		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
 		failure_reason, failure_message, record_version::text
 		FROM operations WHERE resource_id=$1 AND state IN ('Pending','Running') FOR UPDATE`, id)
+	var operationID domain.OperationID
+	var capability, targetText, state, phase string
+	var requestedNS, phaseChangedNS int64
+	var startedNS, completedNS *int64
+	var failureReason, failureMessage *string
+	var versionText string
+	if err := row.Scan(&operationID, &capability, &targetText, &state, &phase, &requestedNS, &startedNS, &phaseChangedNS, &completedNS, &failureReason, &failureMessage, &versionText); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return application.OperationRecord{}, false, nil
+		}
+		return application.OperationRecord{}, false, translateError(err)
+	}
+	record, err := restoreOperation(operationID, id, capability, targetText, state, phase, requestedNS, startedNS, phaseChangedNS, completedNS, failureReason, failureMessage, versionText)
+	return record, err == nil, err
+}
+
+// LatestForResource selects the newest Operation for a Resource with a fully
+// deterministic total order: requested_at_ns descending, then the byte-wise
+// Operation ID descending. The "C" collation on operations.id makes the
+// tiebreak independent of database locale settings.
+func (r *repositories) LatestForResource(ctx context.Context, id domain.ResourceID) (application.OperationRecord, bool, error) {
+	row := r.tx.QueryRow(ctx, `SELECT id, capability, target_generation::text, state, phase,
+		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
+		failure_reason, failure_message, record_version::text
+		FROM operations WHERE resource_id=$1 ORDER BY requested_at_ns DESC, id DESC LIMIT 1`, id)
 	var operationID domain.OperationID
 	var capability, targetText, state, phase string
 	var requestedNS, phaseChangedNS int64
@@ -49,8 +80,10 @@ func scanOperation(id domain.OperationID, row pgx.Row) (application.OperationRec
 	var startedNS, completedNS *int64
 	var failureReason, failureMessage *string
 	var versionText string
+	// The raw scan error is preserved so GetOperation can distinguish a
+	// missing row (pgx.ErrNoRows) before persistence translation.
 	if err := row.Scan(&resourceID, &capability, &targetText, &state, &phase, &requestedNS, &startedNS, &phaseChangedNS, &completedNS, &failureReason, &failureMessage, &versionText); err != nil {
-		return application.OperationRecord{}, translateError(err)
+		return application.OperationRecord{}, err
 	}
 	return restoreOperation(id, resourceID, capability, targetText, state, phase, requestedNS, startedNS, phaseChangedNS, completedNS, failureReason, failureMessage, versionText)
 }

@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has the provisioner-neutral domain and lifecycle model, durable PostgreSQL orchestration, a fenced outbox worker, and a Pulumi Automation API adapter foundation. Public transport APIs and cloud-specific ResourceTypes remain future work.
+This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has the provisioner-neutral domain and lifecycle model, durable PostgreSQL orchestration, a fenced outbox worker, a Pulumi Automation API adapter foundation, and a versioned HTTP Resource API. Cloud-specific ResourceTypes remain future work.
 
 ## Product Boundary
 
@@ -67,7 +67,7 @@ The lifecycle engine applies deterministic create, update, and delete rules usin
 The process bootstrap, core domain model, pure lifecycle semantics, provider-neutral provisioning contract, and application orchestration ports exist:
 
 - `cmd/liftr-server` starts the HTTP server, emits structured logs, and performs graceful shutdown.
-- `internal/server` exposes the `GET /healthz` route.
+- `internal/api/http` implements the versioned Resource and Operation HTTP contract ([ADR-0008](adr/0008-http-resource-api-contract-v1.md)): asynchronous create, read, update-admission, and delete-admission with concrete generation preconditions, mandatory idempotency keys, RFC 9457 problems, deterministic latest-operation reads, and health endpoints.
 - `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
 - `internal/lifecycle` defines deterministic create, update, and delete orchestration rules without executing infrastructure.
 - `internal/provisioning` defines the provider-neutral Submit/Observe boundary, a deterministic contract fake, and an isolated Pulumi Automation API adapter.
@@ -76,4 +76,4 @@ The process bootstrap, core domain model, pure lifecycle semantics, provider-neu
 - `internal/worker` drives lifecycle work, renews long-running Dispatch leases, fences ambiguous recovery, and keeps the observe loop alive for active executions when backend evidence is stale or absent.
 - `internal/resourcetypes/postgresqldatabase` demonstrates a ResourceType outside the core without provisioning infrastructure.
 
-Production Pulumi programs, cloud-specific infrastructure adapters, a continuously running worker process, and public Resource endpoints have not been implemented.
+Production Pulumi programs, cloud-specific infrastructure adapters, and a continuously running worker process have not been implemented.

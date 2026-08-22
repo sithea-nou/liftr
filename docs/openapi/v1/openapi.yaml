@@ -1,0 +1,691 @@
+# Liftr Resource API v1 — handwritten contract.
+# This document is authoritative for the public v1 HTTP surface and is
+# verified against the running router by contract tests; generation from
+# internal Go structures is deliberately not used.
+openapi: 3.0.3
+info:
+  title: Liftr Resource API
+  version: "1.0"
+  description: |
+    Provisioner-neutral resource lifecycle control plane.
+
+    Mutations are asynchronous admissions. POST creates a Resource and
+    returns 201 immediately; PUT and DELETE return 202 while infrastructure
+    work proceeds out of band. Clients monitor lifecycle progress through
+    Operations.
+
+    Concurrency: PUT and DELETE require a concrete unsigned 64-bit
+    If-Liftr-Generation precondition. Wildcard semantics do not exist in v1;
+    a missing header is answered with 428 PRECONDITION_REQUIRED and any
+    non-uint64 value is invalid.
+
+    Idempotency: every mutation requires an Idempotency-Key header. Replays
+    return the original lifecycle Operation through Location and Link
+    rel="monitor" while the body carries the current Resource snapshot, so
+    latestOperation may already be newer than the replay's Operation.
+
+    Tombstones: a retained Deleted Resource is returned with status.state
+    "Deleted". A 404 means Liftr holds no retained record for the ID.
+    Recreation under a used ID is refused with 409 RESOURCE_ALREADY_EXISTS;
+    tombstone resurrection is not supported.
+
+    Errors follow RFC 9457 Problem Details (application/problem+json) with
+    the Liftr extensions "code", "requestId", and narrow fields such as
+    "currentGeneration".
+
+    Caching and representation validators are deferred: responses carry no
+    representation validator, so clients must treat ResourceStatus and
+    Operation state as mutable and must not cache versioned responses.
+paths:
+  /v1/resources:
+    post:
+      operationId: createResource
+      summary: Admit an asynchronous resource create request
+      description: |
+        Returns 201 Created with the Resource URL in Location and the
+        original lifecycle Operation in a Link rel="monitor" header. The
+        first accepted response and a later idempotent replay share this
+        shape; replays add Idempotency-Replayed: true and report the current
+        Resource snapshot in the body.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/XCorrelationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateResourceRequest"
+      responses:
+        "201":
+          description: |
+            Create admitted. On an idempotent replay of the original request
+            the status stays 201 and the Idempotency-Replayed header is true.
+          headers:
+            Location:
+              $ref: "#/components/headers/LocationResource"
+            Link:
+              $ref: "#/components/headers/LinkMonitor"
+            Liftr-Generation:
+              $ref: "#/components/headers/LiftrGeneration"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: |
+            RESOURCE_ALREADY_EXISTS when a retained record already exists for
+            the ID, IDEMPOTENCY_CONFLICT when the key was reused with
+            different content, OPERATION_ACTIVE when the Resource has an
+            active Operation.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                resourceAlreadyExists:
+                  value:
+                    type: https://liftr.dev/problems/resource-already-exists
+                    title: Resource already exists
+                    status: 409
+                    instance: /v1/resources
+                    code: RESOURCE_ALREADY_EXISTS
+                    requestId: 6f2c7a4c8e5b41d0
+                idempotencyConflict:
+                  value:
+                    type: https://liftr.dev/problems/idempotency-conflict
+                    title: Idempotency key conflict
+                    status: 409
+                    instance: /v1/resources
+                    code: IDEMPOTENCY_CONFLICT
+                    requestId: 6f2c7a4c8e5b41d0
+        "422":
+          $ref: "#/components/responses/UnsupportedResourceType"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/resources/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      operationId: getResource
+      summary: Read one retained Resource
+      description: |
+        Returns the Resource with its normalized observed state. A retained
+        Deleted tombstone is a normal 200 response whose status.state is
+        "Deleted"; 404 means Liftr holds no retained record for this ID.
+      parameters:
+        - $ref: "#/components/parameters/XCorrelationId"
+      responses:
+        "200":
+          description: The retained Resource representation.
+          headers:
+            Liftr-Generation:
+              $ref: "#/components/headers/LiftrGeneration"
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resource"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
+    put:
+      operationId: updateResource
+      summary: Admit an asynchronous spec revision
+      description: |
+        Requires a concrete If-Liftr-Generation precondition equal to the
+        Resource's current generation. Returns 202 Accepted with the new
+        lifecycle Operation in Location and Link rel="monitor".
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfLiftrGeneration"
+        - $ref: "#/components/parameters/XCorrelationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateResourceRequest"
+      responses:
+        "202":
+          description: |
+            Update admitted. An idempotent replay keeps 202, identifies the
+            original lifecycle Operation in Location and Link, adds
+            Idempotency-Replayed: true, and reports the current snapshot.
+          headers:
+            Location:
+              $ref: "#/components/headers/LocationOperation"
+            Link:
+              $ref: "#/components/headers/LinkMonitor"
+            Liftr-Generation:
+              $ref: "#/components/headers/LiftrGeneration"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "409":
+          description: |
+            GENERATION_CONFLICT exposes currentGeneration; also possible are
+            IDEMPOTENCY_CONFLICT, OPERATION_ACTIVE, and
+            RESOURCE_STATE_CONFLICT.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                generationConflict:
+                  value:
+                    type: https://liftr.dev/problems/generation-conflict
+                    title: Generation conflict
+                    status: 409
+                    instance: /v1/resources/example
+                    code: GENERATION_CONFLICT
+                    requestId: 6f2c7a4c8e5b41d0
+                    currentGeneration: 7
+        "422":
+          $ref: "#/components/responses/UnsupportedResourceType"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteResource
+      summary: Admit an asynchronous delete request
+      description: |
+        Uses the same concrete If-Liftr-Generation precondition rules as PUT
+        and answers with the same 202 semantics. The retained record remains
+        readable as a Deleted tombstone after completion.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfLiftrGeneration"
+        - $ref: "#/components/parameters/XCorrelationId"
+      responses:
+        "202":
+          description: Delete admitted; see updateResource for replay semantics.
+          headers:
+            Location:
+              $ref: "#/components/headers/LocationOperation"
+            Link:
+              $ref: "#/components/headers/LinkMonitor"
+            Liftr-Generation:
+              $ref: "#/components/headers/LiftrGeneration"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "409":
+          description: |
+            GENERATION_CONFLICT exposes currentGeneration; also possible are
+            IDEMPOTENCY_CONFLICT, OPERATION_ACTIVE, and
+            RESOURCE_STATE_CONFLICT.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/operations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/OperationId"
+    get:
+      operationId: getOperation
+      summary: Read one lifecycle Operation
+      description: |
+        Reports lifecycle state without internal execution detail. This
+        response does not represent a Resource and therefore carries no
+        Liftr-Generation header.
+      parameters:
+        - $ref: "#/components/parameters/XCorrelationId"
+      responses:
+        "200":
+          description: The Operation representation.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "404":
+          description: OPERATION_NOT_FOUND.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                operationNotFound:
+                  value:
+                    type: https://liftr.dev/problems/operation-not-found
+                    title: Operation not found
+                    status: 404
+                    instance: /v1/operations/op-example
+                    code: OPERATION_NOT_FOUND
+                    requestId: 6f2c7a4c8e5b41d0
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Process liveness
+      responses:
+        "200":
+          description: The process is running.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Control-plane readiness
+      description: Reports whether durable state is currently reachable.
+      responses:
+        "200":
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
+components:
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: Retained Resource identifier.
+      schema:
+        type: string
+    OperationId:
+      name: id
+      in: path
+      required: true
+      description: Lifecycle Operation identifier.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-chosen key that makes the mutation replayable.
+      schema:
+        type: string
+    IfLiftrGeneration:
+      name: If-Liftr-Generation
+      in: header
+      required: true
+      description: |
+        Concrete uint64 generation precondition. Wildcards do not exist;
+        a missing header yields 428 PRECONDITION_REQUIRED and a malformed
+        or non-uint64 value yields 400 INVALID_ARGUMENT.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    XCorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: |
+        Optional client correlation identifier. It stays strictly separate
+        from the authoritative X-Request-ID and is echoed verbatim.
+      schema:
+        type: string
+  headers:
+    LiftrGeneration:
+      description: |
+        Resource.Generation for the Resource represented by this response.
+        Emitted only on Resource responses, never on Operation or health
+        responses.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    LocationResource:
+      description: URL of the created Resource (create requests).
+      schema:
+        type: string
+    LocationOperation:
+      description: URL of the lifecycle Operation admitted by this mutation.
+      schema:
+        type: string
+    LinkMonitor:
+      description: |
+        Web Link pointing at the lifecycle Operation to monitor, always the
+        Operation returned by this very request; on a replay it names the
+        original Operation even if newer Operations exist.
+      schema:
+        type: string
+        example: </v1/operations/op-123>; rel="monitor"
+    IdempotencyReplayed:
+      description: True when this response replays an earlier admission.
+      schema:
+        type: string
+        enum: ["true"]
+    XRequestId:
+      description: Authoritative server-generated request identifier.
+      schema:
+        type: string
+    CacheControlNoStore:
+      description: Versioned representations carry no caching metadata.
+      schema:
+        type: string
+        enum: [no-store]
+  schemas:
+    ResourceTypeRef:
+      type: object
+      required: [name, version]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+    OwnerRef:
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          type: string
+        id:
+          type: string
+    # ResourceSpec is opaque, ResourceType-defined intent. It stays open-ended
+    # by design; only well-formed JSON applies. Integer literals stay integers
+    # and decimal or exponent literals stay floats; overflowing integers are
+    # rejected.
+    ResourceSpec:
+      type: object
+      additionalProperties: true
+    Condition:
+      type: object
+      required: [type, status, reason, observedGeneration, lastTransitionAt]
+      properties:
+        type:
+          type: string
+        status:
+          type: string
+          enum: [True, False, Unknown]
+        reason:
+          type: string
+        message:
+          type: string
+        observedGeneration:
+          type: integer
+          format: int64
+        lastTransitionAt:
+          type: string
+          format: date-time
+    ResourceStatus:
+      type: object
+      description: |
+        Liftr-owned provider-neutral observation of a Resource.
+        observedGeneration tracks evaluated desired generations and does not
+        imply successful reconciliation.
+      required: [state, observedGeneration, updatedAt]
+      properties:
+        state:
+          type: string
+          enum: [Unknown, Pending, Ready, Deleting, Deleted, Failed]
+        observedGeneration:
+          type: integer
+          format: int64
+          minimum: 0
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Condition"
+        updatedAt:
+          type: string
+          format: date-time
+    LatestOperationRef:
+      type: object
+      required: [id, capability, state, targetGeneration, href]
+      properties:
+        id:
+          type: string
+        capability:
+          type: string
+          enum: [create, update, delete]
+        state:
+          type: string
+          enum: [Pending, Running, Succeeded, Failed, Canceled]
+        targetGeneration:
+          type: integer
+          format: int64
+        href:
+          type: string
+    Resource:
+      type: object
+      required:
+        - id
+        - type
+        - owner
+        - generation
+        - spec
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        type:
+          $ref: "#/components/schemas/ResourceTypeRef"
+        owner:
+          $ref: "#/components/schemas/OwnerRef"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        spec:
+          $ref: "#/components/schemas/ResourceSpec"
+        status:
+          $ref: "#/components/schemas/ResourceStatus"
+        latestOperation:
+          $ref: "#/components/schemas/LatestOperationRef"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CreateResourceRequest:
+      type: object
+      required: [id, type, owner, spec]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: Client-chosen identifier, addressable as one URL segment.
+        type:
+          $ref: "#/components/schemas/ResourceTypeRef"
+        owner:
+          $ref: "#/components/schemas/OwnerRef"
+        spec:
+          $ref: "#/components/schemas/ResourceSpec"
+    UpdateResourceRequest:
+      type: object
+      required: [spec]
+      additionalProperties: false
+      properties:
+        spec:
+          $ref: "#/components/schemas/ResourceSpec"
+    OperationFailure:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+        message:
+          type: string
+    Operation:
+      type: object
+      description: |
+        One asynchronous action against a specific desired-state generation.
+        Internal execution phases have no public representation in v1.
+      required:
+        - id
+        - resourceId
+        - capability
+        - state
+        - targetGeneration
+        - requestedAt
+      properties:
+        id:
+          type: string
+        resourceId:
+          type: string
+        capability:
+          type: string
+          enum: [create, update, delete]
+        state:
+          type: string
+          enum: [Pending, Running, Succeeded, Failed, Canceled]
+        targetGeneration:
+          type: integer
+          format: int64
+        requestedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        failure:
+          $ref: "#/components/schemas/OperationFailure"
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with Liftr extensions.
+      required: [type, title, status, code, requestId]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+          description: Stable machine-readable Liftr error code.
+          enum:
+            - INVALID_ARGUMENT
+            - UNSUPPORTED_RESOURCE_TYPE
+            - RESOURCE_NOT_FOUND
+            - OPERATION_NOT_FOUND
+            - RESOURCE_ALREADY_EXISTS
+            - IDEMPOTENCY_CONFLICT
+            - GENERATION_CONFLICT
+            - OPERATION_ACTIVE
+            - RESOURCE_STATE_CONFLICT
+            - UNSUPPORTED_CAPABILITY
+            - PRECONDITION_REQUIRED
+            - PROVISIONER_UNAVAILABLE
+            - PERSISTENCE_UNAVAILABLE
+            - INTERNAL
+        requestId:
+          type: string
+        currentGeneration:
+          type: integer
+          format: int64
+          description: Narrow extension present on GENERATION_CONFLICT problems.
+  responses:
+    BadRequest:
+      description: INVALID_ARGUMENT; includes missing Idempotency-Key and malformed preconditions.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ResourceNotFound:
+      description: RESOURCE_NOT_FOUND; no retained record exists for this ID.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    UnsupportedResourceType:
+      description: UNSUPPORTED_RESOURCE_TYPE.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PreconditionRequired:
+      description: PRECONDITION_REQUIRED; a concrete If-Liftr-Generation header is mandatory.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unavailable:
+      description: PROVISIONER_UNAVAILABLE or PERSISTENCE_UNAVAILABLE.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PersistenceUnavailable:
+      description: PERSISTENCE_UNAVAILABLE.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Internal:
+      description: INTERNAL; unexpected server-side failure without internal detail.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"

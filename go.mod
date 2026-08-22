@@ -7,6 +7,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/pulumi/pulumi/sdk/v3 v3.257.0
 	golang.org/x/sys v0.47.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -117,6 +118,5 @@ require (
 	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/frand v1.4.2 // indirect
 )

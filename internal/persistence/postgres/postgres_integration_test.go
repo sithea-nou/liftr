@@ -83,6 +83,132 @@ func TestPostgresMigrationRejectsUnknownAppliedVersion(t *testing.T) {
 	}
 }
 
+// TestPostgresLatestForResourceDeterministicOrdering pins Correction 3:
+// LatestForResource orders by requested_at descending with a deterministic
+// byte-wise Operation ID tiebreak, and the PostgreSQL implementation agrees
+// with the fake repository's logical ordering.
+func TestPostgresLatestForResourceDeterministicOrdering(t *testing.T) {
+	pool, cleanup := migratedPool(t)
+	defer cleanup()
+	ctx := context.Background()
+	store, err := postgres.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, _ := postgresService(t, store, provisioningfake.New(provisioningfake.ModeSynchronous))
+
+	// The admitted create Operation carries an older RequestedAt than the two
+	// equal-timestamp Operations seeded below, so the tiebreak winner is also
+	// the overall latest.
+	command := postgresCreateCommand(t, "resource-latest", "operation-latest", map[string]any{"n": int64(1)})
+	admitted, err := service.AdmitCreateResource(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requestedAt := time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC)
+	equalOlder := mustEqualTimestampOperation(t, "op-a-equal-older", command.ID, domain.CapabilityUpdate, requestedAt)
+	equalNewer := mustEqualTimestampOperation(t, "op-b-equal-newer", command.ID, domain.CapabilityDelete, requestedAt)
+
+	err = store.Within(ctx, func(tx application.UnitOfWork) error {
+		for _, operation := range []domain.Operation{equalOlder, equalNewer} {
+			if err := tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: operation, Version: 1}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	latestFromPostgres := func(t *testing.T) domain.OperationID {
+		t.Helper()
+		var latestID domain.OperationID
+		err := store.Within(ctx, func(tx application.UnitOfWork) error {
+			latest, found, err := tx.Operations().LatestForResource(ctx, command.ID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("no operations found for resource %q", command.ID)
+			}
+			latestID = latest.Operation.ID()
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return latestID
+	}
+
+	for attempt := 0; attempt < 25; attempt++ {
+		if got := latestFromPostgres(t); got != equalNewer.ID() {
+			t.Fatalf("attempt %d: equal RequestedAt selected %q, want deterministic %q", attempt, got, equalNewer.ID())
+		}
+	}
+
+	// The fake repository must agree with PostgreSQL on identical data,
+	// including the admitted create Operation.
+	fakeStore := applicationfake.NewStore()
+	err = fakeStore.Within(ctx, func(tx application.UnitOfWork) error {
+		create := admitted.Operation
+		if err := tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: create, Version: 1}); err != nil {
+			return err
+		}
+		for _, operation := range []domain.Operation{equalOlder, equalNewer} {
+			if err := tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: operation, Version: 1}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pgLatest := latestFromPostgres(t)
+	fakeLatest, fakeFound, err := fakeStore.LatestForResource(ctx, command.ID)
+	if err != nil || !fakeFound {
+		t.Fatalf("fake latest found=%t err=%v", fakeFound, err)
+	}
+	if pgLatest != fakeLatest.Operation.ID() || pgLatest != equalNewer.ID() {
+		t.Fatalf("ordering disagreement: postgres selected %q, fake selected %q, want tiebreak winner %q",
+			pgLatest, fakeLatest.Operation.ID(), equalNewer.ID())
+	}
+}
+
+// TestPostgresGetOperationMissingReturnsOperationNotFound pins that reads of
+// unknown Operations surface an Operation-specific sentinel.
+func TestPostgresGetOperationMissingReturnsOperationNotFound(t *testing.T) {
+	pool, cleanup := migratedPool(t)
+	defer cleanup()
+	ctx := context.Background()
+	store, err := postgres.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.Within(ctx, func(tx application.UnitOfWork) error {
+		_, err := tx.Operations().GetOperation(ctx, "operation-missing")
+		return err
+	})
+	if !errors.Is(err, application.ErrOperationNotFound) {
+		t.Fatalf("missing operation error = %v, want ErrOperationNotFound", err)
+	}
+}
+
+func mustEqualTimestampOperation(t *testing.T, id domain.OperationID, resourceID domain.ResourceID, capability domain.Capability, requestedAt time.Time) domain.Operation {
+	t.Helper()
+	operation, err := domain.NewOperation(id, resourceID, capability, 2, requestedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := operation.Fail("TestCleanup", "terminal for ordering test", requestedAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	return operation
+}
+
 func TestPostgresPersistenceRestartWorkerAndImmutableIntent(t *testing.T) {
 	pool, cleanup := migratedPool(t)
 	defer cleanup()

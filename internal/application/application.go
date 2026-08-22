@@ -113,6 +113,11 @@ type OperationRecord struct {
 type OperationRepository interface {
 	GetOperation(context.Context, domain.OperationID) (OperationRecord, error)
 	ActiveForResource(context.Context, domain.ResourceID) (OperationRecord, bool, error)
+	// LatestForResource returns the most recent Operation for a Resource.
+	// Ordering is deterministic: newest requested_at first, and Operations
+	// with equal requested_at values are ordered by descending Operation ID
+	// so repeated calls always select the same Operation.
+	LatestForResource(context.Context, domain.ResourceID) (OperationRecord, bool, error)
 	CreateOperation(context.Context, OperationRecord) error
 	SaveOperation(context.Context, OperationRecord, uint64) error
 }

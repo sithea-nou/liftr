@@ -143,7 +143,7 @@ func (s *Store) GetResource(_ context.Context, id domain.ResourceID) (applicatio
 
 func (s *Store) CreateResource(_ context.Context, record application.ResourceRecord) error {
 	if _, exists := s.resources[record.Resource.ID()]; exists {
-		return fmt.Errorf("resource already exists")
+		return fmt.Errorf("%w: resource already exists", application.ErrConcurrencyConflict)
 	}
 	if record.Version == 0 {
 		record.Version = 1
@@ -168,7 +168,7 @@ func (s *Store) SaveResource(_ context.Context, record application.ResourceRecor
 func (s *Store) GetOperation(_ context.Context, id domain.OperationID) (application.OperationRecord, error) {
 	record, ok := s.operations[id]
 	if !ok {
-		return application.OperationRecord{}, application.ErrResourceNotFound
+		return application.OperationRecord{}, application.ErrOperationNotFound
 	}
 	return record, nil
 }
@@ -180,6 +180,36 @@ func (s *Store) ActiveForResource(_ context.Context, id domain.ResourceID) (appl
 		}
 	}
 	return application.OperationRecord{}, false, nil
+}
+
+// LatestForResource mirrors the PostgreSQL ordering exactly: newest
+// requested_at_ns first and, for equal timestamps, the descending Operation ID
+// compared byte-wise. Repeated calls always select the same Operation.
+func (s *Store) LatestForResource(_ context.Context, id domain.ResourceID) (application.OperationRecord, bool, error) {
+	var latest application.OperationRecord
+	found := false
+	for _, record := range s.operations {
+		if record.Operation.ResourceID() != id {
+			continue
+		}
+		if !found || operationPrecedes(latest.Operation, record.Operation) {
+			latest = record
+			found = true
+		}
+	}
+	return latest, found, nil
+}
+
+// operationPrecedes reports whether left is older than right under the shared
+// deterministic ordering. Timestamps compare as Unix nanoseconds to match the
+// bigint requested_at_ns column; Operation IDs compare byte-wise to match a
+// "C"-collated text column.
+func operationPrecedes(left, right domain.Operation) bool {
+	leftNS, rightNS := left.RequestedAt().UnixNano(), right.RequestedAt().UnixNano()
+	if leftNS != rightNS {
+		return leftNS < rightNS
+	}
+	return left.ID() < right.ID()
 }
 
 func (s *Store) CreateOperation(_ context.Context, record application.OperationRecord) error {
