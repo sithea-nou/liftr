@@ -560,6 +560,11 @@ func (b basicContract) ValidateSpec(spec domain.ResourceSpec) error {
 	return b.validate(b.resourceType.Ref(), spec)
 }
 
+// ValidateUpdate is permissive by default: bare fakes declare no transition
+// rules. Tests that need rejecting contracts wrap their own contract type or
+// use the catalog ValidateFunc for spec-level rejection.
+func (b basicContract) ValidateUpdate(_, _ domain.ResourceSpec) error { return nil }
+
 func (b basicContract) SpecSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
 type Selector struct {

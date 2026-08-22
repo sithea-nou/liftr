@@ -20,9 +20,10 @@ import (
 // validation. It proves the orchestration boundary without importing any
 // concrete ResourceType implementation.
 type strictContract struct {
-	ref         domain.ResourceTypeRef
-	failLookups bool
-	validations int
+	ref            domain.ResourceTypeRef
+	failLookups    bool
+	validations    int
+	transitionFunc func(oldSpec, newSpec domain.ResourceSpec) error
 }
 
 func newStrictContract(name string) *strictContract {
@@ -57,6 +58,15 @@ func (c *strictContract) ValidateSpec(spec domain.ResourceSpec) error {
 		}})
 	}
 	return nil
+}
+
+// ValidateUpdate delegates to the injected transition rule, or accepts every
+// schema-valid transition when none is configured.
+func (c *strictContract) ValidateUpdate(oldSpec, newSpec domain.ResourceSpec) error {
+	if c.transitionFunc == nil {
+		return nil
+	}
+	return c.transitionFunc(oldSpec, newSpec)
 }
 
 type strictCatalog struct {

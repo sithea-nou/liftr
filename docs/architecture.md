@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has the provisioner-neutral domain and lifecycle model, durable PostgreSQL orchestration, a fenced outbox worker, a Pulumi Automation API adapter foundation, and a versioned HTTP Resource API. Cloud-specific ResourceTypes remain future work.
+This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has the provisioner-neutral domain and lifecycle model, durable PostgreSQL orchestration, a fenced outbox worker, a Pulumi Automation API adapter foundation, a versioned HTTP Resource API, ResourceType contracts with schema discovery and transition semantics, and a first real execution path for PostgreSQLDatabase/v1 through the Pulumi adapter; a private Azure reference implementation is provided but awaits its first successful opt-in acceptance run (see [ADR-0010](adr/0010-resource-type-implementation-binding-and-transition-semantics.md)).
 
 ## Product Boundary
 
@@ -66,7 +66,7 @@ The lifecycle engine applies deterministic create, update, and delete rules usin
 
 The process bootstrap, core domain model, pure lifecycle semantics, provider-neutral provisioning contract, and application orchestration ports exist:
 
-- `cmd/liftr-server` starts the HTTP server, emits structured logs, and performs graceful shutdown.
+- `cmd/liftr-server` starts the HTTP server, composes the durable runtime when `LIFTR_DATABASE_URL` is configured, emits structured logs, and performs graceful shutdown including the worker loop.
 - `internal/api/http` implements the versioned Resource and Operation HTTP contract ([ADR-0008](adr/0008-http-resource-api-contract-v1.md)): asynchronous create, read, update-admission, and delete-admission with concrete generation preconditions, mandatory idempotency keys, RFC 9457 problems, deterministic latest-operation reads, and health endpoints. It adds ResourceType discovery ([ADR-0009](adr/0009-resource-type-contracts-and-schema-discovery.md)): `GET /v1/resource-types` and `GET /v1/resource-types/{name}/{version}` expose developer contracts with their embedded JSON Schema 2020-12 spec schemas; discovery carries no provisioner or platform state.
 - `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
 - `internal/lifecycle` defines deterministic create, update, and delete orchestration rules without executing infrastructure.
@@ -75,6 +75,8 @@ The process bootstrap, core domain model, pure lifecycle semantics, provider-neu
 - `internal/resourcetypes` defines the developer-facing ResourceType contract — identity, display metadata, capabilities, self-contained JSON Schema (draft 2020-12) documents, semantic validation hooks — and a deterministic in-memory registry satisfying the application catalog port. It is the only package that depends on a JSON Schema implementation; validation performs no network schema resolution.
 - `internal/persistence/postgres` implements durable state, immutable submission attempts, migrations, and a transactional outbox.
 - `internal/worker` drives lifecycle work, renews long-running Dispatch leases, fences ambiguous recovery, and keeps the observe loop alive for active executions when backend evidence is stale or absent.
-- `internal/resourcetypes/postgresqldatabase` demonstrates a ResourceType outside the core without provisioning infrastructure. Its contract publishes the accepted developer intent (`version`, `storageGB`, `highAvailability`) as a self-contained JSON Schema document that admission validates structurally and discovery exposes verbatim.
+- `internal/resourcetypes/postgresqldatabase` defines the first executable ResourceType outside the core: its contract publishes the accepted developer intent (`version`, `storageGB`, `highAvailability`), validates specs, and owns the v1 update-transition semantics (version immutable, storage grow-only, availability freely toggleable) that admission enforces synchronously.
+- `internal/provisioning/bindings` translates provider-neutral execution intent into private program input envelopes with representation-safe numeric consumption; composition binds contracts to programs and platform configuration to implementations without any public leakage.
+- `internal/server` composes persistence, catalog, provisioner, HTTP handler, and a ticker-driven outbox worker loop for process startup.
 
-Production Pulumi programs, cloud-specific infrastructure adapters, and a continuously running worker process have not been implemented.
+A first real execution path exists: PostgreSQLDatabase/v1 executes through the Pulumi adapter, validated end to end by deterministic credential-free CI programs that drive the real CLI against the file backend. A private reference implementation targeting Azure Database for PostgreSQL Flexible Server accompanies it behind an opt-in, cost-bearing acceptance suite that has **not yet been run**; the Azure program is architecture today and becomes validated only when that suite passes against a live subscription. `Ready` status means the latest desired-generation execution succeeded (execution-reconciliation semantics); drift detection and independent readiness verification are future work.

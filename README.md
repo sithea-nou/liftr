@@ -27,11 +27,15 @@ Liftr is in early development. The repository currently implements:
 - A Pulumi Automation API provisioner foundation using isolated local Go programs, deterministic retained stacks, and a filesystem state backend.
 - A non-provisioning PostgreSQLDatabase example ResourceType whose developer contract is discoverable and schema-validated.
 - ResourceType discovery: `GET /v1/resource-types` and `GET /v1/resource-types/{name}/{version}` publish developer contracts with self-contained JSON Schema (draft 2020-12) spec schemas; admission validates specs against those contracts before any durable effect.
+- Contract-owned update-transition validation: PostgreSQLDatabase/v1 declares engine version immutable, storage grow-only, and high availability freely toggleable; illegal transitions are rejected synchronously as structured 422 problems with zero durable effects.
+- First real ResourceType execution: PostgreSQLDatabase/v1 executes through the Pulumi Automation API adapter. The execution architecture — envelope encoding, platform-scoped naming, stack identity, history correlation, create/update/delete orchestration, recovery, and honest observation facts — is validated by credential-free CI tests that drive a clearly named deterministic test program through the real CLI against the file backend. A private reference implementation targeting Azure Database for PostgreSQL Flexible Server is provided behind opt-in, cost-bearing acceptance tests; **it is not yet validated** and becomes trusted only after that suite has run successfully against a real subscription.
+- Platform-scoped infrastructure naming, a registration-scoped environment allowlist for provider credentials, generated-and-encrypted administrator secrets that never reach any public surface, and honest normalized observations (`Ready` means the latest desired-generation execution succeeded; drift is not yet detected).
+- An initial runtime composition: `liftr-server` wires durable persistence, the contract registry, the Pulumi adapter, and a ticker-driven outbox worker loop with context-driven shutdown. API serving and worker execution remain independently deployable.
 - Initial tests and continuous integration.
 
 ## Future Direction
 
-No cloud-specific ResourceTypes, production Pulumi programs, authentication, authorization, or public Resource endpoints have been implemented yet. The target architecture is described in [docs/architecture.md](docs/architecture.md), and the decisions that shape future work are recorded in [docs/adr](docs/adr).
+Liftr implements one reference implementation, not generic multi-cloud PostgreSQL support. Resource outputs and connection information are not yet exposed; administrator credentials are generated privately inside the implementation and have no retrieval path. Drift detection, independent readiness verification, credential retrieval and rotation, multi-cloud implementations, Terraform/OpenTofu and Crossplane adapters, CLI tooling, authentication, and authorization remain future work. The target architecture is described in [docs/architecture.md](docs/architecture.md), and the decisions that shape future work are recorded in [docs/adr](docs/adr).
 
 ## Getting Started
 
@@ -75,8 +79,27 @@ LIFTR_TEST_DATABASE_URL='postgres://liftr:liftr@localhost:55432/liftr?sslmode=di
 Pulumi integration tests run when `LIFTR_TEST_PULUMI_ROOT` identifies a preinstalled Pulumi layout containing `bin/pulumi`:
 
 ```sh
-LIFTR_TEST_PULUMI_ROOT="$HOME/.pulumi" go test ./internal/provisioning/pulumi -count=1
+LIFTR_TEST_PULUMI_ROOT="$HOME/.pulumi" go test ./internal/provisioning/pulumi ./internal/server -count=1
 ```
+
+### Azure acceptance tests
+
+The reference implementation against real Azure Database for PostgreSQL Flexible Server is an **opt-in, cost-bearing** external test. It is never part of `go test ./...` or `make verify`, and it never runs without explicit configuration:
+
+> **Validation status:** this acceptance suite has not been executed yet. Until it passes against a live subscription, the Azure reference implementation is provided as architecture only and must be treated as unvalidated.
+
+```sh
+export LIFTR_ACCEPTANCE_AZURE=1
+export LIFTR_ACCEPTANCE_LOCATION='eastus'          # private platform choice
+export LIFTR_ACCEPTANCE_SKU_NAME='Standard_B1ms'
+export LIFTR_ACCEPTANCE_SKU_TIER='Burstable'
+export LIFTR_ACCEPTANCE_HA_MODE='SameZone'         # mode used when highAvailability=true
+export ARM_SUBSCRIPTION_ID=... ARM_TENANT_ID=... ARM_CLIENT_ID=... ARM_CLIENT_SECRET=...
+export PULUMI_CONFIG_PASSPHRASE=...                # encrypts generated credentials in state
+LIFTR_TEST_PULUMI_ROOT="$HOME/.pulumi" make test-acceptance-azure
+```
+
+Never commit generated credentials or cloud state.
 
 Apply migrations explicitly with:
 

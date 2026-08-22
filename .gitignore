@@ -3,6 +3,11 @@
 /bin/
 /dist/
 
+# Prebuilt Pulumi program binaries (registered programs require a digest;
+# binaries are rebuilt from source, never committed)
+internal/provisioning/pulumi/programs/*/program
+internal/provisioning/pulumi/programs/*/dist/
+
 # Test and coverage output
 *.out
 coverage.*

@@ -73,6 +73,18 @@ func (p *Provisioner) Submit(ctx context.Context, request provisioning.Execution
 	if !ok || !supportsCapability(program.Capabilities, request.Capability) {
 		return failedSubmission(provisioning.FailureUnsupported, "CapabilityUnsupported"), nil
 	}
+	// Environment resolution happens before any Pulumi invocation. A missing
+	// required variable is a platform-side misconfiguration detected by
+	// Liftr itself, so it is a conclusive preflight rejection; everything
+	// after a launched execution remains ambiguous regardless of evidence.
+	supplied, err := resolveProgramEnvironment(ctx, p.config.Environment, program.RequiredEnvironment)
+	if err != nil {
+		var missing missingRequiredEnvironmentError
+		if errors.As(err, &missing) {
+			return failedSubmission(provisioning.FailureUnavailable, "RequiredEnvironmentMissing"), nil
+		}
+		return failedSubmission(provisioning.FailureUnavailable, "ExecutionEnvironmentUnavailable"), nil
+	}
 	encoded, err := program.EncodeInput(Input{OperationID: request.OperationID, AttemptNumber: request.AttemptNumber, ResourceID: request.ResourceID,
 		ResourceType: request.ResourceType, Capability: request.Capability, Spec: request.Spec, TargetGeneration: request.TargetGeneration})
 	if err != nil {
@@ -84,7 +96,7 @@ func (p *Provisioner) Submit(ctx context.Context, request provisioning.Execution
 	}
 	defer workspace.cleanup()
 
-	environment, err := p.environment(ctx, workspace)
+	environment, err := p.environment(ctx, workspace, supplied)
 	if err != nil {
 		return failedSubmission(provisioning.FailureUnavailable, "ExecutionEnvironmentUnavailable"), nil
 	}
@@ -145,6 +157,14 @@ func (p *Provisioner) Observe(ctx context.Context, request provisioning.Observat
 	if !ok || !supportsCapability(program.Capabilities, request.Capability) {
 		return provisioning.ExecutionObservation{}, provisioning.ObservationError{Failure: provisioning.ExecutionFailure{Kind: provisioning.FailureUnsupported, Reason: "CapabilityUnsupported", Message: "provisioning capability is unsupported"}}
 	}
+	supplied, err := resolveProgramEnvironment(ctx, p.config.Environment, program.RequiredEnvironment)
+	if err != nil {
+		var missing missingRequiredEnvironmentError
+		if errors.As(err, &missing) {
+			return observationUnavailable("RequiredEnvironmentMissing")
+		}
+		return observationUnavailable("ExecutionEnvironmentUnavailable")
+	}
 	encoded, err := program.EncodeInput(Input{OperationID: request.OperationID, AttemptNumber: request.AttemptNumber, ResourceID: request.ResourceID,
 		ResourceType: request.ResourceType, Capability: request.Capability, Spec: request.Spec, TargetGeneration: request.TargetGeneration})
 	if err != nil {
@@ -155,7 +175,7 @@ func (p *Provisioner) Observe(ctx context.Context, request provisioning.Observat
 		return observationUnavailable("WorkspaceUnavailable")
 	}
 	defer workspace.cleanup()
-	environment, err := p.environment(ctx, workspace)
+	environment, err := p.environment(ctx, workspace, supplied)
 	if err != nil {
 		return observationUnavailable("ExecutionEnvironmentUnavailable")
 	}
@@ -198,7 +218,7 @@ func (p *Provisioner) observeStack(ctx context.Context, stack automationStack, c
 	return observationFromSummary(matches[0], expectedHistoryKind(capability), message, handle), nil
 }
 
-func (p *Provisioner) environment(ctx context.Context, workspace isolatedWorkspace) (map[string]string, error) {
+func (p *Provisioner) environment(ctx context.Context, workspace isolatedWorkspace, supplied map[string]string) (map[string]string, error) {
 	environment := map[string]string{
 		"PULUMI_BACKEND_URL":                          p.config.BackendURL,
 		"PULUMI_DISABLE_AUTOMATIC_PLUGIN_ACQUISITION": "true",
@@ -207,17 +227,8 @@ func (p *Provisioner) environment(ctx context.Context, workspace isolatedWorkspa
 		"PULUMI_SKIP_UPDATE_CHECK":                    "true",
 		inputEnvironment:                              workspace.inputPath(),
 	}
-	if p.config.Environment != nil {
-		provided, err := p.config.Environment(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for key, value := range provided {
-			if key != "PULUMI_CONFIG_PASSPHRASE" && key != "PULUMI_CONFIG_PASSPHRASE_FILE" {
-				return nil, fmt.Errorf("execution environment contains an unsupported key")
-			}
-			environment[key] = value
-		}
+	for key, value := range supplied {
+		environment[key] = value
 	}
 	environment["PULUMI_AUTOMATION_API_SKIP_VERSION_CHECK"] = "false"
 	environment["PULUMI_BACKEND_URL"] = p.config.BackendURL
@@ -292,6 +303,19 @@ func observationFromSummary(summary updateSummary, expectedKind, message string,
 	switch summary.result {
 	case "succeeded":
 		execution.State = provisioning.ExecutionStateSucceeded
+		if expectedKind == "destroy" {
+			// A conclusively correlated successful destroy proves that the
+			// resources the stack managed were removed. That justifies one
+			// honest normalized fact — absence of the Liftr-managed target —
+			// while readiness and drift stay Unknown. Create and update
+			// success never fabricates presence, readiness, or sync facts:
+			// execution evidence is not independent observation.
+			observation.Resource = provisioning.ResourceObservation{
+				Presence:  provisioning.ResourcePresenceNotFound,
+				Readiness: provisioning.ResourceReadinessUnknown,
+				Drift:     provisioning.ResourceDriftUnknown,
+			}
+		}
 	case "failed":
 		execution.State = provisioning.ExecutionStateFailed
 		execution.Failure = &provisioning.ExecutionFailure{Kind: provisioning.FailureExecution, Reason: "ProgramExecutionFailed", Message: "provisioning program execution failed"}

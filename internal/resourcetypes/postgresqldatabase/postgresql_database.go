@@ -89,9 +89,61 @@ func Contract() (resourcetypes.Contract, error) {
 			Type:        typeValue,
 			DisplayName: "PostgreSQL Database",
 			SpecSchema:  SpecSchemaDocument(),
+			Transitions: ValidateTransition,
 		})
 	})
 	return contract, contractErr
+}
+
+// ValidateTransition declares the update-transition semantics of the
+// PostgreSQLDatabase/v1 developer contract. These rules are contract
+// semantics that every implementation claiming to support this ResourceType
+// must satisfy; they are not derived from any particular backend:
+//
+//   - version is immutable after creation. Changing a database's engine
+//     major version is a migration workflow, which PostgreSQLDatabase/v1
+//     does not offer; developers create a new resource instead.
+//   - storageGB may only stay equal or grow. Shrinking allocated storage of
+//     an existing database is not part of the v1 contract.
+//   - highAvailability may change freely in both directions.
+//
+// The function receives defensive copies and mutates neither. Violations use
+// the reserved transition keyword so admission reports them through the same
+// structured channel as other spec-contract violations.
+func ValidateTransition(oldValues, newValues map[string]any) []resourcetypes.TransitionViolation {
+	var violations []resourcetypes.TransitionViolation
+	if oldVersion, oldOK := stringField(oldValues, "version"); oldOK {
+		if newVersion, newOK := stringField(newValues, "version"); newOK && newVersion != oldVersion {
+			violations = append(violations, resourcetypes.TransitionViolation{Path: "/version", Keyword: resourcetypes.TransitionKeyword,
+				Message: "the engine version of an existing PostgreSQLDatabase/v1 resource cannot be changed; request a new resource instead"})
+		}
+	}
+	if oldStorage, oldOK := storageField(oldValues); oldOK {
+		if newStorage, newOK := storageField(newValues); newOK && newStorage < oldStorage {
+			violations = append(violations, resourcetypes.TransitionViolation{Path: "/storageGB", Keyword: resourcetypes.TransitionKeyword,
+				Message: "storageGB cannot decrease for an existing PostgreSQLDatabase/v1 resource"})
+		}
+	}
+	return violations
+}
+
+func stringField(values map[string]any, key string) (string, bool) {
+	value, ok := values[key]
+	if !ok {
+		return "", false
+	}
+	text, ok := value.(string)
+	return text, ok
+}
+
+// storageField reads storageGB through the shared safe numeric conversion so
+// int64 and integral float64 representations compare identically.
+func storageField(values map[string]any) (int64, bool) {
+	value, ok := values["storageGB"]
+	if !ok {
+		return 0, false
+	}
+	return domain.IntegralValue(value)
 }
 
 // NewSpec creates example PostgreSQL developer intent without implementation

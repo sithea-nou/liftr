@@ -17,12 +17,35 @@ import (
 // not mutate them.
 type SemanticValidator func(values map[string]any) []application.SpecViolation
 
+// TransitionViolation reports one illegal old→new spec transition. Path is an
+// RFC 6901 JSON Pointer into the submitted (new) spec, Keyword names the
+// violated contract rule, and Message is a curated client-safe sentence.
+// It is deliberately defined in this package so concrete ResourceType
+// implementations can author transition rules without importing application
+// or any other orchestration package.
+type TransitionViolation struct {
+	Path    string
+	Keyword string
+	Message string
+}
+
+// TransitionKeyword is the reserved violation keyword for update-transition
+// rules. Admission surfaces these violations through the same structured
+// RESOURCE_SPEC_INVALID channel as structural and semantic violations.
+const TransitionKeyword = "transition"
+
+// TransitionValidator applies old→new legality rules that belong to the
+// developer contract rather than to any implementation. It receives defensive
+// copies of the previous and submitted spec values and must mutate neither.
+type TransitionValidator func(oldValues, newValues map[string]any) []TransitionViolation
+
 // ContractInput assembles one immutable ResourceType contract.
 type ContractInput struct {
 	Type        domain.ResourceType
 	DisplayName string
 	SpecSchema  []byte
 	Semantic    SemanticValidator
+	Transitions TransitionValidator
 }
 
 // Contract is a developer-facing ResourceType: identity, display metadata,
@@ -36,6 +59,7 @@ type Contract struct {
 	displayName  string
 	schema       SpecSchema
 	semantic     SemanticValidator
+	transitions  TransitionValidator
 }
 
 var _ application.ResourceContract = Contract{}
@@ -62,6 +86,7 @@ func NewContract(input ContractInput) (Contract, error) {
 		displayName:  displayName,
 		schema:       schema,
 		semantic:     input.Semantic,
+		transitions:  input.Transitions,
 	}, nil
 }
 
@@ -102,6 +127,28 @@ func (c Contract) ValidateSpec(spec domain.ResourceSpec) error {
 	}
 	if len(violations) == 0 {
 		return nil
+	}
+	return application.NewInvalidSpecError(c.Ref(), violations)
+}
+
+// ValidateUpdate evaluates an old→new spec transition against the contract's
+// declared update-transition rules. A schema-valid spec can still be an
+// illegal transition; the contract — not any implementation — owns that
+// distinction. Like ValidateSpec it is a pure predicate over defensive copies,
+// and failures are returned as *application.InvalidSpecError with violations
+// carrying the reserved transition keyword. Contracts without transition rules
+// accept every schema-valid transition.
+func (c Contract) ValidateUpdate(oldSpec, newSpec domain.ResourceSpec) error {
+	if c.transitions == nil {
+		return nil
+	}
+	raw := c.transitions(oldSpec.Values(), newSpec.Values())
+	if len(raw) == 0 {
+		return nil
+	}
+	violations := make([]application.SpecViolation, 0, len(raw))
+	for _, violation := range raw {
+		violations = append(violations, application.SpecViolation{Path: violation.Path, Keyword: violation.Keyword, Message: violation.Message})
 	}
 	return application.NewInvalidSpecError(c.Ref(), violations)
 }

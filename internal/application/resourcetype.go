@@ -87,9 +87,9 @@ func (e *InvalidSpecError) Is(target error) bool { return target == ErrInvalidRe
 // application needs from a ResourceType. Concrete implementations satisfy it
 // structurally; the application never imports them. It exposes only
 // developer-intent concepts: identity, display metadata, contract
-// capabilities, the domain lifecycle type, spec validation, and the schema
-// document used for discovery. Provisioner selection and platform state have
-// no representation here.
+// capabilities, the domain lifecycle type, spec validation, update-transition
+// validation, and the schema document used for discovery. Provisioner
+// selection and platform state have no representation here.
 type ResourceContract interface {
 	Ref() domain.ResourceTypeRef
 	DisplayName() string
@@ -97,6 +97,12 @@ type ResourceContract interface {
 	Capabilities() []domain.Capability
 	Domain() domain.ResourceType
 	ValidateSpec(domain.ResourceSpec) error
+	// ValidateUpdate reports whether transitioning a Resource from oldSpec to
+	// newSpec is legal under the developer contract. A schema-valid spec can
+	// still be an illegal transition; contracts own that distinction. The
+	// application enforces it synchronously during update admission, before
+	// any durable effect.
+	ValidateUpdate(oldSpec, newSpec domain.ResourceSpec) error
 	SpecSchema() json.RawMessage
 }
 
@@ -138,4 +144,21 @@ func validateCommandSpec(contract ResourceContract, spec domain.ResourceSpec) er
 		return invalid
 	}
 	return fmt.Errorf("resource type spec validation failed unexpectedly: %w", err)
+}
+
+// validateCommandTransition enforces the update-admission boundary: an old→new
+// transition is validated against the contract's declared update-transition
+// rules after the new spec validates on its own and before any desired-state
+// mutation. Rejections use the same structured InvalidSpecError channel as
+// spec validation.
+func validateCommandTransition(contract ResourceContract, oldSpec, newSpec domain.ResourceSpec) error {
+	err := contract.ValidateUpdate(oldSpec, newSpec)
+	if err == nil {
+		return nil
+	}
+	var invalid *InvalidSpecError
+	if errors.As(err, &invalid) {
+		return invalid
+	}
+	return fmt.Errorf("resource type transition validation failed unexpectedly: %w", err)
 }

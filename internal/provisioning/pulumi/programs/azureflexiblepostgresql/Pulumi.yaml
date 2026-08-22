@@ -1,0 +1,6 @@
+name: liftr-postgresqldatabase
+runtime:
+  name: go
+  options:
+    binary: ./program
+description: Liftr private reference implementation of PostgreSQLDatabase/v1 on Azure Database for PostgreSQL Flexible Server.

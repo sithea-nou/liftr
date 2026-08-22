@@ -50,12 +50,18 @@ type Input struct {
 type InputEncoder func(Input) ([]byte, error)
 
 type Program struct {
-	ResourceType            domain.ResourceTypeRef
-	Capabilities            []domain.Capability
-	ProjectName             string
-	SourceDir               string
-	SourceDigest            string
-	EncodeInput             InputEncoder
+	ResourceType domain.ResourceTypeRef
+	Capabilities []domain.Capability
+	ProjectName  string
+	SourceDir    string
+	SourceDigest string
+	EncodeInput  InputEncoder
+	// RequiredEnvironment declares the names of the additional child-process
+	// environment variables this program needs from the platform callback.
+	// Only names are declared here; values are supplied at execution time and
+	// never outlive the isolated workspace. Declared names that the platform
+	// does not supply cause a conclusive preflight rejection.
+	RequiredEnvironment     []string
 	SecretInputsUnsupported bool
 }
 
@@ -138,6 +144,9 @@ func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 		}
 		if len(program.Capabilities) == 0 {
 			return nil, fmt.Errorf("Pulumi program capabilities are required")
+		}
+		if err := validateRequiredEnvironment(program.RequiredEnvironment); err != nil {
+			return nil, err
 		}
 		seen := make(map[domain.Capability]struct{}, len(program.Capabilities))
 		for _, capability := range program.Capabilities {

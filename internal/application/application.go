@@ -1122,6 +1122,16 @@ func (s *Service) persistExistingRequest(ctx context.Context, request existingRe
 			if err := validateCommandSpec(resourceType, *request.spec); err != nil {
 				return err
 			}
+			if request.capability == domain.CapabilityUpdate {
+				// Transition legality is contract semantics evaluated against
+				// the stored desired state. It runs before UpdateSpec mutates
+				// anything, so an illegal transition leaves zero durable side
+				// effects. Idempotent replays never reach this point because
+				// replay resolution precedes contract validation.
+				if err := validateCommandTransition(resourceType, stored.Resource.Spec(), *request.spec); err != nil {
+					return err
+				}
+			}
 			if err := stored.Resource.UpdateSpec(*request.spec, request.requestedAt); err != nil {
 				return err
 			}
