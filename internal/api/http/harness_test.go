@@ -43,6 +43,18 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	catalog := applicationfake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{provisioningfake.ResourceType(): typeValue}}
+	return newFixtureWithParts(t, store, catalog)
+}
+
+// newFixtureWithCatalog wires a caller-supplied ResourceTypeCatalog so
+// discovery tests can exercise real contracts through the transport.
+func newFixtureWithCatalog(t *testing.T, catalog application.ResourceTypeCatalog) *fixture {
+	t.Helper()
+	return newFixtureWithParts(t, applicationfake.NewStore(), catalog)
+}
+
+func newFixtureWithParts(t *testing.T, store *applicationfake.Store, catalog application.ResourceTypeCatalog) *fixture {
+	t.Helper()
 	ref, err := application.NewProvisionerRef("transport-test-provider")
 	if err != nil {
 		t.Fatal(err)

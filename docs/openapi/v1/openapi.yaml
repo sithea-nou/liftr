@@ -29,14 +29,91 @@ info:
     Recreation under a used ID is refused with 409 RESOURCE_ALREADY_EXISTS;
     tombstone resurrection is not supported.
 
+    Discovery: GET /v1/resource-types lists registered developer contracts as
+    summaries; GET /v1/resource-types/{name}/{version} returns one contract
+    including its embedded spec schema. Capabilities in discovery describe the
+    ResourceType contract itself; they are not guarantees about current
+    backend availability or provisioner selection. The "observe" capability is
+    contract metadata only; v1 defines no developer-facing observe endpoint.
+
     Errors follow RFC 9457 Problem Details (application/problem+json) with
     the Liftr extensions "code", "requestId", and narrow fields such as
-    "currentGeneration".
+    "currentGeneration". RESOURCE_SPEC_INVALID problems additionally carry
+    sanitized "violations" entries (path/keyword/message) and a "truncated"
+    indicator when more than ten violations exist.
 
     Caching and representation validators are deferred: responses carry no
     representation validator, so clients must treat ResourceStatus and
     Operation state as mutable and must not cache versioned responses.
 paths:
+  /v1/resource-types:
+    get:
+      operationId: listResourceTypes
+      summary: List discoverable ResourceType contracts
+      description: |
+        Returns every registered ResourceType as a summary, ordered
+        deterministically by name ascending, then version ascending.
+        Summaries never embed the spec schema; fetch the detail endpoint for
+        it. No pagination exists in v1 because the catalog is small and the
+        order is total.
+      parameters:
+        - $ref: "#/components/parameters/XCorrelationId"
+      responses:
+        "200":
+          description: The deterministic list of ResourceType summaries.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceTypeList"
+              example:
+                items:
+                  - name: PostgreSQLDatabase
+                    version: v1
+                    displayName: PostgreSQL Database
+                    description: A managed PostgreSQL database requested through a provisioner-neutral contract.
+                    capabilities: [create, delete, observe, update]
+                    href: /v1/resource-types/PostgreSQLDatabase/v1
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
+  /v1/resource-types/{name}/{version}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceTypeName"
+      - $ref: "#/components/parameters/ResourceTypeVersion"
+    get:
+      operationId: getResourceType
+      summary: Read one ResourceType contract with its spec schema
+      description: |
+        Returns one developer contract including its embedded "specSchema".
+        The schema document follows JSON Schema draft 2020-12; this API models
+        only its envelope and does not own the schema keywords. The "$id" URN
+        identifies the schema and is never fetched by Liftr or clients.
+      parameters:
+        - $ref: "#/components/parameters/XCorrelationId"
+      responses:
+        "200":
+          description: The detailed ResourceType representation.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceType"
+        "404":
+          $ref: "#/components/responses/ResourceTypeNotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
   /v1/resources:
     post:
       operationId: createResource
@@ -356,6 +433,23 @@ components:
       description: Lifecycle Operation identifier.
       schema:
         type: string
+    ResourceTypeName:
+      name: name
+      in: path
+      required: true
+      description: ResourceType name, addressed as one URL segment.
+      schema:
+        type: string
+    ResourceTypeVersion:
+      name: version
+      in: path
+      required: true
+      description: |
+        Opaque ResourceType version. A name/version pair identifies one
+        immutable contract; breaking and additive schema changes require a new
+        version once Resources exist.
+      schema:
+        type: string
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -448,6 +542,92 @@ components:
     ResourceSpec:
       type: object
       additionalProperties: true
+    Capability:
+      type: string
+      description: |
+        A developer-facing action supported by a ResourceType contract.
+        "observe" is contract metadata only; v1 defines no developer-facing
+        observe endpoint.
+      enum: [create, update, delete, observe]
+    ResourceTypeSummary:
+      type: object
+      description: |
+        Discovery summary of one developer contract. Capabilities are
+        ResourceType-contract capabilities; they do not report provisioner
+        selection, backend health, or current availability. Provisioner and
+        platform concepts have no representation in discovery.
+      required: [name, version, displayName, description, capabilities, href]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        displayName:
+          type: string
+        description:
+          type: string
+        capabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Capability"
+        href:
+          type: string
+          description: Relative URL of the detailed contract representation.
+    # specSchema embeds a JSON Schema draft 2020-12 document exactly as the
+    # ResourceType registered it. The core API models only this envelope;
+    # keyword semantics are governed by the JSON Schema specification, which
+    # OpenAPI 3.0 Schema Objects deliberately do not mirror here.
+    ResourceSpecSchema:
+      type: object
+      additionalProperties: true
+      description: |
+        JSON Schema (draft 2020-12) describing the accepted "spec" shape for
+        one ResourceType version. Schemas are self-contained; validation never
+        performs network resolution. The "$id" URN identifies the schema and
+        is never fetched. Structural constraints (types, required properties,
+        enums, ranges) apply at admission; unknown properties are rejected.
+    ResourceType:
+      type: object
+      required: [name, version, displayName, description, capabilities, href, specSchema]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        displayName:
+          type: string
+        description:
+          type: string
+        capabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Capability"
+        href:
+          type: string
+        specSchema:
+          $ref: "#/components/schemas/ResourceSpecSchema"
+    SpecViolation:
+      type: object
+      description: |
+        One sanitized spec-contract violation. Paths are RFC 6901 JSON
+        Pointers into the submitted spec ("" denotes the root). Violations are
+        deterministically ordered and capped at ten entries per response.
+      required: [path, keyword, message]
+      properties:
+        path:
+          type: string
+        keyword:
+          type: string
+        message:
+          type: string
+    ResourceTypeList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceTypeSummary"
     Condition:
       type: object
       required: [type, status, reason, observedGeneration, lastTransitionAt]
@@ -628,6 +808,8 @@ components:
           enum:
             - INVALID_ARGUMENT
             - UNSUPPORTED_RESOURCE_TYPE
+            - RESOURCE_TYPE_NOT_FOUND
+            - RESOURCE_SPEC_INVALID
             - RESOURCE_NOT_FOUND
             - OPERATION_NOT_FOUND
             - RESOURCE_ALREADY_EXISTS
@@ -646,6 +828,18 @@ components:
           type: integer
           format: int64
           description: Narrow extension present on GENERATION_CONFLICT problems.
+        violations:
+          type: array
+          description: |
+            Present on RESOURCE_SPEC_INVALID problems. Sanitized, deterministically
+            ordered spec-contract violations; capped at ten entries.
+          items:
+            $ref: "#/components/schemas/SpecViolation"
+        truncated:
+          type: boolean
+          description: |
+            True when RESOURCE_SPEC_INVALID had more violations than the
+            response carries; absent otherwise.
   responses:
     BadRequest:
       description: INVALID_ARGUMENT; includes missing Idempotency-Key and malformed preconditions.
@@ -659,6 +853,19 @@ components:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Problem"
+    ResourceTypeNotFound:
+      description: RESOURCE_TYPE_NOT_FOUND; no contract is registered with this name and version.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://liftr.dev/problems/resource-type-not-found
+            title: Resource type not found
+            status: 404
+            instance: /v1/resource-types/NoDatabase/v1
+            code: RESOURCE_TYPE_NOT_FOUND
+            requestId: 6f2c7a4c8e5b41d0
     UnsupportedResourceType:
       description: UNSUPPORTED_RESOURCE_TYPE.
       content:

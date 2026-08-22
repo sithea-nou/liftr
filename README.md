@@ -25,7 +25,8 @@ Liftr is in early development. The repository currently implements:
 - A pgx PostgreSQL persistence adapter with explicit checksummed migrations.
 - A transactional outbox and provisioner-neutral `RunOnce` worker with fenced leases and ambiguous-dispatch recovery.
 - A Pulumi Automation API provisioner foundation using isolated local Go programs, deterministic retained stacks, and a filesystem state backend.
-- A non-provisioning PostgreSQLDatabase example ResourceType.
+- A non-provisioning PostgreSQLDatabase example ResourceType whose developer contract is discoverable and schema-validated.
+- ResourceType discovery: `GET /v1/resource-types` and `GET /v1/resource-types/{name}/{version}` publish developer contracts with self-contained JSON Schema (draft 2020-12) spec schemas; admission validates specs against those contracts before any durable effect.
 - Initial tests and continuous integration.
 
 ## Future Direction

@@ -5,8 +5,10 @@ package fake
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -123,6 +125,32 @@ func cloneMap[K comparable, V any](source map[K]V) map[K]V {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+// RecordCounts reports how many records of each kind are stored. It exists
+// for tests that assert an admission produced no durable side effects.
+type RecordCounts struct {
+	Resources   int
+	Operations  int
+	Events      int
+	Executions  int
+	Idempotency int
+	Attempts    int
+	Outbox      int
+}
+
+func (s *Store) RecordCounts() RecordCounts {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return RecordCounts{
+		Resources:   len(s.resources),
+		Operations:  len(s.operations),
+		Events:      len(s.events),
+		Executions:  len(s.executions),
+		Idempotency: len(s.idempotency),
+		Attempts:    len(s.attempts),
+		Outbox:      len(s.outbox),
+	}
 }
 
 func (s *Store) Resources() application.ResourceRepository                   { return s }
@@ -477,17 +505,62 @@ func (s *Store) DeadOutbox(_ context.Context, id, token, reason string) error {
 	return nil
 }
 
+// Catalog is a deterministic in-memory ResourceTypeCatalog fake. Types holds
+// bare domain types; they are adapted to application.ResourceContract with a
+// permissive ValidateSpec so existing tests are unaffected by contract
+// validation. Set ValidateFunc to make admission reject specific specs.
 type Catalog struct {
-	Types map[domain.ResourceTypeRef]domain.ResourceType
+	Types        map[domain.ResourceTypeRef]domain.ResourceType
+	ValidateFunc func(ref domain.ResourceTypeRef, spec domain.ResourceSpec) error
 }
 
-func (c Catalog) Get(_ context.Context, ref domain.ResourceTypeRef) (domain.ResourceType, error) {
+func (c Catalog) Get(_ context.Context, ref domain.ResourceTypeRef) (application.ResourceContract, error) {
 	typeValue, ok := c.Types[ref]
 	if !ok {
-		return domain.ResourceType{}, ErrNotFound
+		return nil, ErrNotFound
 	}
-	return typeValue, nil
+	return basicContract{resourceType: typeValue, validate: c.ValidateFunc}, nil
 }
+
+func (c Catalog) List(_ context.Context) ([]application.ResourceContract, error) {
+	refs := make([]domain.ResourceTypeRef, 0, len(c.Types))
+	for ref := range c.Types {
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Name != refs[j].Name {
+			return refs[i].Name < refs[j].Name
+		}
+		return refs[i].Version < refs[j].Version
+	})
+	contracts := make([]application.ResourceContract, 0, len(refs))
+	for _, ref := range refs {
+		contracts = append(contracts, basicContract{resourceType: c.Types[ref], validate: c.ValidateFunc})
+	}
+	return contracts, nil
+}
+
+// basicContract adapts a bare domain.ResourceType to the application contract.
+type basicContract struct {
+	resourceType domain.ResourceType
+	validate     func(ref domain.ResourceTypeRef, spec domain.ResourceSpec) error
+}
+
+func (b basicContract) Ref() domain.ResourceTypeRef       { return b.resourceType.Ref() }
+func (b basicContract) DisplayName() string               { return b.resourceType.Ref().Name }
+func (b basicContract) Description() string               { return b.resourceType.Description() }
+func (b basicContract) Capabilities() []domain.Capability { return b.resourceType.Capabilities() }
+func (b basicContract) Domain() domain.ResourceType       { return b.resourceType }
+
+// ValidateSpec is permissive by default: bare fakes carry no schema.
+func (b basicContract) ValidateSpec(spec domain.ResourceSpec) error {
+	if b.validate == nil {
+		return nil
+	}
+	return b.validate(b.resourceType.Ref(), spec)
+}
+
+func (b basicContract) SpecSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
 type Selector struct {
 	mu    sync.Mutex

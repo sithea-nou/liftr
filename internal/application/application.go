@@ -87,10 +87,6 @@ type IdempotencyRecord struct {
 	OperationID domain.OperationID
 }
 
-type ResourceTypeCatalog interface {
-	Get(context.Context, domain.ResourceTypeRef) (domain.ResourceType, error)
-}
-
 type ProvisionerSelector interface {
 	Select(context.Context, domain.ResourceTypeRef, domain.Capability) (ProvisionerRef, error)
 }
@@ -723,7 +719,7 @@ func (s *Service) persistRetryRequest(ctx context.Context, cmd RetryOperationCom
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceTypeNotFound, err)
 		}
-		transition, err := s.Lifecycle.Request(record.Resource, resourceType, record.Status, &failed.Operation, failed.Operation.Capability(), cmd.NewOperationID, cmd.EventID, cmd.RequestedAt)
+		transition, err := s.Lifecycle.Request(record.Resource, resourceType.Domain(), record.Status, &failed.Operation, failed.Operation.Capability(), cmd.NewOperationID, cmd.EventID, cmd.RequestedAt)
 		if err != nil {
 			return err
 		}
@@ -1063,6 +1059,9 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceTypeNotFound, err)
 		}
+		if err := validateCommandSpec(resourceType, cmd.Spec); err != nil {
+			return err
+		}
 		ref, err := s.Selector.Select(ctx, cmd.Type, domain.CapabilityCreate)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
@@ -1078,7 +1077,7 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 		if err != nil {
 			return err
 		}
-		transition, err := s.Lifecycle.Request(resource, resourceType, status, nil, domain.CapabilityCreate, cmd.OperationID, cmd.EventID, cmd.RequestedAt)
+		transition, err := s.Lifecycle.Request(resource, resourceType.Domain(), status, nil, domain.CapabilityCreate, cmd.OperationID, cmd.EventID, cmd.RequestedAt)
 		if err != nil {
 			return err
 		}
@@ -1120,11 +1119,14 @@ func (s *Service) persistExistingRequest(ctx context.Context, request existingRe
 			return fmt.Errorf("%w: %v", ErrResourceTypeNotFound, err)
 		}
 		if request.spec != nil {
+			if err := validateCommandSpec(resourceType, *request.spec); err != nil {
+				return err
+			}
 			if err := stored.Resource.UpdateSpec(*request.spec, request.requestedAt); err != nil {
 				return err
 			}
 		}
-		transition, err := s.Lifecycle.Request(stored.Resource, resourceType, stored.Status, latest, request.capability, request.operationID, request.eventID, request.requestedAt)
+		transition, err := s.Lifecycle.Request(stored.Resource, resourceType.Domain(), stored.Status, latest, request.capability, request.operationID, request.eventID, request.requestedAt)
 		if err != nil {
 			return err
 		}

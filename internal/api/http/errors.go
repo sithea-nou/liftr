@@ -5,6 +5,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/sithea-nou/liftr/internal/application"
@@ -26,6 +27,12 @@ func (h *handler) mapReadError(w http.ResponseWriter, r *http.Request, err error
 		writeProblem(w, r, CodeOperationNotFound, "no Operation exists with this ID", nil)
 		return
 	}
+	// Discovery addresses a ResourceType entity directly, so an unknown
+	// name/version pair is a 404 rather than the 422 used by mutations.
+	if errors.Is(err, application.ErrResourceTypeNotFound) {
+		writeProblem(w, r, CodeResourceTypeNotFound, "no ResourceType is registered with this name and version", nil)
+		return
+	}
 	mapTransportFailure(w, r, err)
 }
 
@@ -39,6 +46,13 @@ func (h *handler) mapMutationError(w http.ResponseWriter, r *http.Request, err e
 	}
 	if errors.Is(err, application.ErrResourceTypeNotFound) {
 		writeProblem(w, r, CodeUnsupportedResourceType, "the requested resource type is not registered", nil)
+		return
+	}
+	var invalidSpec *application.InvalidSpecError
+	if errors.As(err, &invalidSpec) {
+		detail := fmt.Sprintf("the submitted spec does not satisfy the %s/%s contract",
+			invalidSpec.TypeRef.Name, invalidSpec.TypeRef.Version)
+		writeSpecProblem(w, r, detail, invalidSpec)
 		return
 	}
 	if errors.Is(err, application.ErrProvisionerNotFound) {

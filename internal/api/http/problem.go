@@ -6,12 +6,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/sithea-nou/liftr/internal/application"
 )
 
 // Problem codes are the stable, approved v1 error identifiers.
 const (
 	CodeInvalidArgument         = "INVALID_ARGUMENT"
 	CodeUnsupportedResourceType = "UNSUPPORTED_RESOURCE_TYPE"
+	CodeResourceTypeNotFound    = "RESOURCE_TYPE_NOT_FOUND"
+	CodeResourceSpecInvalid     = "RESOURCE_SPEC_INVALID"
 	CodeResourceNotFound        = "RESOURCE_NOT_FOUND"
 	CodeOperationNotFound       = "OPERATION_NOT_FOUND"
 	CodeResourceAlreadyExists   = "RESOURCE_ALREADY_EXISTS"
@@ -34,6 +38,8 @@ const problemTypeBase = "https://liftr.dev/problems/"
 var problemTitles = map[string]string{
 	CodeInvalidArgument:         "Invalid request",
 	CodeUnsupportedResourceType: "Unsupported resource type",
+	CodeResourceTypeNotFound:    "Resource type not found",
+	CodeResourceSpecInvalid:     "Invalid resource spec",
 	CodeResourceNotFound:        "Resource not found",
 	CodeOperationNotFound:       "Operation not found",
 	CodeResourceAlreadyExists:   "Resource already exists",
@@ -52,23 +58,25 @@ var problemTitles = map[string]string{
 // embeds raw provider, Go, or persistence errors; detail is a curated,
 // client-safe sentence.
 type problem struct {
-	Type              string  `json:"type"`
-	Title             string  `json:"title"`
-	Status            int     `json:"status"`
-	Detail            string  `json:"detail,omitempty"`
-	Instance          string  `json:"instance,omitempty"`
-	Code              string  `json:"code"`
-	RequestID         string  `json:"requestId"`
-	CurrentGeneration *uint64 `json:"currentGeneration,omitempty"`
+	Type              string                      `json:"type"`
+	Title             string                      `json:"title"`
+	Status            int                         `json:"status"`
+	Detail            string                      `json:"detail,omitempty"`
+	Instance          string                      `json:"instance,omitempty"`
+	Code              string                      `json:"code"`
+	RequestID         string                      `json:"requestId"`
+	CurrentGeneration *uint64                     `json:"currentGeneration,omitempty"`
+	Violations        []application.SpecViolation `json:"violations,omitempty"`
+	Truncated         bool                        `json:"truncated,omitempty"`
 }
 
 func problemStatus(code string) int {
 	switch code {
 	case CodeInvalidArgument:
 		return http.StatusBadRequest
-	case CodeUnsupportedResourceType:
+	case CodeUnsupportedResourceType, CodeResourceSpecInvalid:
 		return http.StatusUnprocessableEntity
-	case CodeResourceNotFound, CodeOperationNotFound:
+	case CodeResourceNotFound, CodeOperationNotFound, CodeResourceTypeNotFound:
 		return http.StatusNotFound
 	case CodeResourceAlreadyExists, CodeIdempotencyConflict, CodeGenerationConflict,
 		CodeOperationActive, CodeResourceStateConflict, CodeUnsupportedCapability:
@@ -90,22 +98,40 @@ func problemSlug(code string) string {
 	return slug
 }
 
-// writeProblem renders one Problem Details response. requestId comes from the
-// authoritative server-generated X-Request-ID.
-func writeProblem(w http.ResponseWriter, r *http.Request, code, detail string, currentGeneration *uint64) {
-	status := problemStatus(code)
-	body := problem{
+// buildProblem assembles one Problem Details body from an approved code.
+func buildProblem(r *http.Request, code, detail string, currentGeneration *uint64) problem {
+	return problem{
 		Type:              problemTypeBase + problemSlug(code),
 		Title:             problemTitles[code],
-		Status:            status,
+		Status:            problemStatus(code),
 		Detail:            detail,
 		Instance:          r.URL.Path,
 		Code:              code,
 		RequestID:         RequestIDFromContext(r.Context()),
 		CurrentGeneration: currentGeneration,
 	}
+}
+
+// writeProblem renders one Problem Details response. requestId comes from the
+// authoritative server-generated X-Request-ID.
+func writeProblem(w http.ResponseWriter, r *http.Request, code, detail string, currentGeneration *uint64) {
+	body := buildProblem(r, code, detail, currentGeneration)
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
+	w.WriteHeader(problemStatus(code))
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// writeSpecProblem renders RESOURCE_SPEC_INVALID with structured violations.
+// Violations are sanitized by the application layer: stable JSON Pointer
+// paths, curated messages, deterministic order, and the approved cap with a
+// truncated indicator. Submitted spec values are never echoed.
+func writeSpecProblem(w http.ResponseWriter, r *http.Request, detail string, invalid *application.InvalidSpecError) {
+	body := buildProblem(r, CodeResourceSpecInvalid, detail, nil)
+	body.Violations = append([]application.SpecViolation(nil), invalid.Violations...)
+	body.Truncated = invalid.Truncated
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusUnprocessableEntity)
 	_ = json.NewEncoder(w).Encode(body)
 }

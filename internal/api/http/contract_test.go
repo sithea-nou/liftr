@@ -89,7 +89,8 @@ func TestOpenAPIModelsPublicSchemas(t *testing.T) {
 			t.Errorf("Problem schema is missing %q", field)
 		}
 	}
-	for _, name := range []string{"ResourceStatus", "Condition", "LatestOperationRef", "ResourceSpec"} {
+	for _, name := range []string{"ResourceStatus", "Condition", "LatestOperationRef", "ResourceSpec",
+		"Capability", "ResourceTypeSummary", "ResourceType", "ResourceSpecSchema", "SpecViolation"} {
 		if _, ok := schemas[name]; !ok {
 			t.Errorf("component schema %q is not modeled explicitly", name)
 		}
@@ -103,12 +104,26 @@ func TestOpenAPIModelsPublicSchemas(t *testing.T) {
 	if !allowsArbitrary || additionalProperties != true {
 		t.Fatal("ResourceSpec must allow arbitrary keys")
 	}
+	// ResourceSpecSchema models only the envelope of a JSON Schema document;
+	// it must stay an arbitrary object without pretending to own keywords.
+	schemaEnvelopeProperties := propertyNames(t, schemas["ResourceSpecSchema"])
+	if len(schemaEnvelopeProperties) != 0 {
+		t.Fatalf("ResourceSpecSchema must model only the envelope, got fixed properties %v", schemaEnvelopeProperties)
+	}
+	envelopeAdditional, envelopeAllowsArbitrary := schemas["ResourceSpecSchema"].(map[string]any)["additionalProperties"]
+	if !envelopeAllowsArbitrary || envelopeAdditional != true {
+		t.Fatal("ResourceSpecSchema must allow arbitrary JSON Schema keywords")
+	}
 	assertNoInternalConcepts(t, schemas)
 }
 
 func assertNoInternalConcepts(t *testing.T, schemas map[string]any) {
 	t.Helper()
-	forbidden := []string{"phase", "phaseChangedAt", "provisionerRef", "handle", "attemptNumber", "fingerprint", "recordVersion", "leaseToken"}
+	forbidden := []string{
+		"phase", "phaseChangedAt", "provisionerRef", "handle", "attemptNumber", "fingerprint",
+		"recordVersion", "leaseToken", "pulumi", "terraform", "crossplane", "stack",
+		"workspace", "cloudAccount", "subscription", "gitRepository",
+	}
 	for name, rawSchema := range schemas {
 		for _, property := range propertyNames(t, rawSchema) {
 			for _, bad := range forbidden {
@@ -135,7 +150,8 @@ func TestOpenAPIDocumentsHeadersAndCodes(t *testing.T) {
 		}
 	}
 	codes := []string{
-		"INVALID_ARGUMENT", "UNSUPPORTED_RESOURCE_TYPE", "RESOURCE_NOT_FOUND", "OPERATION_NOT_FOUND",
+		"INVALID_ARGUMENT", "UNSUPPORTED_RESOURCE_TYPE", "RESOURCE_TYPE_NOT_FOUND",
+		"RESOURCE_SPEC_INVALID", "RESOURCE_NOT_FOUND", "OPERATION_NOT_FOUND",
 		"RESOURCE_ALREADY_EXISTS", "IDEMPOTENCY_CONFLICT", "GENERATION_CONFLICT", "OPERATION_ACTIVE",
 		"RESOURCE_STATE_CONFLICT", "UNSUPPORTED_CAPABILITY", "PRECONDITION_REQUIRED",
 		"PROVISIONER_UNAVAILABLE", "PERSISTENCE_UNAVAILABLE", "INTERNAL",
