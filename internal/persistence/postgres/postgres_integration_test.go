@@ -328,7 +328,7 @@ func TestPostgresOutboxUsesServerTimeAndFencesClaims(t *testing.T) {
 	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
 		var found bool
 		var err error
-		first, found, err = tx.Outbox().ClaimOutbox(ctx, "token-one", 20*time.Millisecond)
+		first, found, err = tx.Outbox().ClaimOutbox(ctx, "token-one", time.Minute)
 		if err == nil && !found {
 			return errors.New("no claimable work")
 		}
@@ -345,13 +345,11 @@ func TestPostgresOutboxUsesServerTimeAndFencesClaims(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(10 * time.Millisecond)
 	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
-		return tx.Outbox().RenewOutbox(ctx, first.ID, "token-one", 30*time.Millisecond)
+		return tx.Outbox().RenewOutbox(ctx, first.ID, "token-one", time.Minute)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(15 * time.Millisecond)
 	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
 		_, found, err := tx.Outbox().ClaimOutbox(ctx, "token-before-renewed-expiry", time.Minute)
 		if err == nil && found {
@@ -361,7 +359,13 @@ func TestPostgresOutboxUsesServerTimeAndFencesClaims(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	// Lease expiry is decided by PostgreSQL server time. Positioning the
+	// deadline on the server clock makes the reclamation assertion
+	// deterministic without sleeping past millisecond-scale windows.
+	if _, err := pool.Exec(ctx,
+		"UPDATE outbox_messages SET leased_until = clock_timestamp() - interval '1 microsecond' WHERE id=$1", first.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
 		reclaimed, found, err := tx.Outbox().ClaimOutbox(ctx, "token-three", time.Minute)
 		if err == nil && (!found || reclaimed.ID != first.ID || reclaimed.LeaseToken != "token-three") {
