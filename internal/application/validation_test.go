@@ -126,7 +126,7 @@ func newAdmissionFixture(t *testing.T, typeNames ...string) *admissionFixture {
 	resolver := &appfake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{
 		ref: appfakeProvider{},
 	}}
-	service, err := application.NewService(catalog, selector, resolver, store)
+	service, err := application.NewService(catalog, selector, resolver, store, appfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func (p appfakeProvider) Observe(context.Context, provisioning.ObservationReques
 }
 
 func createCommand(id string, spec domain.ResourceSpec) application.CreateResourceCommand {
-	return application.CreateResourceCommand{
+	return application.CreateResourceCommand{Actor: appfake.Principal("tester"),
 		ID:             domain.ResourceID(id),
 		Type:           domain.ResourceTypeRef{Name: "Widget", Version: "v1"},
 		Owner:          domain.OwnerRef{Kind: "team", ID: "platform"},
@@ -255,12 +255,12 @@ func TestFingerprintUnaffectedByValidation(t *testing.T) {
 	}
 	var intFingerprint, floatFingerprint string
 	err := fixture.store.Within(context.Background(), func(tx application.UnitOfWork) error {
-		record, err := tx.Idempotency().GetIdempotency(context.Background(), intCommand.IdempotencyKey)
+		record, err := tx.Idempotency().GetIdempotency(context.Background(), string(appfake.Principal("tester").ID), intCommand.IdempotencyKey)
 		if err != nil {
 			return err
 		}
 		intFingerprint = record.Fingerprint
-		record, err = tx.Idempotency().GetIdempotency(context.Background(), floatCommand.IdempotencyKey)
+		record, err = tx.Idempotency().GetIdempotency(context.Background(), string(appfake.Principal("tester").ID), floatCommand.IdempotencyKey)
 		if err != nil {
 			return err
 		}
@@ -288,7 +288,7 @@ func TestUpdateValidatesNewSpecAgainstStoredType(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	update := application.UpdateResourceCommand{
+	update := application.UpdateResourceCommand{Actor: appfake.Principal("tester"),
 		ID:                 admitted.Resource.Resource.ID(),
 		ExpectedGeneration: 1,
 		Spec:               validSpec(map[string]any{"invalid": true}),
@@ -322,7 +322,7 @@ func TestUpdateValidatesNewSpecAgainstStoredType(t *testing.T) {
 func TestGetResourceTypeWrapsUnknown(t *testing.T) {
 	fixture := newAdmissionFixture(t, "Widget")
 
-	known, err := fixture.service.GetResourceType(context.Background(), domain.ResourceTypeRef{Name: "Widget", Version: "v1"})
+	known, err := fixture.service.GetResourceType(context.Background(), appfake.Principal("tester"), domain.ResourceTypeRef{Name: "Widget", Version: "v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestGetResourceTypeWrapsUnknown(t *testing.T) {
 		t.Fatalf("DisplayName() = %q", known.DisplayName())
 	}
 
-	_, err = fixture.service.GetResourceType(context.Background(), domain.ResourceTypeRef{Name: "Missing", Version: "v9"})
+	_, err = fixture.service.GetResourceType(context.Background(), appfake.Principal("tester"), domain.ResourceTypeRef{Name: "Missing", Version: "v9"})
 	if !errors.Is(err, application.ErrResourceTypeNotFound) {
 		t.Fatalf("error = %v, want ErrResourceTypeNotFound", err)
 	}
@@ -338,7 +338,7 @@ func TestGetResourceTypeWrapsUnknown(t *testing.T) {
 	// Catalog unavailability is indistinguishable from absence at the port.
 	widget := fixture.catalog.types[domain.ResourceTypeRef{Name: "Widget", Version: "v1"}]
 	widget.failLookups = true
-	if _, err := fixture.service.GetResourceType(context.Background(), widget.Ref()); !errors.Is(err, application.ErrResourceTypeNotFound) {
+	if _, err := fixture.service.GetResourceType(context.Background(), appfake.Principal("tester"), widget.Ref()); !errors.Is(err, application.ErrResourceTypeNotFound) {
 		t.Fatalf("degraded lookup error = %v, want ErrResourceTypeNotFound", err)
 	}
 }
@@ -346,7 +346,7 @@ func TestGetResourceTypeWrapsUnknown(t *testing.T) {
 // TestListResourceTypesPassthrough pins the discovery list read path.
 func TestListResourceTypesPassthrough(t *testing.T) {
 	fixture := newAdmissionFixture(t, "Alpha", "Beta")
-	contracts, err := fixture.service.ListResourceTypes(context.Background())
+	contracts, err := fixture.service.ListResourceTypes(context.Background(), appfake.Principal("tester"))
 	if err != nil {
 		t.Fatal(err)
 	}

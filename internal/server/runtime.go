@@ -13,6 +13,7 @@ import (
 
 	apihttp "github.com/sithea-nou/liftr/internal/api/http"
 	"github.com/sithea-nou/liftr/internal/application"
+	"github.com/sithea-nou/liftr/internal/auth"
 	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/provisioning"
 	"github.com/sithea-nou/liftr/internal/worker"
@@ -32,8 +33,32 @@ type Runtime struct {
 	done     chan struct{}
 }
 
+// AuthConfig carries the secured-runtime authentication configuration: one
+// RFC 9068 OIDC issuer plus the claim-to-membership mapping (ADR-0012).
+type AuthConfig struct {
+	Issuer      string
+	Audience    string
+	Algorithms  []string
+	GroupClaim  string
+	GroupPrefix string
+	KindClaim   string
+	// GrantsFile optionally points at the static subject/group → owner
+	// grants JSON document.
+	GrantsFile string
+	// Clock, Skew, JWKSRefreshEvery, and HTTPClient are test hooks. Leave
+	// them zero/nil in production composition.
+	Clock            func() time.Time
+	Skew             time.Duration
+	JWKSRefreshEvery time.Duration
+	// HTTPClient overrides the bounded metadata client for deterministic
+	// tests only.
+	HTTPClient *http.Client
+}
+
 // Config carries the composition dependencies. Transactions must be durable
-// in production; tests may supply deterministic fakes.
+// in production; tests may supply deterministic fakes. Authentication is
+// mandatory for the full runtime: either Auth is configured or InsecureAuth
+// is explicitly opted into — never neither (ADR-0012).
 type Config struct {
 	Transactions application.TransactionRunner
 	Catalog      application.ResourceTypeCatalog
@@ -45,6 +70,15 @@ type Config struct {
 	// affect in-flight work; long provider calls run under renewed leases.
 	WorkerInterval time.Duration
 	Logger         *slog.Logger
+
+	// Auth configures secured JWT access-token authentication. Exactly one
+	// of Auth and InsecureAuth must be provided.
+	Auth *AuthConfig
+	// InsecureAuth opts into development-only composition: a fixed
+	// development principal and allow-all authorization. It is never
+	// inferred from missing configuration and always logs a prominent
+	// warning.
+	InsecureAuth bool
 }
 
 // Compose wires the process-level object graph without starting any work.
@@ -62,6 +96,10 @@ func Compose(config Config) (*Runtime, error) {
 	if _, ok := config.Provisioners[defaultRef]; !ok {
 		return nil, fmt.Errorf("%w: default provisioner %q is not registered", application.ErrInvalidApplicationCall, defaultRef)
 	}
+	authenticator, authorizer, err := composeAuth(config)
+	if err != nil {
+		return nil, err
+	}
 	interval := config.WorkerInterval
 	if interval <= 0 {
 		interval = 250 * time.Millisecond
@@ -70,7 +108,7 @@ func Compose(config Config) (*Runtime, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	service, err := application.NewService(config.Catalog, staticSelector{ref: defaultRef}, staticResolver{providers: config.Provisioners}, config.Transactions)
+	service, err := application.NewService(config.Catalog, staticSelector{ref: defaultRef}, staticResolver{providers: config.Provisioners}, config.Transactions, authorizer)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +117,52 @@ func Compose(config Config) (*Runtime, error) {
 		return nil, err
 	}
 	instance.RetryBase = interval
-	return &Runtime{handler: apihttp.NewHandler(apihttp.Deps{Service: service}), service: service, worker: instance, logger: logger, workerInterval: interval, done: make(chan struct{})}, nil
+	handler := apihttp.NewHandler(apihttp.Deps{Service: service, Auth: authenticator})
+	return &Runtime{handler: handler, service: service, worker: instance, logger: logger, workerInterval: interval, done: make(chan struct{})}, nil
+}
+
+// composeAuth resolves exactly one authentication mode. The full runtime
+// refuses to start without explicit authentication configuration — silently
+// keeping today's open behavior is rejected by ADR-0012.
+func composeAuth(config Config) (apihttp.Authenticator, application.Authorizer, error) {
+	switch {
+	case config.InsecureAuth && config.Auth != nil:
+		return nil, nil, fmt.Errorf("auth mode conflict: LIFTR_AUTH_MODE=insecure cannot be combined with OIDC configuration")
+	case config.InsecureAuth:
+		logger := config.Logger
+		if logger != nil {
+			logger.Warn("INSECURE MODE: Liftr is running WITHOUT authentication and authorization; "+
+				"every caller acts as a fixed development principal with allow-all permissions. "+
+				"Never expose this instance beyond local development.",
+				"mode", "insecure")
+		}
+		return newInsecureAuthenticator(), allowAllAuthorizer{}, nil
+	case config.Auth == nil:
+		return nil, nil, fmt.Errorf("authentication configuration is required: set the auth issuer and audience, or explicitly opt into LIFTR_AUTH_MODE=insecure")
+	default:
+		grants, err := auth.LoadStaticGrants(config.Auth.GrantsFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		oidcAuthenticator, err := auth.NewOIDCAuthenticator(context.Background(), auth.Config{
+			Issuer:     config.Auth.Issuer,
+			Audience:   config.Auth.Audience,
+			Algorithms: config.Auth.Algorithms,
+			KindClaim:  config.Auth.KindClaim,
+			Mapper: auth.ClaimMapper{
+				GroupClaim: config.Auth.GroupClaim,
+				Prefix:     config.Auth.GroupPrefix,
+				Grants:     grants,
+			},
+			ClockSkew:        config.Auth.Skew,
+			JWKSRefreshEvery: config.Auth.JWKSRefreshEvery,
+			HTTPClient:       config.Auth.HTTPClient,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("compose OIDC authenticator: %w", err)
+		}
+		return oidcAuthenticator, auth.OwnerAuthorizer{}, nil
+	}
 }
 
 // Handler returns the composed HTTP surface.

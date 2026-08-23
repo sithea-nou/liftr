@@ -6,6 +6,7 @@ import (
 	"context"
 
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/identity"
 )
 
 // ResourceView is the read model for one Resource together with its latest
@@ -21,14 +22,19 @@ type ResourceView struct {
 	Outputs *domain.ResourceOutputs
 }
 
-// GetResource reads the current stored state of one Resource. It performs no
-// lifecycle or provisioning work.
-func (s *Service) GetResource(ctx context.Context, id domain.ResourceID) (ResourceRecord, error) {
+// GetResource reads the current stored state of one Resource for an
+// authenticated principal. The stored owner is authorized before any
+// representation is produced; a denial is externally indistinguishable from
+// Resource absence (ADR-0012). It performs no lifecycle or provisioning work.
+func (s *Service) GetResource(ctx context.Context, principal identity.Principal, id domain.ResourceID) (ResourceRecord, error) {
 	var record ResourceRecord
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
 		var err error
 		record, err = tx.Resources().GetResource(ctx, id)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.authorize(ctx, principal, identity.ActionResourceRead, resourceTargetOf(record))
 	})
 	if err != nil {
 		return ResourceRecord{}, err
@@ -36,13 +42,25 @@ func (s *Service) GetResource(ctx context.Context, id domain.ResourceID) (Resour
 	return record, nil
 }
 
-// GetOperation reads the current stored state of one Operation.
-func (s *Service) GetOperation(ctx context.Context, id domain.OperationID) (OperationRecord, error) {
+// GetOperation reads the current stored state of one Operation for an
+// authenticated principal. Operations have no independent access policy: the
+// owning Resource's stored owner is authorized with resource:read (ADR-0012).
+func (s *Service) GetOperation(ctx context.Context, principal identity.Principal, id domain.OperationID) (OperationRecord, error) {
 	var record OperationRecord
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
-		var err error
-		record, err = tx.Operations().GetOperation(ctx, id)
-		return err
+		stored, err := tx.Operations().GetOperation(ctx, id)
+		if err != nil {
+			return err
+		}
+		resource, err := tx.Resources().GetResource(ctx, stored.Operation.ResourceID())
+		if err != nil {
+			return err
+		}
+		if err := s.authorize(ctx, principal, identity.ActionResourceRead, resourceTargetOf(resource)); err != nil {
+			return err
+		}
+		record = stored
+		return nil
 	})
 	if err != nil {
 		return OperationRecord{}, err
@@ -52,12 +70,17 @@ func (s *Service) GetOperation(ctx context.Context, id domain.OperationID) (Oper
 
 // GetResourceOperation reads a consistent view of one Resource, its latest
 // Operation as defined by the deterministic LatestForResource ordering, and
-// its publicly visible outputs.
-func (s *Service) GetResourceOperation(ctx context.Context, id domain.ResourceID) (ResourceView, error) {
+// its publicly visible outputs — after authorizing the principal against the
+// stored owner. Non-secret outputs follow resource:read; the future
+// secret:resolve action stays independently authorized (ADR-0011/0012).
+func (s *Service) GetResourceOperation(ctx context.Context, principal identity.Principal, id domain.ResourceID) (ResourceView, error) {
 	var view ResourceView
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
 		record, err := tx.Resources().GetResource(ctx, id)
 		if err != nil {
+			return err
+		}
+		if err := s.authorize(ctx, principal, identity.ActionResourceRead, resourceTargetOf(record)); err != nil {
 			return err
 		}
 		latest, found, err := tx.Operations().LatestForResource(ctx, id)

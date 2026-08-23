@@ -43,11 +43,12 @@ func TestRawPersistenceFaultsStayOpaque(t *testing.T) {
 			ref: provisioningfake.New(provisioningfake.ModeSynchronous),
 		}},
 		faultRunner{},
+		applicationfake.AllowAll{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{handler: apihttp.NewHandler(apihttp.Deps{Service: service})}
+	f := &fixture{handler: apihttp.NewHandler(apihttp.Deps{Service: service, Auth: newHeaderAuthenticator()}), auth: newHeaderAuthenticator()}
 
 	create := f.request(t, http.MethodPost, "/v1/resources", map[string]string{"Idempotency-Key": "k"}, map[string]any{
 		"id":   "r-fault",

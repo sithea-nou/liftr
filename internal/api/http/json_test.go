@@ -4,6 +4,7 @@ package httpapi_test
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,15 +12,23 @@ import (
 )
 
 // rawRequest sends a handcrafted body so malformed documents can be exercised.
+// A default credential is injected when absent; tests needing explicit
+// credential handling use requestWithoutAuth instead.
 func (f *fixture) rawRequest(t *testing.T, method, path string, headers map[string]string, payload []byte) *http.Response {
 	t.Helper()
+	if _, present := headers["Authorization"]; !present {
+		headers["Authorization"] = "Bearer tester"
+	}
 	req := httptest.NewRequest(method, path, bytes.NewReader(payload))
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
 	recorder := httptest.NewRecorder()
 	f.handler.ServeHTTP(recorder, req)
-	return recorder.Result()
+	response := recorder.Result()
+	buffer := append([]byte(nil), recorder.Body.Bytes()...)
+	response.Body = io.NopCloser(bytes.NewReader(buffer))
+	return response
 }
 
 func envelopeWithSpec(idempotencyIndependentID, spec string) []byte {

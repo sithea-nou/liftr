@@ -177,7 +177,7 @@ func outputsHarness(t *testing.T, provider *mappingProvider) (*application.Servi
 	selector := &applicationfake.Selector{Ref: ref}
 	resolver := &applicationfake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{ref: provider}}
 	catalog := newOutputsCatalog(t)
-	service, err := application.NewService(catalog, selector, resolver, store)
+	service, err := application.NewService(catalog, selector, resolver, store, applicationfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}

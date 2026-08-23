@@ -10,6 +10,14 @@ import (
 
 type EventID string
 
+// EventActor identifies the authenticated principal that requested a lifecycle
+// mutation. It carries deliberately selected normalized audit fields only —
+// never tokens, raw claims, memberships, or authorization decisions (ADR-0012).
+type EventActor struct {
+	ID   string // stable PrincipalID of the requesting principal
+	Kind string // principal kind, e.g. "user"
+}
+
 // Event is an append-only audit/history record, not an event-sourcing primitive.
 type Event struct {
 	id          EventID
@@ -20,6 +28,7 @@ type Event struct {
 	reason      string
 	message     string
 	occurredAt  time.Time
+	actor       *EventActor
 }
 
 func NewEvent(id EventID, resourceID ResourceID, operationID OperationID, generation uint64, typeName, reason, message string, occurredAt time.Time) (Event, error) {
@@ -62,3 +71,31 @@ func (e Event) Type() string             { return e.typeName }
 func (e Event) Reason() string           { return e.reason }
 func (e Event) Message() string          { return e.message }
 func (e Event) OccurredAt() time.Time    { return e.occurredAt }
+
+// Actor returns the requesting principal when one was recorded. Internal
+// lifecycle transitions carry no actor; admission events for authenticated
+// mutations always do (ADR-0012).
+func (e Event) Actor() (EventActor, bool) {
+	if e.actor == nil {
+		return EventActor{}, false
+	}
+	return *e.actor, true
+}
+
+// WithActor returns a copy of the event stamped with the requesting
+// principal. The lifecycle engine never sets actors; the application layer
+// stamps the admission event with the authenticated caller before it is
+// appended, so worker-driven transitions remain unattributed system actions.
+// Actor identity is validated here: an actor without a stable ID and kind is
+// rejected rather than persisted in a lossy form.
+func (e Event) WithActor(actor EventActor) (Event, error) {
+	if strings.TrimSpace(actor.ID) == "" {
+		return Event{}, fmt.Errorf("event actor ID is required")
+	}
+	if strings.TrimSpace(actor.Kind) == "" {
+		return Event{}, fmt.Errorf("event actor kind is required")
+	}
+	copied := e
+	copied.actor = &EventActor{ID: strings.TrimSpace(actor.ID), Kind: strings.TrimSpace(actor.Kind)}
+	return copied, nil
+}

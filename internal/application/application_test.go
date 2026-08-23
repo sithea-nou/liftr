@@ -24,7 +24,7 @@ func TestCreateResourceUsesRealLifecycleAndSynchronousProvisioning(t *testing.T)
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, store, selector, resolver := newService(t, ref, provider)
 
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-1", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-1", EventID: "event-1", RequestedAt: applicationTime,
 	})
@@ -56,7 +56,7 @@ func TestAsynchronousObservationUsesProvisionerBinding(t *testing.T) {
 	provider := provisioningfake.New(provisioningfake.ModeAsynchronous)
 	service, _, _, _ := newService(t, ref, provider)
 
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-async", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-async", EventID: "event-async", RequestedAt: applicationTime,
 	})
@@ -92,7 +92,7 @@ func TestExistingResourceUsesStableBindingWhenSelectorChanges(t *testing.T) {
 	service, _, selector, resolver := newService(t, firstRef, firstProvider)
 	resolver.Providers[secondRef] = secondProvider
 
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-bound", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create", EventID: "event-create", RequestedAt: applicationTime,
 	})
@@ -100,7 +100,7 @@ func TestExistingResourceUsesStableBindingWhenSelectorChanges(t *testing.T) {
 		t.Fatalf("CreateResource() error = %v", err)
 	}
 	selector.Ref = secondRef
-	updated, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{
+	updated, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-bound", ExpectedGeneration: created.Resource.Resource.Generation(), Spec: testSpec(t),
 		OperationID: "operation-update", EventID: "event-update", RequestedAt: applicationTime.Add(time.Minute),
 	})
@@ -152,7 +152,7 @@ func TestUpdateFailurePreservesReadyAndRetryCreatesNewOperation(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-failure")
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, _, _, resolver := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-retry", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-retry", EventID: "event-create-retry", RequestedAt: applicationTime,
 	})
@@ -161,7 +161,7 @@ func TestUpdateFailurePreservesReadyAndRetryCreatesNewOperation(t *testing.T) {
 	}
 	failureProvider := provisioningfake.New(provisioningfake.ModeFailure)
 	resolver.Providers[ref] = failureProvider
-	failed, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{
+	failed, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-retry", ExpectedGeneration: created.Resource.Resource.Generation(), Spec: testSpec(t),
 		OperationID: "operation-failed-update", EventID: "event-failed-update", RequestedAt: applicationTime.Add(time.Minute),
 	})
@@ -173,7 +173,7 @@ func TestUpdateFailurePreservesReadyAndRetryCreatesNewOperation(t *testing.T) {
 	}
 
 	resolver.Providers[ref] = provisioningfake.New(provisioningfake.ModeSynchronous)
-	retry, err := service.RetryOperation(context.Background(), application.RetryOperationCommand{
+	retry, err := service.RetryOperation(context.Background(), application.RetryOperationCommand{Actor: fake.Principal("tester"),
 		OperationID: "operation-failed-update", NewOperationID: "operation-retry", EventID: "event-retry", RequestedAt: applicationTime.Add(2 * time.Minute),
 	})
 	if err != nil {
@@ -188,7 +188,7 @@ func TestCreateIdempotencyReplaysOriginalResult(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-idempotent")
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, _, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-idempotent", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-idempotent", EventID: "event-idempotent", RequestedAt: applicationTime,
 		IdempotencyKey: "key-1",
@@ -213,7 +213,7 @@ func TestIdempotencyKeyRejectsDifferentPayload(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-idempotency-conflict")
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, _, selector, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-idempotency-conflict", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-idempotency-conflict", EventID: "event-idempotency-conflict", RequestedAt: applicationTime,
 		IdempotencyKey: "conflict-key",
@@ -238,7 +238,7 @@ func TestIdempotencyReplayIgnoresSpecMapOrder(t *testing.T) {
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, _, selector, _ := newService(t, ref, provider)
 	firstSpec, _ := domain.NewResourceSpec(map[string]any{"alpha": uint64(1), "beta": uint64(2)})
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-idempotency-order", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: firstSpec, OperationID: "operation-idempotency-order", EventID: "event-idempotency-order", RequestedAt: applicationTime,
 		IdempotencyKey: "order-key",
@@ -266,14 +266,14 @@ func TestUpdateIdempotencyReplaysBeforeGenerationValidation(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-update-idempotent")
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, _, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-update-idempotent", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-update-idempotent", EventID: "event-create-update-idempotent", RequestedAt: applicationTime,
 	})
 	if err != nil {
 		t.Fatalf("CreateResource() error = %v", err)
 	}
-	command := application.UpdateResourceCommand{
+	command := application.UpdateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-update-idempotent", ExpectedGeneration: created.Resource.Resource.Generation(), Spec: testSpec(t),
 		OperationID: "operation-update-idempotent", EventID: "event-update-idempotent", RequestedAt: applicationTime.Add(time.Minute),
 		IdempotencyKey: "update-key",
@@ -298,21 +298,21 @@ func TestUpdateExpectedGenerationIsCheckedDuringSave(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-generation")
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, _, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-generation", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-generation", EventID: "event-create-generation", RequestedAt: applicationTime,
 	})
 	if err != nil {
 		t.Fatalf("CreateResource() error = %v", err)
 	}
-	_, err = service.UpdateResource(context.Background(), application.UpdateResourceCommand{
+	_, err = service.UpdateResource(context.Background(), application.UpdateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-generation", ExpectedGeneration: created.Resource.Resource.Generation(), Spec: testSpec(t),
 		OperationID: "operation-update-generation-1", EventID: "event-update-generation-1", RequestedAt: applicationTime.Add(time.Minute),
 	})
 	if err != nil {
 		t.Fatalf("first UpdateResource() error = %v", err)
 	}
-	if _, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{
+	if _, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-generation", ExpectedGeneration: created.Resource.Resource.Generation(), Spec: testSpec(t),
 		OperationID: "operation-update-generation-2", EventID: "event-update-generation-2", RequestedAt: applicationTime.Add(2 * time.Minute),
 	}); err == nil {
@@ -323,7 +323,7 @@ func TestUpdateExpectedGenerationIsCheckedDuringSave(t *testing.T) {
 func TestConcurrentUpdateAndDeleteCreateOnlyOneActiveOperation(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-concurrent")
 	service, store, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-concurrent", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-concurrent", EventID: "event-create-concurrent", RequestedAt: applicationTime,
 	})
@@ -336,7 +336,7 @@ func TestConcurrentUpdateAndDeleteCreateOnlyOneActiveOperation(t *testing.T) {
 	errors := make(chan error, 2)
 	go func() {
 		<-start
-		_, updateErr := service.UpdateResource(context.Background(), application.UpdateResourceCommand{
+		_, updateErr := service.UpdateResource(context.Background(), application.UpdateResourceCommand{Actor: fake.Principal("tester"),
 			ID: created.Resource.Resource.ID(), ExpectedGeneration: 1, Spec: updatedSpec,
 			OperationID: "operation-concurrent-update", EventID: "event-concurrent-update", RequestedAt: applicationTime.Add(time.Minute),
 		})
@@ -344,7 +344,7 @@ func TestConcurrentUpdateAndDeleteCreateOnlyOneActiveOperation(t *testing.T) {
 	}()
 	go func() {
 		<-start
-		_, deleteErr := service.DeleteResource(context.Background(), application.DeleteResourceCommand{
+		_, deleteErr := service.DeleteResource(context.Background(), application.DeleteResourceCommand{Actor: fake.Principal("tester"),
 			ID: created.Resource.Resource.ID(), ExpectedGeneration: 1,
 			OperationID: "operation-concurrent-delete", EventID: "event-concurrent-delete", RequestedAt: applicationTime.Add(time.Minute),
 		})
@@ -372,7 +372,7 @@ func TestFakeTransactionRollsBackRequestWhenEventAppendFails(t *testing.T) {
 	if err := store.Within(context.Background(), func(tx application.UnitOfWork) error { return tx.Events().Append(context.Background(), collision) }); err != nil {
 		t.Fatalf("seed event error = %v", err)
 	}
-	_, err = service.CreateResource(context.Background(), application.CreateResourceCommand{
+	_, err = service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-rollback", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-rollback", EventID: collision.ID(), RequestedAt: applicationTime,
 		IdempotencyKey: "rollback-key",
@@ -389,7 +389,7 @@ func TestFakeTransactionRollsBackRequestWhenEventAppendFails(t *testing.T) {
 	if _, err := store.GetExecution(context.Background(), "operation-rollback"); err == nil {
 		t.Fatal("execution remained after transaction rollback")
 	}
-	if _, err := store.GetIdempotency(context.Background(), "rollback-key"); err == nil {
+	if _, err := store.GetIdempotency(context.Background(), "scope", "rollback-key"); err == nil {
 		t.Fatal("idempotency record remained after transaction rollback")
 	}
 }
@@ -438,7 +438,7 @@ func TestSubmitTimeoutRemainsUnknownAndRecoveryObservesBeforeResubmit(t *testing
 		}},
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-timeout", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-timeout", EventID: "event-timeout", RequestedAt: applicationTime,
 		IdempotencyKey: "timeout-key",
@@ -479,7 +479,7 @@ func TestUnknownAttemptObservesThenResubmitsWithSameOperationID(t *testing.T) {
 		Presence: provisioning.ResourcePresenceUnknown, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown,
 	}}}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-unknown-recovery", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-unknown-recovery", EventID: "event-unknown-recovery", RequestedAt: applicationTime,
 	}
@@ -517,7 +517,7 @@ func TestRecoveryAndResubmissionPreserveExistingHandle(t *testing.T) {
 		submitErr: provisioning.ErrAmbiguousSubmission,
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-handle-preservation", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-handle-preservation", EventID: "event-handle-preservation", RequestedAt: applicationTime,
 	}
@@ -551,7 +551,7 @@ func TestAcceptedAttemptObservationFailureDoesNotEnableResubmission(t *testing.T
 		observeErr: provisioning.ObservationError{Failure: provisioning.ExecutionFailure{Kind: provisioning.FailureUnavailable, Reason: "Unavailable"}},
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-accepted-observation-failure", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-accepted-observation-failure", EventID: "event-accepted-observation-failure", RequestedAt: applicationTime,
 	})
@@ -587,7 +587,7 @@ func TestStaleNoExecutionObservationDoesNotEnableResubmission(t *testing.T) {
 		},
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-stale-no-execution", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-stale-no-execution", EventID: "event-stale-no-execution", RequestedAt: applicationTime,
 	}
@@ -610,7 +610,7 @@ func TestOutOfOrderNoExecutionObservationDoesNotEnableResubmission(t *testing.T)
 	ref := mustProvisionerRef(t, "provider-out-of-order-observation")
 	provider := &scriptedProvisioner{submitErr: context.DeadlineExceeded}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-out-of-order-observation", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-out-of-order-observation", EventID: "event-out-of-order-observation", RequestedAt: applicationTime,
 	}
@@ -640,7 +640,7 @@ func TestEqualTimestampNoExecutionObservationDoesNotEnableResubmission(t *testin
 	ref := mustProvisionerRef(t, "provider-equal-observation")
 	provider := &scriptedProvisioner{submitErr: context.DeadlineExceeded}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-equal-observation", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-equal-observation", EventID: "event-equal-observation", RequestedAt: applicationTime,
 	}
@@ -670,7 +670,7 @@ func TestAcceptanceLearnedFromObservationPreventsResubmission(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-observed-acceptance")
 	provider := &scriptedProvisioner{submit: provisioning.Submission{Observation: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateUnknown}}}, submitErr: provisioning.ErrAmbiguousSubmission}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-observed-acceptance", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-observed-acceptance", EventID: "event-observed-acceptance", RequestedAt: applicationTime,
 	}
@@ -709,7 +709,7 @@ func TestMalformedTerminalSubmissionRemainsTerminal(t *testing.T) {
 		Execution: &provisioning.Execution{State: provisioning.ExecutionStateFailed, Failure: &provisioning.ExecutionFailure{Kind: provisioning.FailureExecution}},
 	}}}
 	service, store, _, _ := newService(t, ref, provider)
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-rejected-terminal", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-rejected-terminal", EventID: "event-rejected-terminal", RequestedAt: applicationTime,
 	})
@@ -726,7 +726,7 @@ func TestInvalidExecutionStateMapsToUnknown(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-invalid-state")
 	provider := &scriptedProvisioner{submit: provisioning.Submission{Observation: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: "Invalid"}}}}
 	service, _, _, _ := newService(t, ref, provider)
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-invalid-state", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-invalid-state", EventID: "event-invalid-state", RequestedAt: applicationTime,
 	})
@@ -745,7 +745,7 @@ func TestInvalidObservedExecutionStateDoesNotReplaceValidEvidence(t *testing.T) 
 		observe: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: "Invalid"}, ObservedAt: applicationTime.Add(time.Minute)},
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-invalid-observed-state", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-invalid-observed-state", EventID: "event-invalid-observed-state", RequestedAt: applicationTime,
 	})
@@ -768,7 +768,7 @@ func TestConclusiveNonAcceptanceIsNotRecordedAsAcceptance(t *testing.T) {
 		Failure: &provisioning.ExecutionFailure{Kind: provisioning.FailureInvalidRequest, Reason: "InvalidRequest"},
 	}}}}
 	service, _, _, _ := newService(t, ref, provider)
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-non-acceptance", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-non-acceptance", EventID: "event-non-acceptance", RequestedAt: applicationTime,
 	})
@@ -787,7 +787,7 @@ func TestExplicitNormalizedSubmissionFailureIsTerminal(t *testing.T) {
 		Failure: &provisioning.ExecutionFailure{Kind: provisioning.FailureTimeout, Reason: "Timeout"},
 	}}}}
 	service, store, _, _ := newService(t, ref, provider)
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-normalized-timeout", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-normalized-timeout", EventID: "event-normalized-timeout", RequestedAt: applicationTime,
 	})
@@ -814,7 +814,7 @@ func TestExplicitFailedSubmissionRemainsTerminalWhenCallAlsoErrors(t *testing.T)
 		submitErr: context.DeadlineExceeded,
 	}
 	service, _, _, _ := newService(t, ref, provider)
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-failed-with-error", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-failed-with-error", EventID: "event-failed-with-error", RequestedAt: applicationTime,
 	})
@@ -834,7 +834,7 @@ func TestMalformedTerminalObservationRemainsTerminal(t *testing.T) {
 		observe: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateFailed, Handle: &handle, Failure: &provisioning.ExecutionFailure{Kind: provisioning.FailureExecution}}, ObservedAt: applicationTime.Add(time.Minute)},
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-rejected-observation", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-rejected-observation", EventID: "event-rejected-observation", RequestedAt: applicationTime,
 	})
@@ -863,7 +863,7 @@ func TestExplicitTerminalObservationWinsWhenCallAlsoErrors(t *testing.T) {
 		observeErr: context.DeadlineExceeded,
 	}
 	service, _, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-observation-terminal-error", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-observation-terminal-error", EventID: "event-observation-terminal-error", RequestedAt: applicationTime,
 	})
@@ -884,7 +884,7 @@ func TestPersistedTerminalEvidenceCompletesWithoutAnotherProviderCall(t *testing
 	handle, _ := provisioning.NewExecutionHandle("persisted-terminal")
 	provider := &scriptedProvisioner{submit: provisioning.Submission{Observation: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateAccepted, Handle: &handle}}}}
 	service, store, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-persisted-terminal", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-persisted-terminal", EventID: "event-persisted-terminal", RequestedAt: applicationTime,
 	})
@@ -926,7 +926,7 @@ func TestPersistedTerminalAttemptMustMatchExecutionEvidence(t *testing.T) {
 	handle, _ := provisioning.NewExecutionHandle("contradictory-terminal")
 	provider := &scriptedProvisioner{submit: provisioning.Submission{Observation: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateAccepted, Handle: &handle}}}}
 	service, store, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-contradictory-terminal", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-contradictory-terminal", EventID: "event-contradictory-terminal", RequestedAt: applicationTime,
 	})
@@ -958,7 +958,7 @@ func TestInvalidNonterminalObservedFactsAreNotPersistedAsValid(t *testing.T) {
 		Resource:  provisioning.ResourceObservation{Presence: provisioning.ResourcePresenceUnknown, Readiness: provisioning.ResourceReadinessReady, Drift: provisioning.ResourceDriftUnknown},
 	}}}
 	service, store, _, _ := newService(t, ref, provider)
-	_, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	_, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-invalid-nonterminal-facts", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-invalid-nonterminal-facts", EventID: "event-invalid-nonterminal-facts", RequestedAt: applicationTime,
 	})
@@ -978,7 +978,7 @@ func TestTerminalExecutionSurvivesMalformedObservedFacts(t *testing.T) {
 		Resource:  provisioning.ResourceObservation{Presence: provisioning.ResourcePresenceUnknown, Readiness: provisioning.ResourceReadinessReady, Drift: provisioning.ResourceDriftUnknown},
 	}}}
 	service, store, _, _ := newService(t, ref, provider)
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-terminal-invalid-facts", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-terminal-invalid-facts", EventID: "event-terminal-invalid-facts", RequestedAt: applicationTime,
 	})
@@ -1001,7 +1001,7 @@ func TestObservationCallFailureIsNormalizedBeforeStorage(t *testing.T) {
 		observeErr: provisioning.ObservationError{Failure: provisioning.ExecutionFailure{Kind: "NativeFailure"}},
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-invalid-observation-error", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-invalid-observation-error", EventID: "event-invalid-observation-error", RequestedAt: applicationTime,
 	})
@@ -1024,7 +1024,7 @@ func TestPointerObservationErrorRetainsNormalizedClassification(t *testing.T) {
 		observeErr: &provisioning.ObservationError{Failure: provisioning.ExecutionFailure{Kind: provisioning.FailureUnavailable, Reason: "Unavailable"}},
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-pointer-observation-error", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-pointer-observation-error", EventID: "event-pointer-observation-error", RequestedAt: applicationTime,
 	})
@@ -1048,7 +1048,7 @@ func TestTypedNilObservationErrorDoesNotPanic(t *testing.T) {
 		observeErr: nilObservationError,
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-nil-observation-error", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-nil-observation-error", EventID: "event-nil-observation-error", RequestedAt: applicationTime,
 	})
@@ -1073,7 +1073,7 @@ func TestInvalidFailureKindIsNormalizedInStoredEvidence(t *testing.T) {
 		Failure: &provisioning.ExecutionFailure{Kind: "NativeFailure", Reason: "NativeReason"},
 	}}}}
 	service, store, _, _ := newService(t, ref, provider)
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-invalid-failure-kind", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-invalid-failure-kind", EventID: "event-invalid-failure-kind", RequestedAt: applicationTime,
 	})
@@ -1096,7 +1096,7 @@ func TestPassiveReadyDoesNotCompleteActiveOperation(t *testing.T) {
 		}},
 	}
 	service, _, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-passive-ready", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-passive-ready", EventID: "event-passive-ready", RequestedAt: applicationTime,
 	})
@@ -1132,7 +1132,7 @@ func TestDispatchingClaimPreventsOverlappingSubmit(t *testing.T) {
 	spec := testSpec(t)
 	result := make(chan error, 1)
 	go func() {
-		_, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+		_, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 			ID: "resource-dispatch-claim", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 			Spec: spec, OperationID: "operation-dispatch-claim", EventID: "event-dispatch-claim", RequestedAt: applicationTime,
 		})
@@ -1202,7 +1202,7 @@ func TestDispatchRejectsOperationBeforeFinalPhase(t *testing.T) {
 func TestPublicAdvanceRejectsReservedEventNamespace(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-reserved-event")
 	service, _, _, _ := newService(t, ref, provisioningfake.New(provisioningfake.ModeAsynchronous))
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-reserved-event", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-reserved-event", EventID: "event-reserved-event", RequestedAt: applicationTime,
 	})
@@ -1225,7 +1225,7 @@ func TestTerminalExecutionOutcomeIsAppliedBeforeDrift(t *testing.T) {
 		ObservedAt: applicationTime.Add(time.Minute),
 	}}}
 	service, _, _, _ := newService(t, ref, provider)
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-terminal-drift", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-terminal-drift", EventID: "event-terminal-drift", RequestedAt: applicationTime,
 	})
@@ -1243,7 +1243,7 @@ func TestPostOperationFactsDoNotOverwriteDeletedOrFailedState(t *testing.T) {
 	t.Run("successful delete remains deleted", func(t *testing.T) {
 		ref := mustProvisionerRef(t, "provider-delete-facts")
 		service, _, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-		created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+		created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 			ID: "resource-delete-facts", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 			Spec: testSpec(t), OperationID: "operation-create-delete-facts", EventID: "event-create-delete-facts", RequestedAt: applicationTime,
 		})
@@ -1254,7 +1254,7 @@ func TestPostOperationFactsDoNotOverwriteDeletedOrFailedState(t *testing.T) {
 			Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded},
 			Resource:  provisioning.ResourceObservation{Presence: provisioning.ResourcePresenceNotFound, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown},
 		}}}
-		deleted, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{
+		deleted, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{Actor: fake.Principal("tester"),
 			ID: created.Resource.Resource.ID(), ExpectedGeneration: created.Resource.Resource.Generation(),
 			OperationID: "operation-delete-facts", EventID: "event-delete-facts", RequestedAt: applicationTime.Add(time.Minute),
 		})
@@ -1273,7 +1273,7 @@ func TestPostOperationFactsDoNotOverwriteDeletedOrFailedState(t *testing.T) {
 			Resource:  provisioning.ResourceObservation{Presence: provisioning.ResourcePresencePresent, Readiness: provisioning.ResourceReadinessReady, Drift: provisioning.ResourceDriftInSync},
 		}}}
 		service, _, _, _ := newService(t, ref, provider)
-		failed, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+		failed, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 			ID: "resource-create-failure-facts", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 			Spec: testSpec(t), OperationID: "operation-create-failure-facts", EventID: "event-create-failure-facts", RequestedAt: applicationTime,
 		})
@@ -1290,14 +1290,14 @@ func TestPassiveObservationPreservesTerminalLifecycleState(t *testing.T) {
 	t.Run("deleted", func(t *testing.T) {
 		ref := mustProvisionerRef(t, "provider-passive-deleted")
 		service, _, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-		created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+		created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 			ID: "resource-passive-deleted", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 			Spec: testSpec(t), OperationID: "operation-create-passive-deleted", EventID: "event-create-passive-deleted", RequestedAt: applicationTime,
 		})
 		if err != nil {
 			t.Fatalf("CreateResource() error = %v", err)
 		}
-		deleted, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{
+		deleted, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{Actor: fake.Principal("tester"),
 			ID: created.Resource.Resource.ID(), ExpectedGeneration: created.Resource.Resource.Generation(),
 			OperationID: "operation-delete-passive-deleted", EventID: "event-delete-passive-deleted", RequestedAt: applicationTime.Add(time.Minute),
 		})
@@ -1317,7 +1317,7 @@ func TestPassiveObservationPreservesTerminalLifecycleState(t *testing.T) {
 	t.Run("failed", func(t *testing.T) {
 		ref := mustProvisionerRef(t, "provider-passive-failed")
 		service, _, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeFailure))
-		failed, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+		failed, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 			ID: "resource-passive-failed", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 			Spec: testSpec(t), OperationID: "operation-create-passive-failed", EventID: "event-create-passive-failed", RequestedAt: applicationTime,
 		})
@@ -1343,7 +1343,7 @@ func TestRepeatedTerminalObservationReturnsPersistedResult(t *testing.T) {
 		observe: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded, Handle: &handle}},
 	}
 	service, _, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-terminal-replay", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-terminal-replay", EventID: "event-terminal-replay", RequestedAt: applicationTime,
 	})
@@ -1366,7 +1366,7 @@ func TestRepeatedTerminalObservationReturnsPersistedResult(t *testing.T) {
 func TestTerminalOperationRemainsReadableAfterPassiveObservation(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-terminal-after-passive")
 	service, _, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-terminal-after-passive", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-terminal-after-passive", EventID: "event-terminal-after-passive", RequestedAt: applicationTime,
 	})
@@ -1391,7 +1391,7 @@ func TestConcurrentTerminalObservationsReturnPersistedResult(t *testing.T) {
 	handle, _ := provisioning.NewExecutionHandle("concurrent-terminal")
 	provider := newConcurrentObservationProvisioner(handle)
 	service, _, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-concurrent-terminal", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-concurrent-terminal", EventID: "event-concurrent-terminal", RequestedAt: applicationTime,
 	})
@@ -1429,7 +1429,7 @@ func TestConcurrentTerminalObservationsReturnPersistedResult(t *testing.T) {
 func TestCreateReplayDoesNotConsultChangedDefaults(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-create-replay")
 	service, _, selector, _ := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-create-replay", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-replay", EventID: "event-create-replay", RequestedAt: applicationTime,
 		IdempotencyKey: "create-replay-key",
@@ -1461,7 +1461,7 @@ func TestCreateRejectsExistingActiveOperationInsideTransaction(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed active operation error = %v", err)
 	}
-	if _, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	if _, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-create-active", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-active", EventID: "event-create-active", RequestedAt: applicationTime,
 	}); err == nil {
@@ -1475,7 +1475,7 @@ func TestCreateRejectsExistingActiveOperationInsideTransaction(t *testing.T) {
 func TestProviderObservationTimestampRejectsStaleFacts(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-stale-observation")
 	service, _, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-stale-observation", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-stale-observation", EventID: "event-create-stale-observation", RequestedAt: applicationTime,
 	})
@@ -1499,7 +1499,7 @@ func TestSubmitRejectsStaleProviderTerminalTimestamp(t *testing.T) {
 		ObservedAt: applicationTime.Add(-time.Minute),
 	}}}
 	service, store, _, _ := newService(t, ref, provider)
-	_, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	_, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-stale-submission", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-stale-submission", EventID: "event-stale-submission", RequestedAt: applicationTime,
 	})
@@ -1523,14 +1523,14 @@ func TestDeleteIdempotencyReusesLogicalOperation(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-delete-idempotent")
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, _, _, _ := newService(t, ref, provider)
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-delete-idempotent", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-create-delete-idempotent", EventID: "event-create-delete-idempotent", RequestedAt: applicationTime,
 	})
 	if err != nil {
 		t.Fatalf("CreateResource() error = %v", err)
 	}
-	command := application.DeleteResourceCommand{
+	command := application.DeleteResourceCommand{Actor: fake.Principal("tester"),
 		ID: created.Resource.Resource.ID(), ExpectedGeneration: created.Resource.Resource.Generation(),
 		OperationID: "operation-delete-idempotent", EventID: "event-delete-idempotent", RequestedAt: applicationTime.Add(time.Minute),
 		IdempotencyKey: "delete-key",
@@ -1551,7 +1551,7 @@ func TestDeleteIdempotencyReusesLogicalOperation(t *testing.T) {
 func TestObserveOperationUsesSubmittedIntentSnapshot(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-intent-snapshot")
 	service, store, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-intent-snapshot", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: mustSpecValue(t, "generation-1"), OperationID: "operation-create-intent-snapshot", EventID: "event-create-intent-snapshot", RequestedAt: applicationTime,
 	})
@@ -1564,7 +1564,7 @@ func TestObserveOperationUsesSubmittedIntentSnapshot(t *testing.T) {
 		observe: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateRunning, Handle: &handle}},
 	}
 	resolver.Providers[ref] = provider
-	updated, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{
+	updated, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{Actor: fake.Principal("tester"),
 		ID: created.Resource.Resource.ID(), ExpectedGeneration: 1, Spec: mustSpecValue(t, "generation-2"),
 		OperationID: "operation-update-intent-snapshot", EventID: "event-update-intent-snapshot", RequestedAt: applicationTime.Add(time.Minute),
 	})
@@ -1594,7 +1594,7 @@ func TestObserveOperationUsesSubmittedIntentSnapshot(t *testing.T) {
 func TestDriftDoesNotEraseNewerGenerationPending(t *testing.T) {
 	ref := mustProvisionerRef(t, "provider-stale-drift")
 	service, store, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
-	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-stale-drift", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: mustSpecValue(t, "generation-1"), OperationID: "operation-create-stale-drift", EventID: "event-create-stale-drift", RequestedAt: applicationTime,
 	})
@@ -1604,7 +1604,7 @@ func TestDriftDoesNotEraseNewerGenerationPending(t *testing.T) {
 	handle, _ := provisioning.NewExecutionHandle("stale-drift")
 	provider := &scriptedProvisioner{submit: provisioning.Submission{Observation: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateAccepted, Handle: &handle}}}}
 	resolver.Providers[ref] = provider
-	updated, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{
+	updated, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{Actor: fake.Principal("tester"),
 		ID: created.Resource.Resource.ID(), ExpectedGeneration: 1, Spec: mustSpecValue(t, "generation-2"),
 		OperationID: "operation-update-stale-drift", EventID: "event-update-stale-drift", RequestedAt: applicationTime.Add(time.Minute),
 	})
@@ -1762,7 +1762,7 @@ func newService(t *testing.T, ref application.ProvisionerRef, provider provision
 	store := fake.NewStore()
 	selector := &fake.Selector{Ref: ref}
 	resolver := &fake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{ref: provider}}
-	service, err := application.NewService(fake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{typeValue.Ref(): typeValue}}, selector, resolver, store)
+	service, err := application.NewService(fake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{typeValue.Ref(): typeValue}}, selector, resolver, store, fake.AllowAll{})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}

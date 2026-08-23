@@ -52,7 +52,7 @@ func transitionFixture(t *testing.T) *admissionFixture {
 	}
 	selector := &appfake.Selector{Ref: ref}
 	resolver := &appfake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{ref: syncSuccessProvider{}}}
-	service, err := application.NewService(catalog, selector, resolver, store)
+	service, err := application.NewService(catalog, selector, resolver, store, appfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func transitionFixture(t *testing.T) *admissionFixture {
 }
 
 func updateCommand(id string, generation uint64, spec domain.ResourceSpec, key string) application.UpdateResourceCommand {
-	return application.UpdateResourceCommand{
+	return application.UpdateResourceCommand{Actor: appfake.Principal("tester"),
 		ID:                 domain.ResourceID(id),
 		ExpectedGeneration: generation,
 		Spec:               spec,
@@ -169,7 +169,7 @@ func TestDeleteAdmissionSkipsTransitionValidation(t *testing.T) {
 		calls++
 		return nil
 	}
-	command := application.DeleteResourceCommand{
+	command := application.DeleteResourceCommand{Actor: appfake.Principal("tester"),
 		ID:                 domain.ResourceID("r1"),
 		ExpectedGeneration: 1,
 		OperationID:        domain.OperationID("op-del"),

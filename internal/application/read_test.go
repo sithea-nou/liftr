@@ -86,17 +86,17 @@ func TestReadUseCasesReturnStoredState(t *testing.T) {
 	service, _, _, _ := newService(t, mustProvisionerRef(t, "read-provider"), provisioningfake.New(provisioningfake.ModeSynchronous))
 	ctx := context.Background()
 
-	if _, err := service.GetResource(ctx, "missing"); err == nil {
+	if _, err := service.GetResource(ctx, fake.Principal("tester"), "missing"); err == nil {
 		t.Fatal("GetResource for a missing Resource must fail")
 	}
-	if _, err := service.GetOperation(ctx, "missing"); err == nil {
+	if _, err := service.GetOperation(ctx, fake.Principal("tester"), "missing"); err == nil {
 		t.Fatal("GetOperation for a missing Operation must fail")
 	}
-	if _, err := service.GetResourceOperation(ctx, "missing"); err == nil {
+	if _, err := service.GetResourceOperation(ctx, fake.Principal("tester"), "missing"); err == nil {
 		t.Fatal("GetResourceOperation for a missing Resource must fail")
 	}
 
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-read", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-read", EventID: "event-read", RequestedAt: applicationTime,
 		IdempotencyKey: "read-key",
@@ -106,12 +106,12 @@ func TestReadUseCasesReturnStoredState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	record, err := service.GetResource(ctx, command.ID)
+	record, err := service.GetResource(ctx, fake.Principal("tester"), command.ID)
 	if err != nil || record.Resource.ID() != command.ID {
 		t.Fatalf("GetResource = %v, %v", record, err)
 	}
 
-	view, err := service.GetResourceOperation(ctx, command.ID)
+	view, err := service.GetResourceOperation(ctx, fake.Principal("tester"), command.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestReadUseCasesReturnStoredState(t *testing.T) {
 		t.Fatalf("GetResourceOperation latest = %v, want %q", view.Latest, admitted.Operation.ID())
 	}
 
-	operation, err := service.GetOperation(ctx, admitted.Operation.ID())
+	operation, err := service.GetOperation(ctx, fake.Principal("tester"), admitted.Operation.ID())
 	if err != nil || operation.Operation.ID() != admitted.Operation.ID() {
 		t.Fatalf("GetOperation = %v, %v", operation, err)
 	}

@@ -12,6 +12,8 @@ import (
 
 // Problem codes are the stable, approved v1 error identifiers.
 const (
+	CodeUnauthenticated         = "UNAUTHENTICATED"
+	CodeForbidden               = "FORBIDDEN"
 	CodeInvalidArgument         = "INVALID_ARGUMENT"
 	CodeUnsupportedResourceType = "UNSUPPORTED_RESOURCE_TYPE"
 	CodeResourceTypeNotFound    = "RESOURCE_TYPE_NOT_FOUND"
@@ -36,6 +38,8 @@ const (
 const problemTypeBase = "https://liftr.dev/problems/"
 
 var problemTitles = map[string]string{
+	CodeUnauthenticated:         "Unauthenticated",
+	CodeForbidden:               "Forbidden",
 	CodeInvalidArgument:         "Invalid request",
 	CodeUnsupportedResourceType: "Unsupported resource type",
 	CodeResourceTypeNotFound:    "Resource type not found",
@@ -72,6 +76,10 @@ type problem struct {
 
 func problemStatus(code string) int {
 	switch code {
+	case CodeUnauthenticated:
+		return http.StatusUnauthorized
+	case CodeForbidden:
+		return http.StatusForbidden
 	case CodeInvalidArgument:
 		return http.StatusBadRequest
 	case CodeUnsupportedResourceType, CodeResourceSpecInvalid:

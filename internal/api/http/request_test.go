@@ -53,12 +53,15 @@ func TestProblemCarriesAuthoritativeRequestID(t *testing.T) {
 	}
 }
 
-func TestVersionedEndpointsWithoutServiceAreUnavailable(t *testing.T) {
+// Without any authenticator the versioned surface fails closed: every
+// request is answered UNAUTHENTICATED rather than exposing whether a service
+// exists behind it (ADR-0012).
+func TestVersionedEndpointsWithoutAuthenticatorFailClosed(t *testing.T) {
 	handler := apihttp.NewHandler(apihttp.Deps{})
 	f := &fixture{handler: handler}
 
 	getResource := f.request(t, http.MethodGet, "/v1/resources/r1", nil, nil)
-	expectProblem(t, getResource, http.StatusServiceUnavailable, "PERSISTENCE_UNAVAILABLE")
+	expectProblem(t, getResource, http.StatusUnauthorized, "UNAUTHENTICATED")
 
 	createBody := map[string]any{
 		"id":   "r1",
@@ -70,10 +73,10 @@ func TestVersionedEndpointsWithoutServiceAreUnavailable(t *testing.T) {
 		"spec": map[string]any{},
 	}
 	create := f.request(t, http.MethodPost, "/v1/resources", map[string]string{"Idempotency-Key": "k"}, createBody)
-	expectProblem(t, create, http.StatusServiceUnavailable, "PERSISTENCE_UNAVAILABLE")
+	expectProblem(t, create, http.StatusUnauthorized, "UNAUTHENTICATED")
 
 	getOperation := f.request(t, http.MethodGet, "/v1/operations/op-1", nil, nil)
-	expectProblem(t, getOperation, http.StatusServiceUnavailable, "PERSISTENCE_UNAVAILABLE")
+	expectProblem(t, getOperation, http.StatusUnauthorized, "UNAUTHENTICATED")
 
 	readyz := f.request(t, http.MethodGet, "/readyz", nil, nil)
 	expectProblem(t, readyz, http.StatusServiceUnavailable, "PERSISTENCE_UNAVAILABLE")

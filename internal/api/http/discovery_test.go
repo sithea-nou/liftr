@@ -260,11 +260,11 @@ func TestDiscoveryNeverExposesImplementation(t *testing.T) {
 	}
 }
 
-func TestDiscoveryWithoutServiceIsUnavailable(t *testing.T) {
+func TestDiscoveryWithoutAuthenticatorFailsClosed(t *testing.T) {
 	handler := apihttp.NewHandler(apihttp.Deps{})
 	for _, path := range []string{"/v1/resource-types", "/v1/resource-types/x/y"} {
 		response := requestHandler(t, handler, http.MethodGet, path, nil, nil)
-		expectProblem(t, response, http.StatusServiceUnavailable, "PERSISTENCE_UNAVAILABLE")
+		expectProblem(t, response, http.StatusUnauthorized, "UNAUTHENTICATED")
 	}
 }
 
@@ -420,6 +420,7 @@ func TestNumericRepresentationPreserved(t *testing.T) {
 		`"owner":{"kind":"team","id":"platform"},` +
 		`"spec":{"version":"16","storageGB":20.0,"highAvailability":true}}`
 	replayRequest := httptest.NewRequest(http.MethodPost, "/v1/resources", strings.NewReader(floatBody))
+	replayRequest.Header.Set("Authorization", "Bearer tester")
 	replayRequest.Header.Set("Idempotency-Key", "int-key")
 	recorder := httptest.NewRecorder()
 	fixture.handler.ServeHTTP(recorder, replayRequest)

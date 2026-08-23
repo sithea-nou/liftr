@@ -9,6 +9,25 @@ info:
   description: |
     Provisioner-neutral resource lifecycle control plane.
 
+    Authentication: every /v1 endpoint requires a bearer credential — an
+    RFC 9068 JWT access token (typ at+jwt) issued by the configured issuer,
+    carrying the Liftr API audience. Credential failures answer 401 with one
+    identical Problem body; failure reasons are never disclosed. Health and
+    readiness endpoints stay unauthenticated.
+
+    Authorization: actions are authorized against Resource ownership. A
+    create requires permission under the requested owner; reads, updates, and
+    deletes require permission under the stored owner; Operations authorize
+    through their owning Resource; ResourceType discovery is readable by every
+    authenticated principal. Forbidden Resource access is externally
+    indistinguishable from absence (404) so existence, generation, state, and
+    outputs are never disclosed to unauthorized callers; forbidden creates
+    answer 403 FORBIDDEN.
+
+    Idempotency keys are scoped per authenticated principal: two principals
+    may use the same key independently, and possessing another principal's
+    key never grants access to its recorded result.
+
     Mutations are asynchronous admissions. POST creates a Resource and
     returns 201 immediately; PUT and DELETE return 202 while infrastructure
     work proceeds out of band. Clients monitor lifecycle progress through
@@ -19,13 +38,8 @@ info:
     a missing header is answered with 428 PRECONDITION_REQUIRED and any
     non-uint64 value is invalid.
 
-    Idempotency: every mutation requires an Idempotency-Key header. Replays
-    return the original lifecycle Operation through Location and Link
-    rel="monitor" while the body carries the current Resource snapshot, so
-    latestOperation may already be newer than the replay's Operation.
-
     Tombstones: a retained Deleted Resource is returned with status.state
-    "Deleted". A 404 means Liftr holds no retained record for the ID.
+    "Deleted". A 404 means Liftr holds no readable record for the ID.
     Recreation under a used ID is refused with 409 RESOURCE_ALREADY_EXISTS;
     tombstone resurrection is not supported.
 
@@ -41,12 +55,9 @@ info:
     It contains "observedGeneration" — the desired generation whose successful
     reconciliation produced the values — and flat non-secret scalar "values"
     whose exact names and types are declared by that ResourceType's
-    outputContract. Outputs are absent until first published and are omitted
-    from Deleted tombstones. During pending or failed updates the previous
-    snapshot remains with its older observedGeneration; equality between
-    outputs.observedGeneration and generation means outputs correspond to the
-    current desired state. Outputs are reconciliation snapshots, never live
-    health observations.
+    outputContract. Outputs are absent until first published, are omitted
+    from Deleted tombstones, and follow Resource read authorization.
+    Outputs are reconciliation snapshots, never live health observations.
 
     Errors follow RFC 9457 Problem Details (application/problem+json) with
     the Liftr extensions "code", "requestId", and narrow fields such as
@@ -57,6 +68,8 @@ info:
     Caching and representation validators are deferred: responses carry no
     representation validator, so clients must treat ResourceStatus and
     Operation state as mutable and must not cache versioned responses.
+security:
+  - bearerAuth: []
 paths:
   /v1/resource-types:
     get:
@@ -90,6 +103,8 @@ paths:
                     description: A managed PostgreSQL database requested through a provisioner-neutral contract.
                     capabilities: [create, delete, observe, update]
                     href: /v1/resource-types/PostgreSQLDatabase/v1
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
@@ -122,6 +137,8 @@ paths:
                 $ref: "#/components/schemas/ResourceType"
         "404":
           $ref: "#/components/responses/ResourceTypeNotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
@@ -167,6 +184,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Resource"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/BadRequest"
         "409":
@@ -198,6 +217,8 @@ paths:
                     requestId: 6f2c7a4c8e5b41d0
         "422":
           $ref: "#/components/responses/UnsupportedResourceType"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
@@ -230,6 +251,8 @@ paths:
                 $ref: "#/components/schemas/Resource"
         "404":
           $ref: "#/components/responses/ResourceNotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
@@ -301,6 +324,8 @@ paths:
           $ref: "#/components/responses/UnsupportedResourceType"
         "428":
           $ref: "#/components/responses/PreconditionRequired"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
@@ -351,6 +376,8 @@ paths:
                 $ref: "#/components/schemas/Problem"
         "428":
           $ref: "#/components/responses/PreconditionRequired"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
@@ -394,6 +421,8 @@ paths:
                     instance: /v1/operations/op-example
                     code: OPERATION_NOT_FOUND
                     requestId: 6f2c7a4c8e5b41d0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
@@ -402,6 +431,7 @@ paths:
     get:
       operationId: healthz
       summary: Process liveness
+      security: []
       responses:
         "200":
           description: The process is running.
@@ -416,6 +446,7 @@ paths:
     get:
       operationId: readyz
       summary: Control-plane readiness
+      security: []
       description: Reports whether durable state is currently reachable.
       responses:
         "200":
@@ -430,6 +461,15 @@ paths:
         "503":
           $ref: "#/components/responses/PersistenceUnavailable"
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        RFC 9068 JWT access token (typ at+jwt) issued by the configured
+        issuer and carrying the Liftr API audience. Liftr verifies tokens;
+        it never issues or proxies them.
   parameters:
     ResourceId:
       name: id
@@ -879,6 +919,8 @@ components:
           type: string
           description: Stable machine-readable Liftr error code.
           enum:
+            - UNAUTHENTICATED
+            - FORBIDDEN
             - INVALID_ARGUMENT
             - UNSUPPORTED_RESOURCE_TYPE
             - RESOURCE_TYPE_NOT_FOUND
@@ -914,6 +956,38 @@ components:
             True when RESOURCE_SPEC_INVALID had more violations than the
             response carries; absent otherwise.
   responses:
+    Unauthorized:
+      description: |
+        UNAUTHENTICATED; no usable credential was presented or the presented
+        credential failed verification. The body is identical in every case.
+        WWW-Authenticate carries error="invalid_token" only when a credential
+        was presented.
+      headers:
+        WWW-Authenticate:
+          description: Bearer challenge; see RFC 6750.
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://liftr.dev/problems/unauthenticated
+            title: Unauthenticated
+            status: 401
+            detail: valid bearer credentials are required
+            code: UNAUTHENTICATED
+            requestId: 6f2c7a4c8e5b41d0
+    Forbidden:
+      description: |
+        FORBIDDEN; the authenticated principal is not authorized. Resource
+        reads, updates, and deletes render the same 404 as absent records
+        instead, so this status is reserved for create admissions and
+        discovery policy denials that hide nothing.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
     BadRequest:
       description: INVALID_ARGUMENT; includes missing Idempotency-Key and malformed preconditions.
       content:

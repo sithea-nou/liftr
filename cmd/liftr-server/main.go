@@ -5,6 +5,12 @@
 // registered ResourceType catalog, the Pulumi provisioner adapter, the HTTP
 // surface, and the outbox worker loop. Without it the server runs in a
 // deliberately degraded health-only mode.
+//
+// The full runtime requires authentication (ADR-0012): either OIDC access
+// token configuration — LIFTR_AUTH_ISSUER and LIFTR_AUTH_AUDIENCE plus
+// optional mapping variables — or an explicit LIFTR_AUTH_MODE=insecure
+// development opt-in. Missing authentication configuration fails startup;
+// it is never silently treated as insecure.
 package main
 
 import (
@@ -17,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -121,9 +128,52 @@ func main() {
 	logger.Info("server stopped")
 }
 
+// composeAuthConfig reads authentication configuration from the process
+// environment. LIFTR_AUTH_MODE=insecure is the only non-default mode; it
+// composes the explicit development-only principal and allow-all policy.
+func composeAuthConfig() (server.AuthConfig, bool, error) {
+	if os.Getenv("LIFTR_AUTH_MODE") != "" && os.Getenv("LIFTR_AUTH_MODE") != "insecure" {
+		return server.AuthConfig{}, false, fmt.Errorf("LIFTR_AUTH_MODE %q is not supported; only \"insecure\"", os.Getenv("LIFTR_AUTH_MODE"))
+	}
+	insecure := os.Getenv("LIFTR_AUTH_MODE") == "insecure"
+	issuer := os.Getenv("LIFTR_AUTH_ISSUER")
+	audience := os.Getenv("LIFTR_AUTH_AUDIENCE")
+	if insecure {
+		if issuer != "" || audience != "" {
+			return server.AuthConfig{}, false, fmt.Errorf("LIFTR_AUTH_MODE=insecure cannot be combined with OIDC configuration")
+		}
+		return server.AuthConfig{}, true, nil
+	}
+	if issuer == "" || audience == "" {
+		return server.AuthConfig{}, false, fmt.Errorf("authentication configuration is required: set LIFTR_AUTH_ISSUER and LIFTR_AUTH_AUDIENCE, or explicitly set LIFTR_AUTH_MODE=insecure for development")
+	}
+	var algorithms []string
+	if raw := os.Getenv("LIFTR_AUTH_ALGORITHMS"); raw != "" {
+		algorithms = strings.Split(raw, ",")
+		for i := range algorithms {
+			algorithms[i] = strings.TrimSpace(algorithms[i])
+		}
+	}
+	config := server.AuthConfig{
+		Issuer:      issuer,
+		Audience:    audience,
+		Algorithms:  algorithms,
+		GroupClaim:  os.Getenv("LIFTR_AUTH_GROUP_CLAIM"),
+		GroupPrefix: os.Getenv("LIFTR_AUTH_GROUP_PREFIX"),
+		KindClaim:   os.Getenv("LIFTR_AUTH_KIND_CLAIM"),
+		GrantsFile:  os.Getenv("LIFTR_AUTH_GRANTS_FILE"),
+	}
+	return config, false, nil
+}
+
 // composeFullRuntime wires durable persistence, the developer contract
-// registry, the private Pulumi binding, and the outbox worker.
+// registry, the private Pulumi binding, and the outbox worker. Authentication
+// configuration is mandatory and validated before anything starts.
 func composeFullRuntime(ctx context.Context, logger *slog.Logger) (*server.Runtime, func(), error) {
+	authConfig, insecure, err := composeAuthConfig()
+	if err != nil {
+		return nil, nil, err
+	}
 	store, closeStore, err := openPostgres(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -154,12 +204,23 @@ func composeFullRuntime(ctx context.Context, logger *slog.Logger) (*server.Runti
 		Provisioners:          map[application.ProvisionerRef]provisioning.Provisioner{providerRef: provider},
 		DefaultProvisionerRef: providerRef,
 		Logger:                logger,
+		Auth:                  authConfigOrNil(authConfig, insecure),
+		InsecureAuth:          insecure,
 	})
 	if err != nil {
 		closeStore()
 		return nil, nil, err
 	}
 	return runtime, closeStore, nil
+}
+
+// authConfigOrNil keeps Compose's exactly-one-mode contract: insecure mode
+// passes no AuthConfig and sets InsecureAuth instead.
+func authConfigOrNil(config server.AuthConfig, insecure bool) *server.AuthConfig {
+	if insecure {
+		return nil
+	}
+	return &config
 }
 
 func openPostgres(ctx context.Context) (*postgres.Store, func(), error) {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/sithea-nou/liftr/internal/application"
 	applicationfake "github.com/sithea-nou/liftr/internal/application/fake"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/identity"
 	"github.com/sithea-nou/liftr/internal/provisioning"
 	provisioningfake "github.com/sithea-nou/liftr/internal/provisioning/fake"
 	"github.com/sithea-nou/liftr/internal/worker"
@@ -33,6 +35,39 @@ type fixture struct {
 	resolver *applicationfake.Resolver
 	catalog  application.ResourceTypeCatalog
 	ref      application.ProvisionerRef
+	auth     *headerAuthenticator
+}
+
+// headerAuthenticator maps bearer tokens to deterministic principals:
+// "tester" holds team/platform; any other token authenticates as its own
+// subject without memberships unless registered via registerMembership.
+type headerAuthenticator struct {
+	mu         sync.Mutex
+	membership map[string][]domain.OwnerRef
+}
+
+func newHeaderAuthenticator() *headerAuthenticator {
+	return &headerAuthenticator{membership: map[string][]domain.OwnerRef{
+		"tester": {{Kind: "team", ID: "platform"}},
+	}}
+}
+
+func (a *headerAuthenticator) Authenticate(_ context.Context, credential string) (identity.Principal, error) {
+	a.mu.Lock()
+	owners := append([]domain.OwnerRef(nil), a.membership[credential]...)
+	a.mu.Unlock()
+	principal, err := identity.NewPrincipal(identity.KindUser, "https://test.liftr.dev", credential, "test", owners)
+	if err != nil {
+		return identity.Principal{}, err
+	}
+	return principal, nil
+}
+
+// registerMembership grants one token an additional typed owner membership.
+func (a *headerAuthenticator) registerMembership(token string, owner domain.OwnerRef) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.membership[token] = append(a.membership[token], owner)
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -54,6 +89,49 @@ func newFixtureWithCatalog(t *testing.T, catalog application.ResourceTypeCatalog
 	return newFixtureWithParts(t, applicationfake.NewStore(), catalog)
 }
 
+// newFixtureWithPolicy composes the standard fixture but replaces the
+// authorizer so tests exercise real owner-membership decisions through the
+// transport.
+func newFixtureWithPolicy(t *testing.T, authorizer application.Authorizer) (*fixture, *headerAuthenticator) {
+	t.Helper()
+	typeValue, err := domain.NewResourceType(provisioningfake.ResourceType(), "Fake resource for transport tests",
+		[]domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := applicationfake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{provisioningfake.ResourceType(): typeValue}}
+	return newFixtureWithCatalogAndPolicy(t, authorizer, catalog)
+}
+
+// newFixtureWithCatalogAndPolicy composes a policy fixture over a
+// caller-supplied catalog so contract-specific behavior (outputs) combines
+// with real authorization decisions.
+func newFixtureWithCatalogAndPolicy(t *testing.T, authorizer application.Authorizer, catalog application.ResourceTypeCatalog) (*fixture, *headerAuthenticator) {
+	t.Helper()
+	store := applicationfake.NewStore()
+	ref, err := application.NewProvisionerRef("transport-test-provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &applicationfake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{ref: provisioningfake.New(provisioningfake.ModeSynchronous)}}
+	service, err := application.NewService(catalog, &applicationfake.Selector{Ref: ref},
+		resolver, store, authorizer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := newHeaderAuthenticator()
+	f := &fixture{
+		handler:  apihttp.NewHandler(apihttp.Deps{Service: service, Auth: auth}),
+		service:  service,
+		store:    store,
+		resolver: resolver,
+		catalog:  catalog,
+		ref:      ref,
+		auth:     auth,
+	}
+	return f, auth
+}
+
 func newFixtureWithParts(t *testing.T, store *applicationfake.Store, catalog application.ResourceTypeCatalog) *fixture {
 	t.Helper()
 	ref, err := application.NewProvisionerRef("transport-test-provider")
@@ -62,22 +140,51 @@ func newFixtureWithParts(t *testing.T, store *applicationfake.Store, catalog app
 	}
 	selector := &applicationfake.Selector{Ref: ref}
 	resolver := &applicationfake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{ref: provisioningfake.New(provisioningfake.ModeSynchronous)}}
-	service, err := application.NewService(catalog, selector, resolver, store)
+	service, err := application.NewService(catalog, selector, resolver, store, applicationfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	auth := newHeaderAuthenticator()
 	return &fixture{
-		handler:  apihttp.NewHandler(apihttp.Deps{Service: service}),
+		handler:  apihttp.NewHandler(apihttp.Deps{Service: service, Auth: auth}),
 		service:  service,
 		store:    store,
 		resolver: resolver,
 		catalog:  catalog,
 		ref:      ref,
+		auth:     auth,
 	}
 }
 
-// request performs one API call against the handler.
+// request performs one API call against the handler. When the caller supplies
+// no Authorization header, a default authenticated principal ("tester") is
+// injected so tests focus on behavior other than authentication; use
+// requestWithoutAuth to exercise credential handling explicitly.
 func (f *fixture) request(t *testing.T, method, path string, headers map[string]string, body any) *http.Response {
+	t.Helper()
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	if _, present := headers["Authorization"]; !present {
+		headers["Authorization"] = "Bearer tester"
+	}
+	return f.send(t, method, path, headers, body)
+}
+
+// requestWithoutAuth sends the call with exactly the headers provided and no
+// default credential injection.
+func (f *fixture) requestWithoutAuth(t *testing.T, method, path string, headers map[string]string, body any) *http.Response {
+	t.Helper()
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	return f.send(t, method, path, headers, body)
+}
+
+// send performs the call and returns a response whose body may be read any
+// number of times, letting helpers inspect status, headers, and payload
+// independently.
+func (f *fixture) send(t *testing.T, method, path string, headers map[string]string, body any) *http.Response {
 	t.Helper()
 	var reader io.Reader
 	if body != nil {
@@ -93,7 +200,10 @@ func (f *fixture) request(t *testing.T, method, path string, headers map[string]
 	}
 	recorder := httptest.NewRecorder()
 	f.handler.ServeHTTP(recorder, req)
-	return recorder.Result()
+	response := recorder.Result()
+	payload := append([]byte(nil), recorder.Body.Bytes()...)
+	response.Body = io.NopCloser(bytes.NewReader(payload))
+	return response
 }
 
 func decodeBody(t *testing.T, response *http.Response) map[string]any {

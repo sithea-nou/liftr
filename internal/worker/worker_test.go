@@ -790,7 +790,7 @@ func newUnresolvableHarness(t *testing.T) (*application.Service, *applicationfak
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewService(applicationfake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{provisioningfake.ResourceType(): typeValue}}, selector, resolver, store)
+	service, err := application.NewService(applicationfake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{provisioningfake.ResourceType(): typeValue}}, selector, resolver, store, applicationfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -817,7 +817,7 @@ func newHarness(t *testing.T, provider provisioning.Provisioner) (*application.S
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewService(applicationfake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{provisioningfake.ResourceType(): typeValue}}, selector, resolver, store)
+	service, err := application.NewService(applicationfake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{provisioningfake.ResourceType(): typeValue}}, selector, resolver, store, applicationfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +835,7 @@ func createCommand(t *testing.T, resourceID domain.ResourceID, operationID domai
 	if err != nil {
 		t.Fatal(err)
 	}
-	return application.CreateResourceCommand{ID: resourceID, Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
+	return application.CreateResourceCommand{Actor: applicationfake.Principal("tester"), ID: resourceID, Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: spec, OperationID: operationID, EventID: domain.EventID("event-" + string(operationID)), RequestedAt: testTime,
 		IdempotencyKey: "key-" + string(operationID)}
 }

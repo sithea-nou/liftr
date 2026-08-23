@@ -167,6 +167,7 @@ func TestOpenAPIDocumentsHeadersAndCodes(t *testing.T) {
 		}
 	}
 	codes := []string{
+		"UNAUTHENTICATED", "FORBIDDEN",
 		"INVALID_ARGUMENT", "UNSUPPORTED_RESOURCE_TYPE", "RESOURCE_TYPE_NOT_FOUND",
 		"RESOURCE_SPEC_INVALID", "RESOURCE_NOT_FOUND", "OPERATION_NOT_FOUND",
 		"RESOURCE_ALREADY_EXISTS", "IDEMPOTENCY_CONFLICT", "GENERATION_CONFLICT", "OPERATION_ACTIVE",
@@ -187,6 +188,63 @@ func TestNoValidatorHeadersInContract(t *testing.T) {
 	for _, banned := range []string{"ETag", "Etag", "etag", "If-Match", "If-None-Match"} {
 		if strings.Contains(raw, banned) {
 			t.Errorf("contract mentions %q; v1 defines no representation validators", banned)
+		}
+	}
+}
+
+// TestOpenAPIDocumentsSecurity pins the M11 security contract: a bearer
+// scheme applies to every /v1 operation, health endpoints opt out, 401 is
+// documented everywhere versioned, and 403 is reserved for create/discovery
+// denials under the hidden-404 policy (ADR-0012).
+func TestOpenAPIDocumentsSecurity(t *testing.T) {
+	document := loadContract(t)
+
+	components, ok := document["components"].(map[string]any)
+	if !ok {
+		t.Fatal("document has no components")
+	}
+	schemes, ok := components["securitySchemes"].(map[string]any)
+	if !ok {
+		t.Fatal("document declares no securitySchemes")
+	}
+	bearer, ok := schemes["bearerAuth"].(map[string]any)
+	if !ok {
+		t.Fatal("securitySchemes does not declare bearerAuth")
+	}
+	if bearer["type"] != "http" || bearer["scheme"] != "bearer" || bearer["bearerFormat"] != "JWT" {
+		t.Fatalf("bearerAuth = %v, want http/bearer/JWT", bearer)
+	}
+
+	requirements := document["security"].([]any)
+	rootRequirement, ok := requirements[0].(map[string]any)
+	if !ok || len(rootRequirement) != 1 {
+		t.Fatalf("root security = %v, want exactly one bearerAuth requirement", document["security"])
+	}
+
+	for path, rawOperations := range document["paths"].(map[string]any) {
+		operations, ok := rawOperations.(map[string]any)
+		if !ok {
+			continue
+		}
+		versioned := strings.HasPrefix(path, "/v1/")
+		for method, rawOperation := range operations {
+			operation, ok := rawOperation.(map[string]any)
+			if !ok || method == "parameters" {
+				continue
+			}
+			responses, _ := operation["responses"].(map[string]any)
+			if versioned {
+				if _, has401 := responses["401"]; !has401 {
+					t.Errorf("%s %s documents no 401 response", method, path)
+				}
+			} else {
+				if security, present := operation["security"]; !present || security != nil && len(security.([]any)) != 0 {
+					t.Errorf("%s %s must override the root security requirement with an empty list", method, path)
+				}
+			}
+			if _, has403 := responses["403"]; has403 && path != "/v1/resources" {
+				t.Errorf("%s %s documents 403 but only create admissions may answer FORBIDDEN", method, path)
+			}
 		}
 	}
 }

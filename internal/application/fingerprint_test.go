@@ -6,7 +6,16 @@ import (
 	"testing"
 
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/identity"
 )
+
+func testActor() identity.Principal {
+	principal, err := identity.NewPrincipal(identity.KindUser, "https://test.liftr.dev", "tester", "test", nil)
+	if err != nil {
+		panic(err)
+	}
+	return principal
+}
 
 func TestFingerprintHashNulCollision(t *testing.T) {
 	first := fingerprintHash("r\x00web", "app/v1")
@@ -29,14 +38,14 @@ func TestCreateCommandFingerprintNulDistinguishesResourceAndType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := createCommandFingerprint(CreateResourceCommand{
+	first, err := createCommandFingerprint(CreateResourceCommand{Actor: testActor(),
 		ID: "r\x00web", Type: domain.ResourceTypeRef{Name: "app", Version: "v1"},
 		Owner: domain.OwnerRef{Kind: "team", ID: "platform"}, Spec: spec,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := createCommandFingerprint(CreateResourceCommand{
+	second, err := createCommandFingerprint(CreateResourceCommand{Actor: testActor(),
 		ID: "r", Type: domain.ResourceTypeRef{Name: "web\x00app", Version: "v1"},
 		Owner: domain.OwnerRef{Kind: "team", ID: "platform"}, Spec: spec,
 	})

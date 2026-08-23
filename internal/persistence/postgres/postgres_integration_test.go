@@ -250,7 +250,7 @@ func TestPostgresPersistenceRestartWorkerAndImmutableIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := replayService.AdmitUpdateResource(ctx, application.UpdateResourceCommand{ID: command.ID, ExpectedGeneration: 1, Spec: newSpec,
+	if _, err := replayService.AdmitUpdateResource(ctx, application.UpdateResourceCommand{Actor: applicationfake.Principal("tester"), ID: command.ID, ExpectedGeneration: 1, Spec: newSpec,
 		OperationID: "operation-update", EventID: "event-update", RequestedAt: replay.Resource.Status.UpdatedAt().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
@@ -443,14 +443,14 @@ func TestPostgresConcurrentUpdateDeleteLeavesOneActiveOperation(t *testing.T) {
 	results := make(chan error, 2)
 	go func() {
 		<-start
-		_, err := service.AdmitUpdateResource(ctx, application.UpdateResourceCommand{ID: command.ID, ExpectedGeneration: 1, Spec: updatedSpec,
+		_, err := service.AdmitUpdateResource(ctx, application.UpdateResourceCommand{Actor: applicationfake.Principal("tester"), ID: command.ID, ExpectedGeneration: 1, Spec: updatedSpec,
 			OperationID: "operation-concurrent-update", EventID: "event-concurrent-update", RequestedAt: resource.Status.UpdatedAt().Add(time.Hour),
 			IdempotencyKey: "concurrent-update"})
 		results <- err
 	}()
 	go func() {
 		<-start
-		_, err := service.AdmitDeleteResource(ctx, application.DeleteResourceCommand{ID: command.ID, ExpectedGeneration: 1,
+		_, err := service.AdmitDeleteResource(ctx, application.DeleteResourceCommand{Actor: applicationfake.Principal("tester"), ID: command.ID, ExpectedGeneration: 1,
 			OperationID: "operation-concurrent-delete", EventID: "event-concurrent-delete", RequestedAt: resource.Status.UpdatedAt().Add(2 * time.Hour),
 			IdempotencyKey: "concurrent-delete"})
 		results <- err
@@ -493,7 +493,7 @@ func TestPostgresConcurrentCreateIdempotencyPersistsOneAggregate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := service.AdmitDeleteResource(ctx, application.DeleteResourceCommand{ID: command.ID, ExpectedGeneration: 1,
+	if _, err := service.AdmitDeleteResource(ctx, application.DeleteResourceCommand{Actor: applicationfake.Principal("tester"), ID: command.ID, ExpectedGeneration: 1,
 		OperationID: "different-operation", EventID: "different-event", RequestedAt: command.RequestedAt.Add(time.Hour),
 		IdempotencyKey: command.IdempotencyKey}); !errors.Is(err, application.ErrIdempotencyConflict) {
 		t.Fatalf("cross-command idempotency error=%v", err)
@@ -754,7 +754,7 @@ func postgresService(t *testing.T, store *postgres.Store, provider provisioning.
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := application.NewService(applicationfake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{provisioningfake.ResourceType(): typeValue}}, selector, resolver, store)
+	service, err := application.NewService(applicationfake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{provisioningfake.ResourceType(): typeValue}}, selector, resolver, store, applicationfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +767,7 @@ func postgresCreateCommand(t *testing.T, resourceID domain.ResourceID, operation
 	if err != nil {
 		t.Fatal(err)
 	}
-	return application.CreateResourceCommand{ID: resourceID, Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"}, Spec: spec,
+	return application.CreateResourceCommand{Actor: applicationfake.Principal("tester"), ID: resourceID, Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"}, Spec: spec,
 		OperationID: operationID, EventID: domain.EventID("event-" + string(operationID)), RequestedAt: time.Date(2026, 8, 16, 12, 0, 0, 123, time.UTC),
 		IdempotencyKey: "key-" + string(operationID)}
 }

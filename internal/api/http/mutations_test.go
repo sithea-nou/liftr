@@ -76,11 +76,14 @@ func TestMutationWithoutIdempotencyKeyIsInvalid(t *testing.T) {
 	create := f.request(t, http.MethodPost, "/v1/resources", nil, createBody)
 	expectProblem(t, create, http.StatusBadRequest, "INVALID_ARGUMENT")
 
-	update := f.request(t, http.MethodPut, "/v1/resources/anything",
-		map[string]string{"If-Liftr-Generation": "1"}, map[string]any{"spec": map[string]any{}})
+	// PUT and DELETE evaluate the Idempotency-Key requirement only after the
+	// stored Resource is authorized, so they target an existing record here.
+	f.createResource(t, "resource-existing", map[string]any{"size": int64(3)})
+	update := f.request(t, http.MethodPut, "/v1/resources/resource-existing",
+		map[string]string{"If-Liftr-Generation": "1"}, map[string]any{"spec": map[string]any{"size": int64(4)}})
 	expectProblem(t, update, http.StatusBadRequest, "INVALID_ARGUMENT")
 
-	deleteCall := f.request(t, http.MethodDelete, "/v1/resources/anything",
+	deleteCall := f.request(t, http.MethodDelete, "/v1/resources/resource-existing",
 		map[string]string{"If-Liftr-Generation": "1"}, nil)
 	expectProblem(t, deleteCall, http.StatusBadRequest, "INVALID_ARGUMENT")
 }

@@ -162,19 +162,34 @@ func (r *repositories) Append(ctx context.Context, event domain.Event) error {
 	if event.OperationID() != "" {
 		operationID = event.OperationID()
 	}
-	_, err := r.tx.Exec(ctx, `INSERT INTO events(id,resource_id,operation_id,generation,type,reason,message,occurred_at_ns)
-		VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8)`, event.ID(), event.ResourceID(), operationID, uintText(event.Generation()), event.Type(), event.Reason(), event.Message(), event.OccurredAt().UnixNano())
+	// The events table's data column records deliberately selected normalized
+	// audit fields for admitted user mutations — the stable principal ID and
+	// principal kind only. Access tokens, raw claims, and memberships never
+	// reach this payload (ADR-0012).
+	var data any
+	if actor, present := event.Actor(); present {
+		data = map[string]any{"actor": map[string]string{"id": actor.ID, "kind": actor.Kind}}
+	}
+	_, err := r.tx.Exec(ctx, `INSERT INTO events(id,resource_id,operation_id,generation,type,reason,message,occurred_at_ns,data)
+		VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8,$9)`, event.ID(), event.ResourceID(), operationID, uintText(event.Generation()), event.Type(), event.Reason(), event.Message(), event.OccurredAt().UnixNano(), data)
 	return translateError(err)
 }
 
-func (r *repositories) GetIdempotency(ctx context.Context, key string) (application.IdempotencyRecord, error) {
-	if _, err := r.tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))", key); err != nil {
+// GetIdempotency resolves one idempotency record inside the caller's
+// per-principal scope. Records persisted before Milestone 11 carry the legacy
+// "control-plane" scope; they are never matched by post-M11 lookups because a
+// PrincipalID can never equal that value, so those anonymous-era rows are
+// retired in place rather than migrated (ADR-0012).
+func (r *repositories) GetIdempotency(ctx context.Context, scope, key string) (application.IdempotencyRecord, error) {
+	// One advisory lock over the composite namespace serializes concurrent
+	// admissions of the same scoped key.
+	if _, err := r.tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, hashtextextended($2, 1)))`, scope, key); err != nil {
 		return application.IdempotencyRecord{}, translateError(err)
 	}
 	var record application.IdempotencyRecord
 	var fingerprint []byte
 	err := r.tx.QueryRow(ctx, `SELECT idempotency_key,fingerprint,command_kind,resource_id,operation_id FROM idempotency_records
-		WHERE scope='control-plane' AND idempotency_key=$1 FOR UPDATE`, key).Scan(&record.Key, &fingerprint, &record.CommandKind, &record.ResourceID, &record.OperationID)
+		WHERE scope=$1 AND idempotency_key=$2 FOR UPDATE`, scope, key).Scan(&record.Key, &fingerprint, &record.CommandKind, &record.ResourceID, &record.OperationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return application.IdempotencyRecord{}, application.ErrIdempotencyNotFound
 	}
@@ -187,7 +202,7 @@ func (r *repositories) GetIdempotency(ctx context.Context, key string) (applicat
 
 func (r *repositories) PutIdempotency(ctx context.Context, record application.IdempotencyRecord) error {
 	_, err := r.tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,command_kind,fingerprint,resource_id,operation_id)
-		VALUES ('control-plane',$1,$2,$3,$4,$5)`, record.Key, record.CommandKind, []byte(record.Fingerprint), record.ResourceID, record.OperationID)
+		VALUES ($1,$2,$3,$4,$5,$6)`, record.Scope, record.Key, record.CommandKind, []byte(record.Fingerprint), record.ResourceID, record.OperationID)
 	return translateError(err)
 }
 

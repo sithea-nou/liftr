@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/identity"
 	"github.com/sithea-nou/liftr/internal/resourcecontract"
 )
 
@@ -91,10 +92,17 @@ type ResourceTypeCatalog interface {
 	List(context.Context) ([]resourcecontract.Contract, error)
 }
 
-// GetResourceType reads one registered developer contract for discovery.
-// Catalog lookup failures are reported as unknown resource types; catalog
-// availability is never part of the developer contract.
-func (s *Service) GetResourceType(ctx context.Context, ref domain.ResourceTypeRef) (ResourceContract, error) {
+// GetResourceType reads one registered developer contract for discovery on
+// behalf of an authenticated principal. Discovery is authenticated but
+// globally readable in M11: every authenticated principal holds
+// resourceType:read, so schemas reveal platform capabilities to legitimate
+// callers while unauthenticated callers are refused at the transport
+// (ADR-0012). Catalog lookup failures are reported as unknown resource types;
+// catalog availability is never part of the developer contract.
+func (s *Service) GetResourceType(ctx context.Context, principal identity.Principal, ref domain.ResourceTypeRef) (ResourceContract, error) {
+	if err := s.authorize(ctx, principal, identity.ActionResourceTypeRead, identity.ResourceTarget{Type: ref}); err != nil {
+		return nil, err
+	}
 	contract, err := s.Types.Get(ctx, ref)
 	if err != nil || isNilInterface(contract) {
 		return nil, fmt.Errorf("%w: %v", ErrResourceTypeNotFound, err)
@@ -103,8 +111,12 @@ func (s *Service) GetResourceType(ctx context.Context, ref domain.ResourceTypeRe
 }
 
 // ListResourceTypes reads every registered developer contract in the
-// catalog's deterministic order.
-func (s *Service) ListResourceTypes(ctx context.Context) ([]ResourceContract, error) {
+// catalog's deterministic order for an authenticated principal. The same
+// authenticated-global policy as GetResourceType applies.
+func (s *Service) ListResourceTypes(ctx context.Context, principal identity.Principal) ([]ResourceContract, error) {
+	if err := s.authorize(ctx, principal, identity.ActionResourceTypeRead, identity.ResourceTarget{}); err != nil {
+		return nil, err
+	}
 	return s.Types.List(ctx)
 }
 

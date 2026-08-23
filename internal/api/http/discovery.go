@@ -4,6 +4,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -116,25 +117,42 @@ func capabilityNames(contract application.ResourceContract) []string {
 }
 
 // listResourceTypes answers "what ResourceTypes can I create?" with contract
-// summaries only. Capabilities are ResourceType-contract capabilities, not
-// guarantees about current backend availability.
+// summaries only, for any authenticated principal. Discovery is authenticated
+// but globally readable in M11 (resourceType:read for every principal);
+// unauthenticated callers never reach this handler. Capabilities are
+// ResourceType-contract capabilities, not guarantees about current backend
+// availability.
 func (h *handler) listResourceTypes(w http.ResponseWriter, r *http.Request) {
 	if !h.requireService(w, r) {
 		return
 	}
-	contracts, err := h.service.ListResourceTypes(r.Context())
+	principal, ok := h.requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	contracts, err := h.service.ListResourceTypes(r.Context(), principal)
 	if err != nil {
-		mapTransportFailure(w, r, err)
+		if errors.Is(err, application.ErrNotAuthorized) {
+			writeProblem(w, r, CodeForbidden, "you are not authorized to read ResourceType discovery", nil)
+			return
+		}
+		h.mapReadError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, newListDTO(contracts))
 }
 
 // getResourceType returns one developer contract including its embedded
-// ResourceSpec schema. A missing name/version pair is a 404 because the
-// request addresses a ResourceType entity directly.
+// ResourceSpec schema to an authenticated principal. A missing name/version
+// pair is a 404 because the request addresses a ResourceType entity directly;
+// an authorization denial is 403 because discovery hides no per-type
+// existence in M11.
 func (h *handler) getResourceType(w http.ResponseWriter, r *http.Request) {
 	if !h.requireService(w, r) {
+		return
+	}
+	principal, ok := h.requirePrincipal(w, r)
+	if !ok {
 		return
 	}
 	name := r.PathValue("name")
@@ -144,8 +162,12 @@ func (h *handler) getResourceType(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, CodeResourceTypeNotFound, "no ResourceType is registered with this name and version", nil)
 		return
 	}
-	contract, err := h.service.GetResourceType(r.Context(), domain.ResourceTypeRef{Name: name, Version: version})
+	contract, err := h.service.GetResourceType(r.Context(), principal, domain.ResourceTypeRef{Name: name, Version: version})
 	if err != nil {
+		if errors.Is(err, application.ErrNotAuthorized) {
+			writeProblem(w, r, CodeForbidden, "you are not authorized to read ResourceType discovery", nil)
+			return
+		}
 		h.mapReadError(w, r, err)
 		return
 	}

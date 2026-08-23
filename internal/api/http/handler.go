@@ -13,8 +13,12 @@ import (
 )
 
 // Deps carries the application boundary the transport is allowed to use.
+// Auth authenticates bearer credentials into principals. It fails closed:
+// when nil, every versioned request is answered 401 and health endpoints
+// remain reachable (ADR-0012).
 type Deps struct {
 	Service *application.Service
+	Auth    Authenticator
 }
 
 type handler struct {
@@ -44,11 +48,13 @@ func apiRoutes(h *handler) []route {
 }
 
 // NewHandler returns the HTTP handler implementing the approved v1 contract.
+// Middleware order is request identity first (so credential failures still
+// carry an authoritative X-Request-ID), then authentication, then routing.
 func NewHandler(deps Deps) http.Handler {
 	h := &handler{service: deps.Service}
 	mux := http.NewServeMux()
 	for _, rt := range apiRoutes(h) {
 		mux.HandleFunc(rt.Method+" "+rt.Pattern, rt.Handle)
 	}
-	return withRequestIdentity(mux)
+	return withRequestIdentity(withAuthentication(deps.Auth, mux))
 }

@@ -27,7 +27,7 @@ func TestStaleSubmissionEvidenceDoesNotApplyEagerly(t *testing.T) {
 		submitErr: provisioning.ErrAmbiguousSubmission,
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-eager-stale", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-eager-stale", EventID: "event-eager-stale", RequestedAt: applicationTime,
 	}
@@ -88,7 +88,7 @@ func TestFreshSubmissionEvidenceCompletesEagerly(t *testing.T) {
 		submitErr: provisioning.ErrAmbiguousSubmission,
 	}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-eager-fresh-control", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-eager-fresh-control", EventID: "event-eager-fresh-control", RequestedAt: applicationTime,
 	}
@@ -130,19 +130,19 @@ func TestCreateResourceNulFingerprintConflict(t *testing.T) {
 	store := fake.NewStore()
 	selector := &fake.Selector{Ref: ref}
 	resolver := &fake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{ref: provider}}
-	service, err := application.NewService(fake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{firstType.Ref(): firstType, secondType.Ref(): secondType}}, selector, resolver, store)
+	service, err := application.NewService(fake.Catalog{Types: map[domain.ResourceTypeRef]domain.ResourceType{firstType.Ref(): firstType, secondType.Ref(): secondType}}, selector, resolver, store, fake.AllowAll{})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
 	service.EnableEagerExecutionForTesting()
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "r\x00web", Type: firstType.Ref(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-nul-1", EventID: "event-nul-1", RequestedAt: applicationTime, IdempotencyKey: "nul-key",
 	}
 	if _, err := service.CreateResource(context.Background(), command); err != nil {
 		t.Fatalf("first CreateResource() error = %v", err)
 	}
-	conflicting := application.CreateResourceCommand{
+	conflicting := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "r", Type: secondType.Ref(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-nul-2", EventID: "event-nul-2", RequestedAt: applicationTime, IdempotencyKey: "nul-key",
 	}
@@ -156,7 +156,7 @@ func TestLifecycleEventIDsUseCanonicalInternalLabels(t *testing.T) {
 	handle, _ := provisioning.NewExecutionHandle("event-ids")
 	provider := &scriptedProvisioner{submit: provisioning.Submission{Observation: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded, Handle: &handle}, Resource: applicationReadyFacts(), ObservedAt: applicationTime.Add(time.Hour)}}}
 	service, store, _, _ := newService(t, ref, provider)
-	command := application.CreateResourceCommand{
+	command := application.CreateResourceCommand{Actor: fake.Principal("tester"),
 		ID: "resource-event-ids", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
 		Spec: testSpec(t), OperationID: "operation-event-ids", EventID: "event-event-ids", RequestedAt: applicationTime,
 	}

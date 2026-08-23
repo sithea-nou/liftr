@@ -344,6 +344,7 @@ func newE2ERuntime(t *testing.T, pulumiRoot string) (http.Handler, func()) {
 		// A fast retry base keeps delayed follow-up observations inside the
 		// test pump's quiescence grace window; production intervals differ.
 		WorkerInterval: 5 * time.Millisecond,
+		InsecureAuth:   true,
 	})
 	if err != nil {
 		t.Fatal(err)

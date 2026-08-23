@@ -36,6 +36,7 @@ func TestComposeDrivesWorkUntilTerminalThroughWorkerLoop(t *testing.T) {
 		Provisioners:          map[application.ProvisionerRef]provisioning.Provisioner{ref: provisioningfake.New(provisioningfake.ModeSynchronous)},
 		DefaultProvisionerRef: ref,
 		WorkerInterval:        2 * time.Millisecond,
+		InsecureAuth:          true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +50,7 @@ func TestComposeDrivesWorkUntilTerminalThroughWorkerLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := application.CreateResourceCommand{
+		Actor:          appfake.Principal("tester"),
 		ID:             domain.ResourceID("rt-1"),
 		Type:           provisioningfake.ResourceType(),
 		Owner:          domain.OwnerRef{Kind: "team", ID: "platform"},
@@ -102,6 +104,7 @@ func TestComposeRejectsIncompleteConfiguration(t *testing.T) {
 		Catalog:               runtimeCatalog(t),
 		Provisioners:          map[application.ProvisionerRef]provisioning.Provisioner{ref: provisioningfake.New(provisioningfake.ModeSynchronous)},
 		DefaultProvisionerRef: ref,
+		InsecureAuth:          true,
 	}
 	tests := []struct {
 		name   string

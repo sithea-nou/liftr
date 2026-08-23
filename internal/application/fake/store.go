@@ -54,7 +54,7 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 	tx := &Store{
 		resources:   cloneMap(s.resources),
 		operations:  cloneMap(s.operations),
-		events:      cloneMap(s.events),
+		events:      cloneEvents(s.events),
 		executions:  cloneExecutions(s.executions),
 		idempotency: cloneMap(s.idempotency),
 		attempts:    cloneMap(s.attempts),
@@ -134,6 +134,19 @@ func cloneObservation(observation provisioning.ExecutionObservation) provisionin
 		observation.Execution = &execution
 	}
 	return observation
+}
+
+// cloneEvents snapshots event maps with their actor payloads so transaction
+// isolation matches PostgreSQL row semantics.
+func cloneEvents(source map[domain.EventID]domain.Event) map[domain.EventID]domain.Event {
+	cloned := make(map[domain.EventID]domain.Event, len(source))
+	for key, event := range source {
+		if actor, present := event.Actor(); present {
+			event, _ = event.WithActor(actor)
+		}
+		cloned[key] = event
+	}
+	return cloned
 }
 
 func cloneMap[K comparable, V any](source map[K]V) map[K]V {
@@ -375,20 +388,32 @@ func (s *Store) SaveExecution(_ context.Context, record application.Provisioning
 	return nil
 }
 
-func (s *Store) GetIdempotency(_ context.Context, key string) (application.IdempotencyRecord, error) {
-	record, ok := s.idempotency[key]
+func (s *Store) GetIdempotency(_ context.Context, scope, key string) (application.IdempotencyRecord, error) {
+	record, ok := s.idempotency[idempotencyMapKey(scope, key)]
 	if !ok {
 		return application.IdempotencyRecord{}, application.ErrIdempotencyNotFound
 	}
-	return record, nil
+	return cloneIdempotency(record), nil
 }
 
 func (s *Store) PutIdempotency(_ context.Context, record application.IdempotencyRecord) error {
-	if _, exists := s.idempotency[record.Key]; exists {
+	mapKey := idempotencyMapKey(record.Scope, record.Key)
+	if _, exists := s.idempotency[mapKey]; exists {
 		return fmt.Errorf("idempotency key already exists")
 	}
-	s.idempotency[record.Key] = record
+	s.idempotency[mapKey] = cloneIdempotency(record)
 	return nil
+}
+
+// idempotencyMapKey namespaces the key by its scope so distinct principals
+// never share an idempotency namespace.
+func idempotencyMapKey(scope, key string) string {
+	return scope + "\x00" + key
+}
+
+func cloneIdempotency(record application.IdempotencyRecord) application.IdempotencyRecord {
+	cloned := record
+	return cloned
 }
 
 func attemptKey(operationID domain.OperationID, attempt uint64) string {

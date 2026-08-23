@@ -15,6 +15,7 @@ import (
 
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/identity"
 )
 
 type createResourceEnvelope struct {
@@ -28,11 +29,50 @@ type updateResourceEnvelope struct {
 	Spec json.RawMessage `json:"spec"`
 }
 
-// createResource admits an asynchronous create request. Infrastructure
-// readiness stays asynchronous; the response reports the accepted desired
-// state, not provider progress.
+// requirePrincipal returns the authenticated principal assigned by the
+// authentication middleware. With the middleware composed this always
+// succeeds; it fails closed rather than acting unauthenticated if a handler
+// were ever reached without one (ADR-0012).
+func (h *handler) requirePrincipal(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		writeUnauthenticated(w, r, false)
+		return identity.Principal{}, false
+	}
+	return principal, true
+}
+
+// hideResource renders the Resource-absent problem. It is used for true
+// absence AND for authorization denial so forbidden reads are externally
+// indistinguishable from missing records under the approved hidden-404
+// policy (ADR-0012).
+func hideResource(w http.ResponseWriter, r *http.Request) {
+	writeProblem(w, r, CodeResourceNotFound, "no retained Resource record exists with this ID", nil)
+}
+
+func hideOperation(w http.ResponseWriter, r *http.Request) {
+	writeProblem(w, r, CodeOperationNotFound, "no Operation exists with this ID", nil)
+}
+
+// denyCreate renders the honest capability denial for create admissions.
+// There is no existing record whose existence could leak, and the requested
+// owner names come from the caller's own request body.
+func denyCreate(w http.ResponseWriter, r *http.Request) {
+	writeProblem(w, r, CodeForbidden, "you are not authorized to create Resources for the requested owner", nil)
+}
+
+// createResource admits an asynchronous create request. Ordering:
+// authentication (middleware) -> structural parsing -> application
+// authorization of the requested type+owner -> principal-scoped idempotency
+// replay -> catalog -> contract validation -> admission (ADR-0012). The first
+// five steps happen inside the admission call; an unauthorized caller is
+// answered 403 before any catalog or replay state is consulted.
 func (h *handler) createResource(w http.ResponseWriter, r *http.Request) {
 	if !h.requireService(w, r) {
+		return
+	}
+	principal, ok := h.requirePrincipal(w, r)
+	if !ok {
 		return
 	}
 	key, rerr := requireIdempotencyKey(r)
@@ -75,6 +115,7 @@ func (h *handler) createResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := h.service.AdmitCreateResource(r.Context(), application.CreateResourceCommand{
+		Actor:          principal,
 		ID:             id,
 		Type:           domain.ResourceTypeRef{Name: env.Type.Name, Version: env.Type.Version},
 		Owner:          domain.OwnerRef{Kind: env.Owner.Kind, ID: env.Owner.ID},
@@ -85,21 +126,35 @@ func (h *handler) createResource(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: key,
 	})
 	if err != nil {
-		h.mapMutationError(w, r, err, id)
+		if errors.Is(err, application.ErrNotAuthorized) {
+			denyCreate(w, r)
+			return
+		}
+		h.mapMutationError(w, r, principal, err, id)
 		return
 	}
-	h.writeMutationResponse(w, r, result, http.StatusCreated)
+	h.writeMutationResponse(w, r, principal, result, http.StatusCreated)
 }
 
-// getResource returns one retained Resource. A Deleted Resource is a real
-// representation with status.state = Deleted; 404 means Liftr has no retained
-// record for this ID at all.
+// getResource returns one retained Resource for an authenticated principal
+// authorized on its stored owner. A Deleted Resource is a real representation
+// with status.state = Deleted; 404 means Liftr has no readable record for
+// this ID — which is also the answer for a record the caller cannot access,
+// so existence is never disclosed to unauthorized callers (ADR-0012).
 func (h *handler) getResource(w http.ResponseWriter, r *http.Request) {
 	if !h.requireService(w, r) {
 		return
 	}
-	view, err := h.service.GetResourceOperation(r.Context(), domain.ResourceID(r.PathValue("id")))
+	principal, ok := h.requirePrincipal(w, r)
+	if !ok {
+		return
+	}
+	view, err := h.service.GetResourceOperation(r.Context(), principal, domain.ResourceID(r.PathValue("id")))
 	if err != nil {
+		if errors.Is(err, application.ErrNotAuthorized) {
+			hideResource(w, r)
+			return
+		}
 		h.mapReadError(w, r, err)
 		return
 	}
@@ -110,10 +165,19 @@ func (h *handler) getResource(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(newResourceDTO(view.Resource, view.Latest, view.Outputs))
 }
 
-// updateResource admits an asynchronous spec revision. The client must supply
-// a concrete generation precondition; wildcard semantics do not exist in v1.
+// updateResource admits an asynchronous spec revision for a principal
+// authorized on the stored owner. Ordering: authenticate (middleware),
+// structural parsing of the submitted revision, load+authorize the stored
+// Resource, then evaluate Idempotency-Key and If-Liftr-Generation
+// requirements, then admit. An unauthorized caller is answered with the same
+// 404 as an unknown ID before any precondition or conflict state can be
+// observed (ADR-0012). The client must supply a concrete generation
+// precondition; wildcard semantics do not exist in v1.
 func (h *handler) updateResource(w http.ResponseWriter, r *http.Request) {
-	id, key, expectedGeneration, ok := h.requireMutationPreconditions(w, r)
+	if !h.requireService(w, r) {
+		return
+	}
+	principal, ok := h.requirePrincipal(w, r)
 	if !ok {
 		return
 	}
@@ -132,13 +196,18 @@ func (h *handler) updateResource(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, CodeInvalidArgument, "spec is not a valid resource specification", nil)
 		return
 	}
+	target, key, expectedGeneration, ok := h.requireAuthorizedMutation(w, r, principal, identity.ActionResourceUpdate)
+	if !ok {
+		return
+	}
 	operationID, eventID, ok := mintLifecycleIDs()
 	if !ok {
 		writeProblem(w, r, CodeInternal, "an unexpected internal error occurred", nil)
 		return
 	}
 	result, err := h.service.AdmitUpdateResource(r.Context(), application.UpdateResourceCommand{
-		ID:                 id,
+		Actor:              target.actor,
+		ID:                 target.resourceID,
 		ExpectedGeneration: expectedGeneration,
 		Spec:               spec,
 		OperationID:        operationID,
@@ -147,16 +216,20 @@ func (h *handler) updateResource(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey:     key,
 	})
 	if err != nil {
-		h.mapMutationError(w, r, err, id)
+		h.mapMutationDenied(w, r, target.actor, err, target.resourceID)
 		return
 	}
-	h.writeMutationResponse(w, r, result, http.StatusAccepted)
+	h.writeMutationResponse(w, r, target.actor, result, http.StatusAccepted)
 }
 
-// deleteResource admits an asynchronous delete request using the same
-// concrete generation precondition rules as updates.
+// deleteResource admits an asynchronous delete request using the same rules
+// as updates: structural parsing, then authorize the stored owner before any
+// precondition semantics.
 func (h *handler) deleteResource(w http.ResponseWriter, r *http.Request) {
-	id, key, expectedGeneration, ok := h.requireMutationPreconditions(w, r)
+	if !h.requireService(w, r) {
+		return
+	}
+	principal, ok := h.requirePrincipal(w, r)
 	if !ok {
 		return
 	}
@@ -166,13 +239,18 @@ func (h *handler) deleteResource(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, CodeInvalidArgument, "delete requests take no body", nil)
 		return
 	}
+	target, key, expectedGeneration, ok := h.requireAuthorizedMutation(w, r, principal, identity.ActionResourceDelete)
+	if !ok {
+		return
+	}
 	operationID, eventID, ok := mintLifecycleIDs()
 	if !ok {
 		writeProblem(w, r, CodeInternal, "an unexpected internal error occurred", nil)
 		return
 	}
 	result, err := h.service.AdmitDeleteResource(r.Context(), application.DeleteResourceCommand{
-		ID:                 id,
+		Actor:              target.actor,
+		ID:                 target.resourceID,
 		ExpectedGeneration: expectedGeneration,
 		OperationID:        operationID,
 		EventID:            eventID,
@@ -180,30 +258,47 @@ func (h *handler) deleteResource(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey:     key,
 	})
 	if err != nil {
-		h.mapMutationError(w, r, err, id)
+		h.mapMutationDenied(w, r, target.actor, err, target.resourceID)
 		return
 	}
-	h.writeMutationResponse(w, r, result, http.StatusAccepted)
+	h.writeMutationResponse(w, r, target.actor, result, http.StatusAccepted)
 }
 
-// requireMutationPreconditions enforces the shared admission rules: the
-// service boundary exists, an Idempotency-Key is present, and a concrete
-// uint64 If-Liftr-Generation precondition is present.
-func (h *handler) requireMutationPreconditions(w http.ResponseWriter, r *http.Request) (domain.ResourceID, string, uint64, bool) {
-	if !h.requireService(w, r) {
-		return "", "", 0, false
+// mutationContext bundles the authenticated principal with the addressed
+// Resource through the shared admission preconditions.
+type mutationContext struct {
+	actor      identity.Principal
+	resourceID domain.ResourceID
+}
+
+// requireAuthorizedMutation enforces the M11 admission ordering for PUT and
+// DELETE after structural parsing has completed:
+//
+//  1. the stored Resource is loaded and its stored owner authorized — absence
+//     and denial both render the identical Resource-not-found problem BEFORE
+//     any Idempotency-Key or generation requirement can be observed,
+//  2. only then are the Idempotency-Key and If-Liftr-Generation requirements
+//     evaluated, preserving today's exact semantics for authorized callers.
+//
+// The returned context carries the actor into the admission command, where
+// the decision is re-checked atomically inside the admission transaction.
+func (h *handler) requireAuthorizedMutation(w http.ResponseWriter, r *http.Request, principal identity.Principal, action identity.Action) (mutationContext, string, uint64, bool) {
+	resourceID := domain.ResourceID(r.PathValue("id"))
+	if err := h.service.CheckResourceAccess(r.Context(), principal, resourceID, action); err != nil {
+		hideResource(w, r)
+		return mutationContext{}, "", 0, false
 	}
 	key, rerr := requireIdempotencyKey(r)
 	if rerr != nil {
 		writeProblem(w, r, rerr.code, rerr.detail, nil)
-		return "", "", 0, false
+		return mutationContext{}, "", 0, false
 	}
 	generation, rerr := parseGenerationPrecondition(r)
 	if rerr != nil {
 		writeProblem(w, r, rerr.code, rerr.detail, nil)
-		return "", "", 0, false
+		return mutationContext{}, "", 0, false
 	}
-	return domain.ResourceID(r.PathValue("id")), key, generation, true
+	return mutationContext{actor: principal, resourceID: resourceID}, key, generation, true
 }
 
 func (h *handler) requireService(w http.ResponseWriter, r *http.Request) bool {
@@ -214,18 +309,29 @@ func (h *handler) requireService(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// mapMutationDenied distinguishes authorization denials (hidden 404, matching
+// the probe above) from ordinary admission failures for mutations against an
+// existing Resource.
+func (h *handler) mapMutationDenied(w http.ResponseWriter, r *http.Request, principal identity.Principal, err error, id domain.ResourceID) {
+	if errors.Is(err, application.ErrNotAuthorized) {
+		hideResource(w, r)
+		return
+	}
+	h.mapMutationError(w, r, principal, err, id)
+}
+
 // writeMutationResponse renders an admitted mutation. Location points at the
 // Resource for creates and at the lifecycle Operation for updates and
 // deletes; Link rel="monitor" always names the Operation returned by this
 // request, which on a replay is the original Operation. The body carries the
 // current Resource snapshot, so latestOperation may already be newer than the
 // monitor link target after later mutations.
-func (h *handler) writeMutationResponse(w http.ResponseWriter, r *http.Request, result application.Result, status int) {
+func (h *handler) writeMutationResponse(w http.ResponseWriter, r *http.Request, principal identity.Principal, result application.Result, status int) {
 	resourceID := result.Resource.Resource.ID()
 	operationID := string(result.Operation.ID())
 
 	view := application.ResourceView{Resource: result.Resource}
-	if current, err := h.service.GetResourceOperation(r.Context(), resourceID); err == nil {
+	if current, err := h.service.GetResourceOperation(r.Context(), principal, resourceID); err == nil {
 		view = current
 	} else if operationID != "" {
 		latest := result.Operation

@@ -106,7 +106,7 @@ func outputFixture(t *testing.T, provider provisioning.Provisioner) (*applicatio
 	catalog := &strictCatalog{types: map[domain.ResourceTypeRef]*strictContract{widget.Ref(): widget}, order: []domain.ResourceTypeRef{widget.Ref()}}
 	ref := mustRef(t)
 	resolver := &appfake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{ref: provider}}
-	service, err := application.NewService(catalog, &appfake.Selector{Ref: ref}, resolver, store)
+	service, err := application.NewService(catalog, &appfake.Selector{Ref: ref}, resolver, store, appfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func mustRef(t *testing.T) application.ProvisionerRef {
 
 func createOutputResource(t *testing.T, service *application.Service, id string) application.Result {
 	t.Helper()
-	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{
+	result, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: appfake.Principal("tester"),
 		ID:          domain.ResourceID(id),
 		Type:        domain.ResourceTypeRef{Name: "Widget", Version: "v1"},
 		Owner:       domain.OwnerRef{Kind: "team", ID: "platform"},
@@ -142,11 +142,11 @@ func createOutputResource(t *testing.T, service *application.Service, id string)
 
 func latestView(t *testing.T, store *appfake.Store, id string) (application.ResourceView, error) {
 	t.Helper()
-	service, err := application.NewService(&alwaysCatalog{}, &appfake.Selector{Ref: mustRef(t)}, &appfake.Resolver{}, store)
+	service, err := application.NewService(&alwaysCatalog{}, &appfake.Selector{Ref: mustRef(t)}, &appfake.Resolver{}, store, appfake.AllowAll{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service.GetResourceOperation(context.Background(), domain.ResourceID(id))
+	return service.GetResourceOperation(context.Background(), appfake.Principal("tester"), domain.ResourceID(id))
 }
 
 type alwaysCatalog struct{}
@@ -443,7 +443,7 @@ func TestFailedUpdatePreservesPreviousOutputs(t *testing.T) {
 		t.Fatalf("create state = %s", create.Operation.State())
 	}
 
-	update := application.UpdateResourceCommand{
+	update := application.UpdateResourceCommand{Actor: appfake.Principal("tester"),
 		ID:                 domain.ResourceID("upd-fail"),
 		ExpectedGeneration: 1,
 		Spec:               validSpec(map[string]any{"name": "gear-2"}),
@@ -498,7 +498,7 @@ func TestDeletedTombstoneOmitsOutputsPublicly(t *testing.T) {
 	service, store, _, _ := outputFixture(t, provider)
 	createOutputResource(t, service, "tomb")
 
-	deleting, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{
+	deleting, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{Actor: appfake.Principal("tester"),
 		ID: domain.ResourceID("tomb"), ExpectedGeneration: 1,
 		OperationID: "op-tomb", EventID: "evt-tomb",
 		RequestedAt: time.Date(2026, 8, 23, 9, 11, 0, 0, time.UTC),
@@ -672,7 +672,7 @@ func TestCleanupDeleteFromFailedDestroysInfrastructure(t *testing.T) {
 		t.Fatalf("create state = %s", create.Operation.State())
 	}
 
-	result, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{
+	result, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{Actor: appfake.Principal("tester"),
 		ID: domain.ResourceID("cleanup"), ExpectedGeneration: 1,
 		OperationID: "op-cleanup", EventID: "evt-cleanup",
 		RequestedAt: time.Date(2026, 8, 23, 9, 12, 0, 0, time.UTC),
@@ -727,7 +727,7 @@ func TestCleanupDeleteWithConclusiveAbsenceSucceeds(t *testing.T) {
 		t.Fatalf("create state = %s", create.Operation.State())
 	}
 
-	result, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{
+	result, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{Actor: appfake.Principal("tester"),
 		ID: domain.ResourceID("absent"), ExpectedGeneration: 1,
 		OperationID: "op-cleanup-absent", EventID: "evt-cleanup-absent",
 		RequestedAt: time.Date(2026, 8, 23, 9, 12, 30, 0, time.UTC),
@@ -768,7 +768,7 @@ func TestAmbiguousDestroyFromFailedNeverYieldsDeleted(t *testing.T) {
 	service, store, _, _ := outputFixture(t, provider)
 	createOutputResource(t, service, "ambiguous")
 
-	result, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{
+	result, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{Actor: appfake.Principal("tester"),
 		ID: domain.ResourceID("ambiguous"), ExpectedGeneration: 1,
 		OperationID: "op-cleanup-amb", EventID: "evt-cleanup-amb",
 		RequestedAt: time.Date(2026, 8, 23, 9, 13, 0, 0, time.UTC),
