@@ -107,7 +107,7 @@ func (h *handler) getResource(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Liftr-Generation", strconv.FormatUint(view.Resource.Resource.Generation(), 10))
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(newResourceDTO(view.Resource, view.Latest))
+	_ = json.NewEncoder(w).Encode(newResourceDTO(view.Resource, view.Latest, view.Outputs))
 }
 
 // updateResource admits an asynchronous spec revision. The client must supply
@@ -232,7 +232,7 @@ func (h *handler) writeMutationResponse(w http.ResponseWriter, r *http.Request, 
 		view.Latest = &latest
 	}
 
-	body := newResourceDTO(view.Resource, view.Latest)
+	body := newResourceDTO(view.Resource, view.Latest, view.Outputs)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Liftr-Generation", strconv.FormatUint(body.Generation, 10))

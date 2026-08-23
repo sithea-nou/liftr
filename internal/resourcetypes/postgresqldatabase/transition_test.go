@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 )
 
 // rawSpec builds developer intent with explicit numeric representations so
@@ -77,7 +77,7 @@ func TestValidateTransitionRejectsIllegalTransitions(t *testing.T) {
 }
 
 // TestContractValidateUpdateSurfacesStructuredViolations pins that admission
-// receives transition rejections as *application.InvalidSpecError so they map
+// receives transition rejections as *resourcecontract.ValidationError so they map
 // onto the structured RESOURCE_SPEC_INVALID problem channel.
 func TestContractValidateUpdateSurfacesStructuredViolations(t *testing.T) {
 	contract, err := Contract()
@@ -85,9 +85,9 @@ func TestContractValidateUpdateSurfacesStructuredViolations(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = contract.ValidateUpdate(rawSpec(t, "16", int64(20), false), rawSpec(t, "17", int64(20), false))
-	var invalid *application.InvalidSpecError
+	var invalid *resourcecontract.ValidationError
 	if !errors.As(err, &invalid) {
-		t.Fatalf("ValidateUpdate error = %v, want *application.InvalidSpecError", err)
+		t.Fatalf("ValidateUpdate error = %v, want *resourcecontract.ValidationError", err)
 	}
 	if invalid.TypeRef != TypeRef() || len(invalid.Violations) != 1 || invalid.Violations[0].Path != "/version" ||
 		invalid.Violations[0].Keyword != "transition" {

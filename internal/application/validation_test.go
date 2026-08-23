@@ -12,6 +12,7 @@ import (
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/provisioning"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 
 	appfake "github.com/sithea-nou/liftr/internal/application/fake"
 )
@@ -24,6 +25,7 @@ type strictContract struct {
 	failLookups    bool
 	validations    int
 	transitionFunc func(oldSpec, newSpec domain.ResourceSpec) error
+	outputs        *resourcecontract.OutputContract
 }
 
 func newStrictContract(name string) *strictContract {
@@ -48,10 +50,13 @@ func (c *strictContract) Domain() domain.ResourceType {
 
 func (c *strictContract) SpecSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
+// OutputContract returns the declared output contract, nil by default.
+func (c *strictContract) OutputContract() *resourcecontract.OutputContract { return c.outputs }
+
 func (c *strictContract) ValidateSpec(spec domain.ResourceSpec) error {
 	c.validations++
 	if _, ok := spec.Values()["name"]; !ok {
-		return application.NewInvalidSpecError(c.ref, []application.SpecViolation{{
+		return resourcecontract.NewValidationError(c.ref, []resourcecontract.Violation{{
 			Path:    "",
 			Keyword: "required",
 			Message: `property "name" is required`,

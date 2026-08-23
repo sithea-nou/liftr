@@ -90,15 +90,17 @@ func (r *repositories) GetExecution(ctx context.Context, id domain.OperationID) 
 	var specVersion int
 	var specBytes, submissionBytes, observationBytes []byte
 	var handle, failureKind, failureReason, failureMessage *string
-	var observedNS *int64
+	var outputFailureReason, outputFailureMessage *string
+	var outputMappingRef, outputResolution string
+	var observedNS, providerObservedNS *int64
 	err := r.tx.QueryRow(ctx, `SELECT operation_id,resource_id,provisioner_ref,resource_type_name,resource_type_version,capability,
 		target_generation::text,spec_codec_version,submitted_spec,state,handle,acceptance_confirmed,correlation_status,
 		submission,latest_observation,last_observed_at_ns,last_failure_kind,last_failure_reason,last_failure_message,
-		current_attempt_number::text,next_observation_sequence::text,record_version::text
+		current_attempt_number::text,next_observation_sequence::text,record_version::text,output_mapping_ref,output_resolution,output_failure_reason,output_failure_message,last_provider_observed_at_ns
 		FROM provisioning_executions WHERE operation_id=$1 FOR UPDATE`, id).Scan(&record.OperationID, &record.ResourceID, &record.ProvisionerRef,
 		&typeName, &typeVersion, &record.Capability, &targetText, &specVersion, &specBytes, &state, &handle, &record.AcceptanceConfirmed,
 		&correlation, &submissionBytes, &observationBytes, &observedNS, &failureKind, &failureReason, &failureMessage,
-		&currentAttemptText, &nextObservationText, &versionText)
+		&currentAttemptText, &nextObservationText, &versionText, &outputMappingRef, &outputResolution, &outputFailureReason, &outputFailureMessage, &providerObservedNS)
 	if err != nil {
 		return application.ProvisioningExecutionRecord{}, translateError(err)
 	}
@@ -148,6 +150,20 @@ func (r *repositories) GetExecution(ctx context.Context, id domain.OperationID) 
 			record.LastFailure.Message = *failureMessage
 		}
 	}
+	if providerObservedNS != nil {
+		record.LastProviderObservedAt = time.Unix(0, *providerObservedNS).UTC()
+	}
+	record.OutputMappingRef = outputMappingRef
+	if !application.ValidOutputResolution(application.OutputResolution(outputResolution)) {
+		return application.ProvisioningExecutionRecord{}, fmt.Errorf("invalid persisted output resolution %q", outputResolution)
+	}
+	record.OutputResolution = application.OutputResolution(outputResolution)
+	if outputFailureReason != nil {
+		record.OutputFailureReason = *outputFailureReason
+	}
+	if outputFailureMessage != nil {
+		record.OutputFailureMessage = *outputFailureMessage
+	}
 	return record, nil
 }
 
@@ -177,15 +193,27 @@ func (r *repositories) CreateExecution(ctx context.Context, record application.P
 		correlation = provisioning.RequestCorrelationUnknown
 	}
 	typeRef := record.ResourceType
+	resolution := string(record.OutputResolution)
+	if resolution == "" {
+		resolution = string(application.OutputResolutionNone)
+	}
+	if !application.ValidOutputResolution(application.OutputResolution(resolution)) {
+		return fmt.Errorf("invalid output resolution %q", resolution)
+	}
+	outputFailureReason := nullableText(record.OutputFailureReason)
+	outputFailureMessage := nullableText(record.OutputFailureMessage)
 	_, err = r.tx.Exec(ctx, `INSERT INTO provisioning_executions
 		(operation_id,resource_id,provisioner_ref,resource_type_name,resource_type_version,capability,target_generation,
 		spec_codec_version,submitted_spec,state,handle,acceptance_confirmed,correlation_status,submission,latest_observation,
-		last_observed_at_ns,last_failure_kind,last_failure_reason,last_failure_message,current_attempt_number,next_observation_sequence,record_version)
-		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::numeric,$21::numeric,$22::numeric)`,
+		last_observed_at_ns,last_provider_observed_at_ns,last_failure_kind,last_failure_reason,last_failure_message,current_attempt_number,next_observation_sequence,record_version,
+		output_mapping_ref,output_resolution,output_failure_reason,output_failure_message)
+		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,$13,$14,$15,$16,$27,$17,$18,$19,$20::numeric,$21::numeric,$22::numeric,$23,$24,$25,$26)`,
 		record.OperationID, record.ResourceID, record.ProvisionerRef, typeRef.Name, typeRef.Version, record.Capability, uintText(record.TargetGeneration),
 		codecVersion, spec, record.State, handleValue(record.Handle), record.AcceptanceConfirmed, correlation, submission, observation,
 		nullableUnixNano(record.LastObservedAt), failureValue(record.LastFailure, "kind"), failureValue(record.LastFailure, "reason"), failureValue(record.LastFailure, "message"),
-		uintText(record.CurrentAttempt), uintText(nextObservation), uintText(version))
+		uintText(record.CurrentAttempt), uintText(nextObservation), uintText(version),
+		record.OutputMappingRef, resolution, outputFailureReason, outputFailureMessage,
+		nullableUnixNano(record.LastProviderObservedAt))
 	return translateError(err)
 }
 
@@ -199,12 +227,15 @@ func (r *repositories) SaveExecution(ctx context.Context, record application.Pro
 		return err
 	}
 	command, err := r.tx.Exec(ctx, `UPDATE provisioning_executions SET state=$2,handle=$3,acceptance_confirmed=$4,
-		correlation_status=$5,submission=$6,latest_observation=$7,last_observed_at_ns=$8,last_failure_kind=$9,last_failure_reason=$10,
+		correlation_status=$5,submission=$6,latest_observation=$7,last_observed_at_ns=$8,last_provider_observed_at_ns=$18,last_failure_kind=$9,last_failure_reason=$10,
 		last_failure_message=$11,current_attempt_number=$12::numeric,next_observation_sequence=$13::numeric,
-		record_version=record_version+1,updated_at=clock_timestamp()
+		record_version=record_version+1,updated_at=clock_timestamp(),
+		output_resolution=$15,output_failure_reason=$16,output_failure_message=$17
 		WHERE operation_id=$1 AND record_version=$14::numeric`, record.OperationID, record.State, handleValue(record.Handle), record.AcceptanceConfirmed,
 		record.Correlation, submission, observation, nullableUnixNano(record.LastObservedAt), failureValue(record.LastFailure, "kind"),
-		failureValue(record.LastFailure, "reason"), failureValue(record.LastFailure, "message"), uintText(record.CurrentAttempt), uintText(record.NextObservation), uintText(expectedVersion))
+		failureValue(record.LastFailure, "reason"), failureValue(record.LastFailure, "message"), uintText(record.CurrentAttempt), uintText(record.NextObservation), uintText(expectedVersion),
+		string(record.OutputResolution), nullableText(record.OutputFailureReason), nullableText(record.OutputFailureMessage),
+		nullableUnixNano(record.LastProviderObservedAt))
 	if err != nil {
 		return translateError(err)
 	}
@@ -219,6 +250,13 @@ func handleValue(handle *provisioning.ExecutionHandle) any {
 		return nil
 	}
 	return handle.String()
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func failureValue(failure *provisioning.ExecutionFailure, field string) any {

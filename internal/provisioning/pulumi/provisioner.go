@@ -65,6 +65,64 @@ func (p *Provisioner) Capabilities() []provisioning.ProvisionerCapability {
 	return result
 }
 
+// OutputMappingRef implements the worker's OutputMappingSource: the private
+// mapping identity declared for create/update executions of a type. Delete
+// executions never carry outputs.
+func (p *Provisioner) OutputMappingRef(resourceType domain.ResourceTypeRef, capability domain.Capability) string {
+	program, ok := p.programs[resourceType]
+	if !ok || program.Outputs == nil || capability == domain.CapabilityDelete {
+		return ""
+	}
+	return program.Outputs.Ref
+}
+
+// attachOutputs resolves the output dimension for one concluded observation.
+// Extraction happens only for positively correlated create/update success,
+// only through the persisted allowlisted mapping, and only via selected
+// retrieval. A missing or conflicting mapping identity fails loudly instead
+// of falling back to whatever is registered today.
+func (p *Provisioner) attachOutputs(ctx context.Context, stack automationStack, observation provisioning.ExecutionObservation, request ObservationRequest) (provisioning.ExecutionObservation, error) {
+	if request.Capability == domain.CapabilityDelete {
+		return observation, nil
+	}
+	success := observation.Correlation == provisioning.RequestCorrelationFound &&
+		observation.Execution != nil && observation.Execution.State == provisioning.ExecutionStateSucceeded
+	if !success {
+		return observation, nil
+	}
+	mappingRef := request.OutputMappingRef
+	var mapping *OutputMapping
+	if program, ok := p.programs[request.ResourceType]; ok && program.Outputs != nil {
+		mapping = program.Outputs
+	}
+	switch {
+	case mapping == nil && mappingRef == "":
+		return observation, nil
+	case mapping == nil:
+		return observation, fmt.Errorf("%w: execution references output mapping %q but no such mapping is registered", provisioning.ErrObservationFailure, mappingRef)
+	case mappingRef == "":
+		return observation, fmt.Errorf("%w: registered output mapping %q has no durable identity on the execution", provisioning.ErrObservationFailure, mapping.Ref)
+	case mapping.Ref != mappingRef:
+		return observation, fmt.Errorf("%w: registered output mapping %q does not match the persisted identity %q", provisioning.ErrObservationFailure, mapping.Ref, mappingRef)
+	}
+	raw, err := stack.SelectedOutput(ctx, mapping.ExportName)
+	if err != nil {
+		observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsUnavailable, Reason: "OutputsUnavailable"}
+		return observation, nil
+	}
+	values, decodeErr := decodeSelectedOutputEnvelope(raw, mapping.Ref, request.ResourceID, request.TargetGeneration)
+	if decodeErr != nil {
+		reason := "OutputContractViolation"
+		if errors.Is(decodeErr, errOutputUnavailable) {
+			reason = "OutputsUnavailable"
+		}
+		observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsInvalid, Reason: reason}
+		return observation, nil
+	}
+	observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsAvailable, Values: values}
+	return observation, nil
+}
+
 func (p *Provisioner) Submit(ctx context.Context, request provisioning.ExecutionRequest) (provisioning.Submission, error) {
 	if err := request.Validate(); err != nil {
 		return failedSubmission(provisioning.FailureInvalidRequest, "InvalidExecutionRequest"), nil
@@ -133,6 +191,10 @@ func (p *Provisioner) Submit(ctx context.Context, request provisioning.Execution
 	if err == nil {
 		observation := observationFromSummary(summary, expectedHistoryKind(request.Capability), message, handle)
 		if observation.Correlation == provisioning.RequestCorrelationFound && observation.Execution != nil && observation.Execution.State != provisioning.ExecutionStateUnknown {
+			observation, attachErr := p.attachOutputs(ctx, stack, observation, observationRequestFromExecution(request))
+			if attachErr != nil {
+				return provisioning.Submission{}, attachErr
+			}
 			return provisioning.Submission{Observation: observation}, nil
 		}
 	}
@@ -140,6 +202,10 @@ func (p *Provisioner) Submit(ctx context.Context, request provisioning.Execution
 	defer cancel()
 	observation, observeErr := p.observeStack(recoveryCtx, stack, request.Capability, message, handle)
 	if observeErr == nil && observation.Correlation == provisioning.RequestCorrelationFound && observation.Execution != nil {
+		observation, attachErr := p.attachOutputs(ctx, stack, observation, observationRequestFromExecution(request))
+		if attachErr != nil {
+			return provisioning.Submission{}, attachErr
+		}
 		return provisioning.Submission{Observation: observation}, nil
 	}
 	unknown := unknownObservation(handle)
@@ -190,7 +256,11 @@ func (p *Provisioner) Observe(ctx context.Context, request provisioning.Observat
 		}
 		return observationUnavailable("StackSelectionFailed")
 	}
-	return p.observeStack(ctx, stack, request.Capability, correlationMessage(request.OperationID, request.AttemptNumber), p.handle(request.OperationID, request.AttemptNumber, request.ResourceID))
+	observation, observeErr := p.observeStack(ctx, stack, request.Capability, correlationMessage(request.OperationID, request.AttemptNumber), p.handle(request.OperationID, request.AttemptNumber, request.ResourceID))
+	if observeErr != nil {
+		return provisioning.ExecutionObservation{}, observeErr
+	}
+	return p.attachOutputs(ctx, stack, observation, request)
 }
 
 func (p *Provisioner) observeStack(ctx context.Context, stack automationStack, capability domain.Capability, message string, handle provisioning.ExecutionHandle) (provisioning.ExecutionObservation, error) {
@@ -335,6 +405,18 @@ func observationFromSummary(summary updateSummary, expectedKind, message string,
 	observation.Execution = execution
 	return observation
 }
+
+func observationRequestFromExecution(request provisioning.ExecutionRequest) ObservationRequest {
+	return ObservationRequest{
+		OperationID: request.OperationID, AttemptNumber: request.AttemptNumber, ResourceID: request.ResourceID,
+		ResourceType: request.ResourceType, Capability: request.Capability, TargetGeneration: request.TargetGeneration,
+		OutputMappingRef: request.OutputMappingRef,
+	}
+}
+
+// OutputMappingRef is the type alias-free reference to the observation request
+// shape used inside this adapter.
+type ObservationRequest = provisioning.ObservationRequest
 
 func failedSubmission(kind provisioning.ExecutionFailureKind, reason string) provisioning.Submission {
 	failure := &provisioning.ExecutionFailure{Kind: kind, Reason: reason, Message: "provisioning request was rejected before execution"}

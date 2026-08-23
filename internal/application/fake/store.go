@@ -15,6 +15,7 @@ import (
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/provisioning"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 )
 
 // ErrNotFound reports a missing record from non-repository fakes (catalog,
@@ -31,6 +32,7 @@ type Store struct {
 	idempotency map[string]application.IdempotencyRecord
 	attempts    map[string]application.SubmissionAttemptRecord
 	outbox      map[string]application.OutboxMessage
+	outputs     map[domain.ResourceID]map[uint64]application.ResourceOutputRecord
 }
 
 func NewStore() *Store {
@@ -42,6 +44,7 @@ func NewStore() *Store {
 		idempotency: make(map[string]application.IdempotencyRecord),
 		attempts:    make(map[string]application.SubmissionAttemptRecord),
 		outbox:      make(map[string]application.OutboxMessage),
+		outputs:     make(map[domain.ResourceID]map[uint64]application.ResourceOutputRecord),
 	}
 }
 
@@ -56,6 +59,7 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 		idempotency: cloneMap(s.idempotency),
 		attempts:    cloneMap(s.attempts),
 		outbox:      cloneMap(s.outbox),
+		outputs:     cloneOutputs(s.outputs),
 	}
 	if err := fn(tx); err != nil {
 		return err
@@ -67,7 +71,20 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 	s.idempotency = tx.idempotency
 	s.attempts = tx.attempts
 	s.outbox = tx.outbox
+	s.outputs = tx.outputs
 	return nil
+}
+
+func cloneOutputs(source map[domain.ResourceID]map[uint64]application.ResourceOutputRecord) map[domain.ResourceID]map[uint64]application.ResourceOutputRecord {
+	cloned := make(map[domain.ResourceID]map[uint64]application.ResourceOutputRecord, len(source))
+	for resourceID, generations := range source {
+		inner := make(map[uint64]application.ResourceOutputRecord, len(generations))
+		for generation, record := range generations {
+			inner[generation] = record
+		}
+		cloned[resourceID] = inner
+	}
+	return cloned
 }
 
 func cloneExecutions(source map[domain.OperationID]application.ProvisioningExecutionRecord) map[domain.OperationID]application.ProvisioningExecutionRecord {
@@ -130,26 +147,32 @@ func cloneMap[K comparable, V any](source map[K]V) map[K]V {
 // RecordCounts reports how many records of each kind are stored. It exists
 // for tests that assert an admission produced no durable side effects.
 type RecordCounts struct {
-	Resources   int
-	Operations  int
-	Events      int
-	Executions  int
-	Idempotency int
-	Attempts    int
-	Outbox      int
+	Resources       int
+	Operations      int
+	Events          int
+	Executions      int
+	Idempotency     int
+	Attempts        int
+	Outbox          int
+	OutputSnapshots int
 }
 
 func (s *Store) RecordCounts() RecordCounts {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	snapshots := 0
+	for _, generations := range s.outputs {
+		snapshots += len(generations)
+	}
 	return RecordCounts{
-		Resources:   len(s.resources),
-		Operations:  len(s.operations),
-		Events:      len(s.events),
-		Executions:  len(s.executions),
-		Idempotency: len(s.idempotency),
-		Attempts:    len(s.attempts),
-		Outbox:      len(s.outbox),
+		Resources:       len(s.resources),
+		Operations:      len(s.operations),
+		Events:          len(s.events),
+		Executions:      len(s.executions),
+		Idempotency:     len(s.idempotency),
+		Attempts:        len(s.attempts),
+		Outbox:          len(s.outbox),
+		OutputSnapshots: snapshots,
 	}
 }
 
@@ -160,6 +183,46 @@ func (s *Store) Executions() application.ExecutionRepository                 { r
 func (s *Store) Idempotency() application.IdempotencyRepository              { return s }
 func (s *Store) SubmissionAttempts() application.SubmissionAttemptRepository { return s }
 func (s *Store) Outbox() application.OutboxRepository                        { return s }
+func (s *Store) Outputs() application.ResourceOutputRepository               { return s }
+
+// SaveResourceOutputs is idempotent only for identical provenance and
+// content; contradictory evidence for the same resource/generation pair
+// fails closed, mirroring the PostgreSQL implementation.
+func (s *Store) SaveResourceOutputs(_ context.Context, record application.ResourceOutputRecord) error {
+	generations, ok := s.outputs[record.ResourceID]
+	if !ok {
+		generations = make(map[uint64]application.ResourceOutputRecord)
+		s.outputs[record.ResourceID] = generations
+	}
+	existing, ok := generations[record.ObservedGeneration]
+	if ok {
+		if existing.OperationID != record.OperationID ||
+			existing.Capability != record.Capability ||
+			existing.OutputMappingRef != record.OutputMappingRef ||
+			existing.OutputContractDigest != record.OutputContractDigest ||
+			existing.ValuesDigest != record.ValuesDigest {
+			return fmt.Errorf("%w: contradictory output evidence for generation %d", application.ErrInvalidApplicationCall, record.ObservedGeneration)
+		}
+		return nil
+	}
+	generations[record.ObservedGeneration] = record
+	return nil
+}
+
+func (s *Store) LatestResourceOutputs(_ context.Context, id domain.ResourceID) (application.ResourceOutputRecord, bool, error) {
+	generations, ok := s.outputs[id]
+	if !ok || len(generations) == 0 {
+		return application.ResourceOutputRecord{}, false, nil
+	}
+	latest := uint64(0)
+	for generation := range generations {
+		if generation > latest {
+			latest = generation
+		}
+	}
+	record := generations[latest]
+	return record, true, nil
+}
 
 func (s *Store) GetResource(_ context.Context, id domain.ResourceID) (application.ResourceRecord, error) {
 	record, ok := s.resources[id]
@@ -564,6 +627,9 @@ func (b basicContract) ValidateSpec(spec domain.ResourceSpec) error {
 // rules. Tests that need rejecting contracts wrap their own contract type or
 // use the catalog ValidateFunc for spec-level rejection.
 func (b basicContract) ValidateUpdate(_, _ domain.ResourceSpec) error { return nil }
+
+// OutputContract is nil by default: bare fakes publish no outputs.
+func (b basicContract) OutputContract() *resourcecontract.OutputContract { return nil }
 
 func (b basicContract) SpecSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 

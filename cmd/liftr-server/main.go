@@ -34,6 +34,11 @@ import (
 
 const shutdownTimeout = 10 * time.Second
 
+// Composition-level proof: the concrete registry satisfies the consumer-owned
+// application catalog port through the neutral resourcecontract vocabulary.
+// Neither side imports the other; only this composition imports both.
+var _ application.ResourceTypeCatalog = (*resourcetypes.Registry)(nil)
+
 // azureCredentialVariables are the declared child-process environment names
 // the reference implementation needs. Names are fixed by composition; values
 // are read from the operator-controlled process environment at startup and
@@ -123,12 +128,17 @@ func composeFullRuntime(ctx context.Context, logger *slog.Logger) (*server.Runti
 	if err != nil {
 		return nil, nil, err
 	}
-	contract, err := postgresqldatabase.Contract()
+	contractV1, err := postgresqldatabase.Contract()
 	if err != nil {
 		closeStore()
-		return nil, nil, fmt.Errorf("register PostgreSQLDatabase contract: %w", err)
+		return nil, nil, fmt.Errorf("register PostgreSQLDatabase/v1 contract: %w", err)
 	}
-	catalog, err := resourcetypes.NewRegistry(contract)
+	contractV2, err := postgresqldatabase.ContractV2()
+	if err != nil {
+		closeStore()
+		return nil, nil, fmt.Errorf("register PostgreSQLDatabase/v2 contract: %w", err)
+	}
+	catalog, err := resourcetypes.NewRegistry(contractV1, contractV2)
 	if err != nil {
 		closeStore()
 		return nil, nil, err
@@ -195,15 +205,35 @@ func composePulumiProvisioner() (application.ProvisionerRef, provisioning.Provis
 		StackNamespace: namespace, WorkspaceRoot: workspaceDir,
 		HistoryPageSize: 50, HistoryMaximumPages: 20, StaleWorkspaceAge: time.Hour,
 		Environment: supplyDeclaredEnvironment(azureCredentialVariables),
-		Programs: []pulumiprovisioner.Program{{
-			ResourceType: postgresqldatabase.TypeRef(),
-			Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
-			ProjectName:  "liftr-postgresqldatabase",
-			SourceDir:    sourceDir, SourceDigest: sourceDigest,
-			RequiredEnvironment:     azureCredentialVariables,
-			EncodeInput:             bindings.PostgresEncoder(identity, namespace, platform),
-			SecretInputsUnsupported: true,
-		}},
+		Programs: []pulumiprovisioner.Program{
+			{
+				// v1 keeps its released spec-only contract: no output
+				// mapping is registered, so no extraction ever runs for it.
+				ResourceType: postgresqldatabase.TypeRef(),
+				Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
+				ProjectName:  "liftr-postgresqldatabase",
+				SourceDir:    sourceDir, SourceDigest: sourceDigest,
+				RequiredEnvironment:     azureCredentialVariables,
+				EncodeInput:             bindings.PostgresEncoder(identity, namespace, platform),
+				SecretInputsUnsupported: true,
+			},
+			{
+				// v2 adds the declared non-secret output contract; the same
+				// reference program source serves both identities while
+				// infrastructure naming keeps the stacks separate.
+				ResourceType: postgresqldatabase.V2TypeRef(),
+				Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
+				ProjectName:  "liftr-postgresqldatabase",
+				SourceDir:    sourceDir, SourceDigest: sourceDigest,
+				RequiredEnvironment:     azureCredentialVariables,
+				EncodeInput:             bindings.PostgresEncoder(identity, namespace, platform),
+				SecretInputsUnsupported: true,
+				Outputs: &pulumiprovisioner.OutputMapping{
+					Ref:        "liftr-azure-pg-outputs-v1",
+					ExportName: "liftrOutputs",
+				},
+			},
+		},
 	}
 	provider, err := pulumiprovisioner.New(config)
 	if err != nil {

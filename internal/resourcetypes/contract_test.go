@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 	"github.com/sithea-nou/liftr/internal/resourcetypes"
 )
 
@@ -103,9 +103,9 @@ func TestValidateSpecIsPurePredicate(t *testing.T) {
 	if err := contract.ValidateSpec(mustSpecValues(map[string]any{})); err == nil {
 		t.Fatal("missing name should fail")
 	} else {
-		var invalid *application.InvalidSpecError
+		var invalid *resourcecontract.ValidationError
 		if !asInvalidSpec(err, &invalid) {
-			t.Fatalf("error is not *application.InvalidSpecError: %T", err)
+			t.Fatalf("error is not *resourcecontract.ValidationError: %T", err)
 		}
 		if invalid.TypeRef.Name != "Widget" || invalid.TypeRef.Version != "v1" {
 			t.Fatalf("violation TypeRef = %#v", invalid.TypeRef)
@@ -122,9 +122,9 @@ func TestSemanticValidatorRunsAfterStructuralValidation(t *testing.T) {
 	contract := mustContract(t, resourcetypes.ContractInput{
 		Type:       widgetType(),
 		SpecSchema: []byte(minimalSchema),
-		Semantic: func(values map[string]any) []application.SpecViolation {
+		Semantic: func(values map[string]any) []resourcecontract.Violation {
 			semanticCalls++
-			return []application.SpecViolation{{Path: "", Keyword: "semantic", Message: "cross-field rule failed"}}
+			return []resourcecontract.Violation{{Path: "", Keyword: "semantic", Message: "cross-field rule failed"}}
 		},
 	})
 	spec := mustSpecValues(map[string]any{"name": "gear"})
@@ -132,7 +132,7 @@ func TestSemanticValidatorRunsAfterStructuralValidation(t *testing.T) {
 	if semanticCalls != 1 {
 		t.Fatalf("semantic validator ran %d times, want once", semanticCalls)
 	}
-	var invalid *application.InvalidSpecError
+	var invalid *resourcecontract.ValidationError
 	if !asInvalidSpec(err, &invalid) {
 		t.Fatalf("expected InvalidSpecError, got %v", err)
 	}
@@ -154,8 +154,8 @@ func TestSchemaDigestStablePerRegistration(t *testing.T) {
 	}
 }
 
-func asInvalidSpec(err error, target **application.InvalidSpecError) bool {
-	if invalid, ok := err.(*application.InvalidSpecError); ok {
+func asInvalidSpec(err error, target **resourcecontract.ValidationError) bool {
+	if invalid, ok := err.(*resourcecontract.ValidationError); ok {
 		*target = invalid
 		return true
 	}

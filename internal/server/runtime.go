@@ -74,7 +74,7 @@ func Compose(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	instance, err := worker.New(config.Transactions, staticResolver{providers: config.Provisioners})
+	instance, err := worker.NewWithCatalog(config.Transactions, staticResolver{providers: config.Provisioners}, config.Catalog)
 	if err != nil {
 		return nil, err
 	}

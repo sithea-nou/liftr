@@ -9,8 +9,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 )
 
 // ErrUnknownResourceType reports that no contract is registered under a
@@ -19,14 +19,13 @@ var ErrUnknownResourceType = errors.New("unknown resource type")
 
 // Registry is the deterministic in-memory ResourceType catalog. It answers
 // "what developer contracts exist?" and never exposes provisioner selection,
-// availability, or any other platform state. Get and List match the
-// application port structurally.
+// availability, or any other platform state. Get and List return the neutral
+// resourcecontract.Contract interface so the registry can satisfy the
+// application's consumer port structurally, without importing application.
 type Registry struct {
 	mu        sync.RWMutex
 	contracts map[domain.ResourceTypeRef]Contract
 }
-
-var _ application.ResourceTypeCatalog = (*Registry)(nil)
 
 // NewRegistry registers the given contracts, rejecting duplicates.
 func NewRegistry(contracts ...Contract) (*Registry, error) {
@@ -53,7 +52,7 @@ func (r *Registry) Register(contract Contract) error {
 	return nil
 }
 
-func (r *Registry) Get(_ context.Context, ref domain.ResourceTypeRef) (application.ResourceContract, error) {
+func (r *Registry) Get(_ context.Context, ref domain.ResourceTypeRef) (resourcecontract.Contract, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	contract, ok := r.contracts[ref]
@@ -66,7 +65,7 @@ func (r *Registry) Get(_ context.Context, ref domain.ResourceTypeRef) (applicati
 // List returns every registered contract ordered deterministically by name
 // ascending, then version ascending (byte-wise). The order is stable across
 // calls so every catalog implementation can agree on it.
-func (r *Registry) List(_ context.Context) ([]application.ResourceContract, error) {
+func (r *Registry) List(_ context.Context) ([]resourcecontract.Contract, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	refs := make([]domain.ResourceTypeRef, 0, len(r.contracts))
@@ -79,7 +78,7 @@ func (r *Registry) List(_ context.Context) ([]application.ResourceContract, erro
 		}
 		return refs[i].Version < refs[j].Version
 	})
-	contracts := make([]application.ResourceContract, 0, len(refs))
+	contracts := make([]resourcecontract.Contract, 0, len(refs))
 	for _, ref := range refs {
 		contracts = append(contracts, r.contracts[ref])
 	}

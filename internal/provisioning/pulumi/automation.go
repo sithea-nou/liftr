@@ -35,6 +35,10 @@ type automationStack interface {
 	Destroy(context.Context, string) (updateSummary, error)
 	History(context.Context, int, int) ([]updateSummary, error)
 	Info(context.Context) (stackInfo, error)
+	// SelectedOutput reads exactly one named stack export as JSON. It must
+	// never request secret material: no invocation may pass --show-secrets,
+	// so Pulumi-marked secrets arrive in redacted form and are rejected.
+	SelectedOutput(ctx context.Context, name string) ([]byte, error)
 }
 
 type automationWorkspace interface {
@@ -170,6 +174,39 @@ func (s localStack) History(ctx context.Context, pageSize, page int) ([]updateSu
 func (s localStack) Info(ctx context.Context) (stackInfo, error) {
 	info, err := s.stack.Info(ctx)
 	return stackInfo{updateInProgress: info.UpdateInProgress}, err
+}
+
+// selectedOutputArgs builds the exact CLI arguments for one selected,
+// non-secret output read. The allowlisted name is the only retrieval surface
+// and --show-secrets can never appear here.
+func selectedOutputArgs(name, fullyQualifiedStack string) []string {
+	return []string{"stack", "output", name, "--json", "--stack", fullyQualifiedStack, "--color", "never"}
+}
+
+// SelectedOutput invokes `pulumi stack output <name> --json` directly. The
+// allowlisted name is the only retrieval surface Liftr exposes, and
+// --show-secrets is never passed: the primary secret boundary is what this
+// command can ask for, not how its text is filtered afterwards.
+func (s localStack) SelectedOutput(ctx context.Context, name string) ([]byte, error) {
+	workspace := s.stack.Workspace()
+	environment := make([]string, 0, len(workspace.GetEnvVars())+1)
+	if home := workspace.PulumiHome(); home != "" {
+		environment = append(environment, "PULUMI_HOME="+home)
+	}
+	for key, value := range workspace.GetEnvVars() {
+		environment = append(environment, key+"="+value)
+	}
+	args := selectedOutputArgs(name, s.stack.Name())
+	stdout, _, exitCode, err := workspace.PulumiCommand().Run(ctx, workspace.WorkDir(), nil, nil, nil, environment, args...)
+	if err != nil || exitCode != 0 {
+		// Raw CLI output is discarded entirely; neither stdout nor stderr may
+		// reach errors or logs.
+		return nil, fmt.Errorf("selected output %q could not be read", name)
+	}
+	if len(stdout) > maxOutputBytes {
+		return nil, fmt.Errorf("selected output %q exceeds the size bound", name)
+	}
+	return []byte(stdout), nil
 }
 
 func normalizeSummary(summary auto.UpdateSummary) updateSummary {

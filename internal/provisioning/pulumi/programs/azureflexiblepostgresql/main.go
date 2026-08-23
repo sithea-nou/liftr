@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Command azureflexiblepostgresql is Liftr's private reference Pulumi
-// program for PostgreSQLDatabase/v1. It implements the developer contract on
-// Azure Database for PostgreSQL Flexible Server:
+// program for the PostgreSQLDatabase developer contracts. It implements the
+// developer contract on Azure Database for PostgreSQL Flexible Server:
 //
 //	version          -> engine major version
 //	storageGB        -> allocated storage in GB (grow-only per contract)
@@ -16,7 +16,8 @@
 // The administrative password is generated inside this program as a Pulumi
 // secret and is stable across updates: the RandomPassword resource keeps its
 // URN and inputs unchanged between create and update invocations, so no
-// rotation can occur. Outputs are never read back by Liftr.
+// rotation can occur. The password is never exported; Liftr reads exactly one
+// allowlisted non-secret output envelope (hostname and port) and nothing else.
 package main
 
 import (
@@ -33,7 +34,11 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-const envelopeVersion = 1
+const (
+	envelopeVersion    = 1
+	outputMappingRef   = "liftr-azure-pg-outputs-v1"
+	outputEnvelopeName = "liftrOutputs"
+)
 
 type envelope struct {
 	InputVersion     int    `json:"inputVersion"`
@@ -89,7 +94,7 @@ func main() {
 			highAvailabilityMode = input.Platform.HighAvailabilityMode
 		}
 
-		_, err = pf.NewServer(ctx, input.InfraName, &pf.ServerArgs{
+		serverOutput, err := pf.NewServer(ctx, input.InfraName, &pf.ServerArgs{
 			ServerName:                 pulumi.String(input.InfraName),
 			ResourceGroupName:          resourceGroup.Name,
 			Location:                   pulumi.String(input.Platform.Location),
@@ -104,6 +109,25 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("create flexible server: %w", err)
 		}
+
+		if input.Capability == "delete" {
+			return nil
+		}
+		// The single allowlisted non-secret export. The generated password is
+		// never exported; hostname is the server's endpoint and port is the
+		// PostgreSQL wire-protocol constant derived by this mapping. The
+		// envelope echoes the persisted mapping identity and execution
+		// identity so the control plane can verify provenance before use.
+		ctx.Export(outputEnvelopeName, pulumi.Map{
+			"version":          pulumi.Int(1),
+			"mapping":          pulumi.String(outputMappingRef),
+			"resourceId":       pulumi.String(input.ResourceID),
+			"targetGeneration": pulumi.Int(int(input.TargetGeneration)),
+			"values": pulumi.Map{
+				"hostname": serverOutput.FullyQualifiedDomainName,
+				"port":     pulumi.Int(5432),
+			},
+		})
 		return nil
 	})
 }

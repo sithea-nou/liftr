@@ -35,6 +35,10 @@ type ProvisionerCapability struct {
 
 // ExecutionRequest contains only the immutable intent and correlation data a
 // provisioner needs. It does not contain Liftr Operation state or phase.
+// OutputMappingRef is the durable, private output-mapping identity persisted
+// for this execution at dispatch time; implementations must interpret outputs
+// through exactly this mapping and never fall back to whatever happens to be
+// registered today.
 type ExecutionRequest struct {
 	OperationID      domain.OperationID
 	AttemptNumber    uint64
@@ -43,6 +47,7 @@ type ExecutionRequest struct {
 	Spec             domain.ResourceSpec
 	Capability       domain.Capability
 	TargetGeneration uint64
+	OutputMappingRef string
 }
 
 func (r ExecutionRequest) Validate() error {
@@ -94,6 +99,9 @@ type Submission struct {
 
 // ObservationRequest identifies what the provisioner should observe. Handle
 // is optional for declarative backends that observe by resource identity.
+// OutputMappingRef is the durable mapping identity persisted for this
+// execution; recovery must resolve it to an exact compatible decoder or fail
+// loudly rather than silently substituting the newest registration.
 type ObservationRequest struct {
 	OperationID      domain.OperationID
 	AttemptNumber    uint64
@@ -103,6 +111,7 @@ type ObservationRequest struct {
 	Capability       domain.Capability
 	TargetGeneration uint64
 	Handle           *ExecutionHandle
+	OutputMappingRef string
 }
 
 func (r ObservationRequest) Validate() error {
@@ -201,6 +210,57 @@ const (
 	ResourceDriftUnknown      = domain.ResourceDriftUnknown
 )
 
+// OutputEvidenceState classifies provider output evidence for one execution.
+type OutputEvidenceState string
+
+const (
+	// OutputsUnavailable means the declared outputs could not be extracted or
+	// decoded right now. The condition is transient: Liftr must keep the
+	// operation active and retry extraction without re-executing the backend.
+	OutputsUnavailable OutputEvidenceState = "Unavailable"
+	// OutputsAvailable carries candidate values that passed the private
+	// mapping boundary. They are implementation input to Liftr and remain
+	// untrusted until the ResourceType contract validates them.
+	OutputsAvailable OutputEvidenceState = "Available"
+	// OutputsInvalid means extraction produced a permanent, deterministic
+	// contract violation — undeclared fields, wrong types, wrong identity,
+	// secret-marked material, or malformed envelopes. Retrying can never
+	// succeed; no raw offending value may appear in Reason.
+	OutputsInvalid OutputEvidenceState = "Invalid"
+)
+
+func (s OutputEvidenceState) valid() bool {
+	switch s {
+	case OutputsUnavailable, OutputsAvailable, OutputsInvalid:
+		return true
+	default:
+		return false
+	}
+}
+
+// OutputEvidence is the normalized output dimension of an ExecutionObservation.
+// Values are flat scalars only. Secret material never crosses this boundary:
+// implementations extract only explicitly registered non-secret outputs.
+type OutputEvidence struct {
+	State  OutputEvidenceState
+	Values map[string]any
+	// Reason is a curated, client-safe classification for Invalid evidence.
+	Reason string
+}
+
+func (e OutputEvidence) validate() error {
+	if !e.State.valid() {
+		return fmt.Errorf("invalid output evidence state %q", e.State)
+	}
+	if e.State == OutputsAvailable && len(e.Values) == 0 {
+		return fmt.Errorf("available output evidence carries no values")
+	}
+	if e.State == OutputsInvalid && strings.TrimSpace(e.Reason) == "" {
+		return fmt.Errorf("invalid output evidence requires a curated reason")
+	}
+	return nil
+}
+
 // ExecutionObservation separates current execution from resource facts. A
 // ready existing resource can therefore be observed with Execution == nil.
 type ExecutionObservation struct {
@@ -210,6 +270,11 @@ type ExecutionObservation struct {
 	// ObservedAt is an optional backend source timestamp. When absent, the
 	// application uses its caller-supplied observation receipt timestamp.
 	ObservedAt time.Time
+	// Outputs carries the optional realized-value evidence for create/update
+	// executions of ResourceTypes that declare an output contract. A nil
+	// Outputs means this observation makes no output claim at all — not that
+	// outputs are unavailable.
+	Outputs *OutputEvidence
 }
 
 // ObservationError carries a normalized failure for an observation call. It

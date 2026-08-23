@@ -25,8 +25,8 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
-	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 )
 
 // SchemaDialect pins the only JSON Schema dialect Liftr accepts for
@@ -116,24 +116,24 @@ func (s SpecSchema) Digest() string { return s.digest }
 // ViolationsFor evaluates spec values against the compiled schema and
 // returns sanitized, uncapped violations in deterministic order. Evaluation
 // performs no I/O and no mutation.
-func (s SpecSchema) ViolationsFor(values map[string]any) []application.SpecViolation {
+func (s SpecSchema) ViolationsFor(values map[string]any) []resourcecontract.Violation {
 	violations := s.violationsFor(values)
-	application.SortSpecViolations(violations)
+	resourcecontract.SortViolations(violations)
 	return violations
 }
 
 // violationsFor evaluates the compiled schema against spec values and returns
 // sanitized violations without capping. Evaluation performs no I/O.
-func (s SpecSchema) violationsFor(values map[string]any) []application.SpecViolation {
+func (s SpecSchema) violationsFor(values map[string]any) []resourcecontract.Violation {
 	err := s.compiled.Validate(values)
 	if err == nil {
 		return nil
 	}
 	verr, ok := err.(*jsonschema.ValidationError)
 	if !ok {
-		return []application.SpecViolation{{Keyword: "schema", Message: "spec could not be validated"}}
+		return []resourcecontract.Violation{{Keyword: "schema", Message: "spec could not be validated"}}
 	}
-	var out []application.SpecViolation
+	var out []resourcecontract.Violation
 	collectViolations(verr, &out)
 	return out
 }
@@ -150,7 +150,7 @@ func structuralKind(err *jsonschema.ValidationError) bool {
 	}
 }
 
-func collectViolations(err *jsonschema.ValidationError, out *[]application.SpecViolation) {
+func collectViolations(err *jsonschema.ValidationError, out *[]resourcecontract.Violation) {
 	if structuralKind(err) {
 		for _, cause := range err.Causes {
 			collectViolations(cause, out)
@@ -168,15 +168,15 @@ func collectViolations(err *jsonschema.ValidationError, out *[]application.SpecV
 // expandViolation renders one library error as zero or more sanitized
 // violations. Property names come from the structured error kinds, never from
 // formatted library text, and submitted values are never echoed.
-func expandViolation(verr *jsonschema.ValidationError) []application.SpecViolation {
+func expandViolation(verr *jsonschema.ValidationError) []resourcecontract.Violation {
 	parent := jsonPointer(verr.InstanceLocation)
 	switch k := verr.ErrorKind.(type) {
 	case *kind.Required:
 		missing := append([]string(nil), k.Missing...)
 		sort.Strings(missing)
-		out := make([]application.SpecViolation, 0, len(missing))
+		out := make([]resourcecontract.Violation, 0, len(missing))
 		for _, name := range missing {
-			out = append(out, application.SpecViolation{
+			out = append(out, resourcecontract.Violation{
 				Path:    parent,
 				Keyword: "required",
 				Message: fmt.Sprintf("property %q is required", name),
@@ -186,9 +186,9 @@ func expandViolation(verr *jsonschema.ValidationError) []application.SpecViolati
 	case *kind.AdditionalProperties:
 		extra := append([]string(nil), k.Properties...)
 		sort.Strings(extra)
-		out := make([]application.SpecViolation, 0, len(extra))
+		out := make([]resourcecontract.Violation, 0, len(extra))
 		for _, name := range extra {
-			out = append(out, application.SpecViolation{
+			out = append(out, resourcecontract.Violation{
 				Path:    parent + "/" + pointerEscape(name),
 				Keyword: "additionalProperties",
 				Message: fmt.Sprintf("property %q is not permitted by this resource type", name),
@@ -196,7 +196,7 @@ func expandViolation(verr *jsonschema.ValidationError) []application.SpecViolati
 		}
 		return out
 	default:
-		return []application.SpecViolation{{
+		return []resourcecontract.Violation{{
 			Path:    parent,
 			Keyword: violationKeyword(verr),
 			Message: sanitizedMessage(verr),

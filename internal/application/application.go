@@ -59,24 +59,41 @@ const (
 )
 
 type ProvisioningExecutionRecord struct {
-	OperationID         domain.OperationID
-	ProvisionerRef      ProvisionerRef
-	ResourceID          domain.ResourceID
-	ResourceType        domain.ResourceTypeRef
-	Capability          domain.Capability
-	TargetGeneration    uint64
-	Spec                domain.ResourceSpec
-	Handle              *provisioning.ExecutionHandle
-	State               ProvisioningAttemptState
-	Submission          *provisioning.Submission
-	AcceptanceConfirmed bool
-	LastObservation     *provisioning.ExecutionObservation
-	LastObservedAt      time.Time
-	LastFailure         *provisioning.ExecutionFailure
-	Correlation         provisioning.RequestCorrelation
-	CurrentAttempt      uint64
-	NextObservation     uint64
-	Version             uint64
+	OperationID          domain.OperationID
+	ProvisionerRef       ProvisionerRef
+	ResourceID           domain.ResourceID
+	ResourceType         domain.ResourceTypeRef
+	Capability           domain.Capability
+	TargetGeneration     uint64
+	Spec                 domain.ResourceSpec
+	OutputMappingRef     string
+	OutputResolution     OutputResolution
+	OutputFailureReason  string
+	OutputFailureMessage string
+	Handle               *provisioning.ExecutionHandle
+	State                ProvisioningAttemptState
+	Submission           *provisioning.Submission
+	AcceptanceConfirmed  bool
+	LastObservation      *provisioning.ExecutionObservation
+	LastObservedAt       time.Time
+	// LastProviderObservedAt is the newest backend-supplied evidence
+	// timestamp accepted for this execution. Provider clocks and Liftr
+	// receipt clocks are separate dimensions: backend evidence freshness is
+	// judged only against prior backend evidence, never against Liftr
+	// receipt instants, so coarser backend granularity cannot regress.
+	LastProviderObservedAt time.Time
+	LastFailure            *provisioning.ExecutionFailure
+	Correlation            provisioning.RequestCorrelation
+	CurrentAttempt         uint64
+	NextObservation        uint64
+	Version                uint64
+}
+
+// OutputMappingIsBound reports whether a durable output-mapping identity has
+// been persisted for this execution. The identity is assigned once, at the
+// dispatch claim, before any provider work; it never changes afterwards.
+func (r ProvisioningExecutionRecord) OutputMappingIsBound() bool {
+	return r.OutputMappingRef != ""
 }
 
 type IdempotencyRecord struct {
@@ -141,6 +158,7 @@ type UnitOfWork interface {
 	Idempotency() IdempotencyRepository
 	SubmissionAttempts() SubmissionAttemptRepository
 	Outbox() OutboxRepository
+	Outputs() ResourceOutputRepository
 }
 
 type TransactionRunner interface {
@@ -228,6 +246,9 @@ type Result struct {
 	Execution *ProvisioningExecutionRecord
 	Event     *domain.Event
 	Replay    bool
+	// OutputsPending reports that backend success was recorded while output
+	// materialization is still outstanding; the operation remains active.
+	OutputsPending bool
 }
 
 func (s *Service) CreateResource(ctx context.Context, cmd CreateResourceCommand) (Result, error) {
@@ -487,11 +508,22 @@ func (s *Service) ObserveOperation(ctx context.Context, cmd ObserveOperationComm
 		sanitizePersistedFacts(&execution)
 		facts, at := persistedTerminalFacts(execution, record.Status.UpdatedAt())
 		if execution.State == AttemptSucceeded {
-			return s.finishSubmitted(ctx, record, opRecord, execution, true, "RecoveredTerminalOutcome", "", at, facts)
+			switch execution.OutputResolution {
+			case OutputResolutionPending:
+				// Backend success is already proven; only the output dimension
+				// is outstanding. Re-drive extraction without re-executing the
+				// backend and without regressing evidence timestamps.
+				return s.resolvePendingOutputs(ctx, record, opRecord, execution)
+			case OutputResolutionRejected:
+				return s.finishSubmitted(ctx, record, opRecord, execution, false,
+					execution.OutputFailureReason, execution.OutputFailureMessage, at, facts, nil)
+			default:
+				return s.finishSubmitted(ctx, record, opRecord, execution, true, "RecoveredTerminalOutcome", "", at, facts, nil)
+			}
 		}
 		failure := normalizeExecutionFailure(persistedTerminalExecution(execution).Failure)
 		execution.LastFailure = failure
-		return s.finishSubmitted(ctx, record, opRecord, execution, false, failure.Reason, failure.Message, at, facts)
+		return s.finishSubmitted(ctx, record, opRecord, execution, false, failure.Reason, failure.Message, at, facts, nil)
 	}
 	if execution.State == AttemptPending || execution.State == AttemptDispatching {
 		return Result{Resource: record, Operation: opRecord.Operation, Execution: &execution}, nil
@@ -500,7 +532,7 @@ func (s *Service) ObserveOperation(ctx context.Context, cmd ObserveOperationComm
 	if err != nil || isNilInterface(provider) {
 		return Result{}, fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
 	}
-	request := provisioning.ObservationRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType, Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle}
+	request := provisioning.ObservationRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType, Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle, OutputMappingRef: execution.OutputMappingRef}
 	observation, observeErr := provider.Observe(ctx, request)
 	if observeErr != nil && !explicitTerminalObservation(observation) {
 		execution.LastFailure = normalizeExecutionFailure(failureFromError(observeErr))
@@ -561,12 +593,12 @@ func (s *Service) ObserveOperation(ctx context.Context, cmd ObserveOperationComm
 		return s.scheduleResubmission(ctx, record, opRecord, execution)
 	}
 	if shouldComplete(observation) {
-		return s.finishSubmitted(ctx, record, opRecord, execution, true, "ObservationSucceeded", "", observationAt, observation.Resource)
+		return s.finishSubmitted(ctx, record, opRecord, execution, true, "ObservationSucceeded", "", observationAt, observation.Resource, observation.Outputs)
 	}
 	if shouldFail(observation) {
 		failure := observation.Execution.Failure
 		execution.LastFailure = failure
-		return s.finishSubmitted(ctx, record, opRecord, execution, false, failure.Reason, failure.Message, observationAt, observation.Resource)
+		return s.finishSubmitted(ctx, record, opRecord, execution, false, failure.Reason, failure.Message, observationAt, observation.Resource, nil)
 	}
 	execution, err = s.saveObservation(ctx, execution)
 	if err != nil {
@@ -594,7 +626,9 @@ func (s *Service) scheduleOperationObservation(ctx context.Context, operationID 
 			result = Result{Resource: resource, Operation: operation.Operation, Execution: &execution}
 			return nil
 		}
-		if execution.State != AttemptUnknown && execution.State != AttemptAccepted {
+		observable := execution.State == AttemptUnknown || execution.State == AttemptAccepted ||
+			(execution.State == AttemptSucceeded && execution.OutputResolution == OutputResolutionPending)
+		if !observable {
 			return fmt.Errorf("%w: execution is not observable from state %s", ErrInvalidApplicationCall, execution.State)
 		}
 		sequence := execution.NextObservation
@@ -873,14 +907,19 @@ func (s *Service) DispatchOperation(ctx context.Context, operationID domain.Oper
 	}
 	if submitErr != nil {
 		if submission.Observation.Execution.State == provisioning.ExecutionStateSucceeded {
-			return s.finishSubmitted(ctx, record, opRecord, execution, true, "SubmissionSucceeded", "", observationTime(submission.Observation.ObservedAt, record.Status.UpdatedAt()), submission.Observation.Resource)
+			return s.finishSubmitted(ctx, record, opRecord, execution, true, "SubmissionSucceeded", "", observationTime(submission.Observation.ObservedAt, record.Status.UpdatedAt()), submission.Observation.Resource, submission.Observation.Outputs)
+		}
+		if ConclusiveManagedAbsence(execution.Capability, submission.Observation.Correlation, submission.Observation.Execution, execution.AcceptanceConfirmed) {
+			return s.finishSubmitted(ctx, record, opRecord, execution, true, ManagedTargetAbsentReason, "",
+				observationTime(submission.Observation.ObservedAt, record.Status.UpdatedAt()),
+				domain.ObservedFacts{Presence: domain.ResourcePresenceNotFound, Readiness: domain.ResourceReadinessUnknown, Drift: domain.ResourceDriftUnknown}, nil)
 		}
 		failure := submission.Observation.Execution.Failure
 		failure = normalizeExecutionFailure(failure)
 		submission.Observation.Execution.Failure = failure
 		execution.Submission = &submission
 		execution.LastFailure = failure
-		return s.finishSubmitted(ctx, record, opRecord, execution, false, failure.Reason, failure.Message, observationTime(submission.Observation.ObservedAt, record.Status.UpdatedAt()), submission.Observation.Resource)
+		return s.finishSubmitted(ctx, record, opRecord, execution, false, failure.Reason, failure.Message, observationTime(submission.Observation.ObservedAt, record.Status.UpdatedAt()), submission.Observation.Resource, nil)
 	}
 	if submission.Observation.Execution == nil {
 		failure := &provisioning.ExecutionFailure{Kind: provisioning.FailureUnknown, Reason: "MalformedSubmission", Message: "submission omitted execution result"}
@@ -895,14 +934,18 @@ func (s *Service) DispatchOperation(ctx context.Context, operationID domain.Oper
 	if submission.Observation.Execution.State == provisioning.ExecutionStateSucceeded || submission.Observation.Execution.State == provisioning.ExecutionStateFailed {
 		observationAt := observationTime(submission.Observation.ObservedAt, record.Status.UpdatedAt())
 		if submission.Observation.Execution.State == provisioning.ExecutionStateSucceeded {
-			return s.finishSubmitted(ctx, record, opRecord, execution, true, "SubmissionSucceeded", "", observationAt, submission.Observation.Resource)
+			return s.finishSubmitted(ctx, record, opRecord, execution, true, "SubmissionSucceeded", "", observationAt, submission.Observation.Resource, submission.Observation.Outputs)
+		}
+		if ConclusiveManagedAbsence(execution.Capability, submission.Observation.Correlation, submission.Observation.Execution, execution.AcceptanceConfirmed) {
+			return s.finishSubmitted(ctx, record, opRecord, execution, true, ManagedTargetAbsentReason, "", observationAt,
+				domain.ObservedFacts{Presence: domain.ResourcePresenceNotFound, Readiness: domain.ResourceReadinessUnknown, Drift: domain.ResourceDriftUnknown}, nil)
 		}
 		failure := submission.Observation.Execution.Failure
 		failure = normalizeExecutionFailure(failure)
 		submission.Observation.Execution.Failure = failure
 		execution.Submission = &submission
 		execution.LastFailure = failure
-		return s.finishSubmitted(ctx, record, opRecord, execution, false, failure.Reason, failure.Message, observationAt, submission.Observation.Resource)
+		return s.finishSubmitted(ctx, record, opRecord, execution, false, failure.Reason, failure.Message, observationAt, submission.Observation.Resource, nil)
 	}
 	if err := s.saveExecution(ctx, execution); err != nil {
 		return Result{}, err
@@ -927,8 +970,121 @@ func (s *Service) RecoverOperation(ctx context.Context, operationID domain.Opera
 	return s.ObserveOperation(ctx, ObserveOperationCommand{OperationID: operationID, ObservedAt: observedAt})
 }
 
-func (s *Service) finishSubmitted(ctx context.Context, record ResourceRecord, opRecord OperationRecord, execution ProvisioningExecutionRecord, succeeded bool, reason, message string, at time.Time, facts domain.ObservedFacts) (Result, error) {
-	result, err := s.finishObserved(ctx, record, opRecord, execution, succeeded, reason, message, at, facts)
+// planTerminalSuccess resolves the output dimension of an imminent successful
+// completion. It is a pure decision over immutable inputs (contract,
+// capability, evidence, generation), so it can run outside the finish
+// transaction; fencing inside the transaction still guards persistence.
+func (s *Service) planTerminalSuccess(ctx context.Context, execution ProvisioningExecutionRecord, outputs *provisioning.OutputEvidence, at time.Time) (OutputPlan, error) {
+	contract, err := s.Types.Get(ctx, execution.ResourceType)
+	if err != nil || isNilInterface(contract) {
+		return OutputPlan{}, fmt.Errorf("resource type catalog unavailable for %s/%s: %w", execution.ResourceType.Name, execution.ResourceType.Version, err)
+	}
+	return PlanTerminalOutputs(contract, execution.Capability, outputs, execution.TargetGeneration, at)
+}
+
+// deferOutputPublication durably records backend success with Pending output
+// resolution. The operation stays active so extraction can be retried without
+// re-executing the backend.
+func (s *Service) deferOutputPublication(ctx context.Context, record ResourceRecord, execution ProvisioningExecutionRecord) (Result, error) {
+	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
+		currentOperation, err := tx.Operations().GetOperation(ctx, execution.OperationID)
+		if err != nil {
+			return err
+		}
+		if currentOperation.Operation.IsTerminal() {
+			return fmt.Errorf("%w: cannot defer outputs of a terminal operation", lifecycle.ErrInvalidTransition)
+		}
+		currentExecution, err := tx.Executions().GetExecution(ctx, execution.OperationID)
+		if err != nil {
+			return err
+		}
+		if currentExecution.Version != execution.Version || currentExecution.State == AttemptSucceeded && currentExecution.OutputResolution == OutputResolutionPending {
+			if currentExecution.Version != execution.Version {
+				return ErrConcurrencyConflict
+			}
+		}
+		execution.Version = currentExecution.Version
+		execution.State = AttemptSucceeded
+		if execution.OutputResolution != OutputResolutionRejected {
+			execution.OutputResolution = OutputResolutionPending
+		}
+		if err := tx.Executions().SaveExecution(ctx, execution, currentExecution.Version); err != nil {
+			return err
+		}
+		execution.Version++
+		return nil
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Resource: record, Operation: domain.Operation{}, Execution: &execution, OutputsPending: true}, nil
+}
+
+// resolvePendingOutputs re-drives output extraction for an execution whose
+// backend success is already durable. It never re-executes the backend: the
+// provider observes existing state, and the finish path validates and
+// publishes or rejects the output dimension only.
+func (s *Service) resolvePendingOutputs(ctx context.Context, record ResourceRecord, opRecord OperationRecord, execution ProvisioningExecutionRecord) (Result, error) {
+	provider, err := s.Resolver.Resolve(ctx, execution.ProvisionerRef)
+	if err != nil || isNilInterface(provider) {
+		return Result{}, fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
+	}
+	request := provisioning.ObservationRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID,
+		ResourceType: execution.ResourceType, Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration,
+		Handle: execution.Handle, OutputMappingRef: execution.OutputMappingRef}
+	observation, observeErr := provider.Observe(ctx, request)
+	if observeErr != nil {
+		return Result{}, observeErr
+	}
+	if observation.Correlation != provisioning.RequestCorrelationFound || observation.Execution == nil || observation.Execution.State != provisioning.ExecutionStateSucceeded {
+		return Result{}, fmt.Errorf("%w: pending-output observation is not positively correlated terminal success", lifecycle.ErrInvalidTransition)
+	}
+	// Evidence timestamps stay pinned to the persisted terminal instant:
+	// repeated observations of the same backend success may carry the same
+	// provider time, and completion must continue to match that instant.
+	return s.finishSubmitted(ctx, record, opRecord, execution, true, "ObservationSucceeded", "", execution.LastObservedAt, observation.Resource, observation.Outputs)
+}
+
+func (s *Service) finishSubmitted(ctx context.Context, record ResourceRecord, opRecord OperationRecord, execution ProvisioningExecutionRecord, succeeded bool, reason, message string, at time.Time, facts domain.ObservedFacts, outputs *provisioning.OutputEvidence) (Result, error) {
+	var publish *domain.ResourceOutputs
+	if succeeded {
+		switch execution.Capability {
+		case domain.CapabilityCreate, domain.CapabilityUpdate:
+			plan, err := s.planTerminalSuccess(ctx, execution, outputs, at)
+			if err != nil {
+				// Catalog unavailability must never complete reconciliation
+				// blindly: fall back to terminal-success evidence with Pending
+				// resolution so recovery resolves the output dimension later.
+				execution.State = AttemptSucceeded
+				execution.OutputResolution = OutputResolutionPending
+				execution.LastFailure = failureFromError(err)
+				if saveErr := s.saveExecution(ctx, execution); saveErr != nil {
+					return Result{}, fmt.Errorf("%w; recording deferred outcome: %v", err, saveErr)
+				}
+				execution.Version++
+				return Result{Resource: record, Operation: opRecord.Operation, Execution: &execution, OutputsPending: true}, err
+			}
+			switch plan.Action {
+			case OutputPlanDefer:
+				return s.deferOutputPublication(ctx, record, execution)
+			case OutputPlanReject:
+				succeeded = false
+				reason = plan.Failure.Reason
+				message = plan.Failure.Message
+				execution.OutputResolution = OutputResolutionRejected
+				execution.OutputFailureReason = plan.Failure.Reason
+				execution.OutputFailureMessage = plan.Failure.Message
+			case OutputPlanPublish:
+				publish = &plan.Snapshot
+				execution.OutputResolution = OutputResolutionPublished
+			default:
+				execution.OutputResolution = OutputResolutionNone
+			}
+		default:
+			execution.OutputResolution = OutputResolutionNone
+		}
+	}
+	result, err := s.finishObserved(ctx, record, opRecord, execution, succeeded, reason, message, at, facts, publish)
 	if err == nil {
 		return result, nil
 	}
@@ -948,7 +1104,7 @@ func (s *Service) finishSubmitted(ctx context.Context, record ResourceRecord, op
 	return Result{Resource: record, Operation: opRecord.Operation, Execution: &execution}, err
 }
 
-func (s *Service) finishObserved(ctx context.Context, record ResourceRecord, opRecord OperationRecord, execution ProvisioningExecutionRecord, succeeded bool, reason, message string, at time.Time, facts domain.ObservedFacts) (Result, error) {
+func (s *Service) finishObserved(ctx context.Context, record ResourceRecord, opRecord OperationRecord, execution ProvisioningExecutionRecord, succeeded bool, reason, message string, at time.Time, facts domain.ObservedFacts, publish *domain.ResourceOutputs) (Result, error) {
 	if at.IsZero() {
 		at = record.Status.UpdatedAt()
 	}
@@ -968,6 +1124,13 @@ func (s *Service) finishObserved(ctx context.Context, record ResourceRecord, opR
 		}
 		if err := validateExecutionContext(current, currentOperation.Operation, currentExecution); err != nil {
 			return err
+		}
+		// Correlated terminal evidence can never genuinely precede state Liftr
+		// advanced after launching this execution; coarser backend clocks are
+		// lifted to the persisted frontier so lifecycle monotonicity holds.
+		if at.Before(current.Status.UpdatedAt()) {
+			at = current.Status.UpdatedAt()
+			execution.LastObservedAt = at
 		}
 		if currentOperation.Operation.IsTerminal() {
 			incomingState := AttemptFailed
@@ -1004,7 +1167,10 @@ func (s *Service) finishObserved(ctx context.Context, record ResourceRecord, opR
 		if succeeded {
 			execution.State = AttemptSucceeded
 			execution.LastFailure = nil
-		} else {
+		} else if execution.OutputResolution != OutputResolutionRejected {
+			// A rejected output postcondition fails the operation while the
+			// backend success evidence stays intact; only ordinary failures
+			// flip the attempt to Failed.
 			execution.State = AttemptFailed
 		}
 		current.Status = transition.Status
@@ -1012,6 +1178,29 @@ func (s *Service) finishObserved(ctx context.Context, record ResourceRecord, opR
 			return err
 		}
 		current.Version++
+		if publish != nil {
+			contractDigest, digestErr := s.outputContractDigestFor(ctx, current.Resource.Type())
+			if digestErr != nil {
+				return digestErr
+			}
+			valuesDigest, digestErr := ValuesDigest(publish.Values())
+			if digestErr != nil {
+				return digestErr
+			}
+			outputRecord := ResourceOutputRecord{
+				ResourceID:           current.Resource.ID(),
+				ObservedGeneration:   publish.ObservedGeneration(),
+				OperationID:          currentOperation.Operation.ID(),
+				Capability:           currentOperation.Operation.Capability(),
+				OutputMappingRef:     execution.OutputMappingRef,
+				OutputContractDigest: contractDigest,
+				Values:               *publish,
+				ValuesDigest:         valuesDigest,
+			}
+			if err := tx.Outputs().SaveResourceOutputs(ctx, outputRecord); err != nil {
+				return err
+			}
+		}
 		if err := tx.Operations().SaveOperation(ctx, OperationRecord{Operation: transition.Operation}, currentOperation.Version); err != nil {
 			return err
 		}
@@ -1027,6 +1216,16 @@ func (s *Service) finishObserved(ctx context.Context, record ResourceRecord, opR
 		return nil
 	})
 	return result, err
+}
+
+// outputContractDigestFor derives the provenance digest of a resource type's
+// declared output contract.
+func (s *Service) outputContractDigestFor(ctx context.Context, ref domain.ResourceTypeRef) (string, error) {
+	contract, err := s.Types.Get(ctx, ref)
+	if err != nil || isNilInterface(contract) {
+		return "", fmt.Errorf("resource type catalog unavailable for %s/%s: %w", ref.Name, ref.Version, err)
+	}
+	return OutputContractDigest(contract.OutputContract())
 }
 
 type existingRequest struct {
@@ -1438,6 +1637,7 @@ func executionRequest(execution ProvisioningExecutionRecord) provisioning.Execut
 		OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID,
 		ResourceType: execution.ResourceType, Spec: execution.Spec,
 		Capability: execution.Capability, TargetGeneration: execution.TargetGeneration,
+		OutputMappingRef: execution.OutputMappingRef,
 	}
 }
 
@@ -1643,16 +1843,31 @@ func sanitizePersistedFacts(execution *ProvisioningExecutionRecord) bool {
 	return changed
 }
 
+// absenceCompletedDelete reports persisted proof of a cleanup delete whose
+// managed target was conclusively absent before launch: the operation
+// succeeded while the correlated submission evidence records the conclusive
+// pre-acceptance NotFound rejection.
+func absenceCompletedDelete(execution ProvisioningExecutionRecord, operation domain.Operation, evidence *provisioning.Execution) bool {
+	return operation.Capability() == domain.CapabilityDelete &&
+		operation.State() == domain.OperationStateSucceeded &&
+		execution.State == AttemptSucceeded &&
+		execution.Correlation == provisioning.RequestCorrelationNotFound &&
+		!execution.AcceptanceConfirmed &&
+		evidence != nil && evidence.State == provisioning.ExecutionStateFailed &&
+		evidence.Failure != nil && evidence.Failure.Kind == provisioning.FailureNotFound
+}
+
 func validatePersistedTerminalEvidence(execution ProvisioningExecutionRecord, resource domain.Resource, status domain.ResourceStatus, operation domain.Operation) error {
 	evidence := persistedTerminalExecution(execution)
 	if evidence == nil {
 		return fmt.Errorf("%w: terminal attempt has no terminal execution evidence", ErrInvalidApplicationCall)
 	}
+	absenceCompletion := absenceCompletedDelete(execution, operation, evidence)
 	expected := provisioning.ExecutionStateFailed
 	if execution.State == AttemptSucceeded {
 		expected = provisioning.ExecutionStateSucceeded
 	}
-	if evidence.State != expected {
+	if !absenceCompletion && evidence.State != expected {
 		return fmt.Errorf("%w: terminal attempt contradicts persisted execution evidence", ErrInvalidApplicationCall)
 	}
 	if execution.LastObservedAt.IsZero() {
@@ -1661,28 +1876,47 @@ func validatePersistedTerminalEvidence(execution ProvisioningExecutionRecord, re
 	if !operation.IsTerminal() && (execution.LastObservedAt.Before(resource.UpdatedAt()) || execution.LastObservedAt.Before(status.UpdatedAt())) {
 		return fmt.Errorf("%w: terminal evidence predates current resource state", ErrInvalidApplicationCall)
 	}
-	if sourceObservedAt := persistedTerminalObservedAt(execution); !sourceObservedAt.IsZero() && !sourceObservedAt.Equal(execution.LastObservedAt) {
-		return fmt.Errorf("%w: terminal source timestamp differs from effective observation time", ErrInvalidApplicationCall)
+	// Backend-supplied evidence time identifies the source instant of this
+	// terminal outcome. It is judged against the backend dimension of the
+	// execution timeline; Liftr receipts are a separate clock and may sit
+	// later than any backend timestamp without implying staleness.
+	if sourceObservedAt := persistedTerminalObservedAt(execution); !sourceObservedAt.IsZero() && !execution.LastProviderObservedAt.IsZero() {
+		if !sourceObservedAt.Equal(execution.LastProviderObservedAt) {
+			return fmt.Errorf("%w: terminal source timestamp differs from backend evidence time", ErrInvalidApplicationCall)
+		}
 	}
 	if operation.IsTerminal() && !operation.CompletedAt().Equal(execution.LastObservedAt) {
 		return fmt.Errorf("%w: terminal operation and execution timestamps differ", ErrInvalidApplicationCall)
 	}
-	if evidence.State == provisioning.ExecutionStateFailed {
+	if evidence.State == provisioning.ExecutionStateFailed && !absenceCompletion {
 		failure := normalizeExecutionFailure(evidence.Failure)
 		if execution.LastFailure == nil || execution.LastFailure.Kind != failure.Kind || execution.LastFailure.Reason != failure.Reason || execution.LastFailure.Message != failure.Message {
 			return fmt.Errorf("%w: terminal failure evidence is inconsistent", ErrInvalidApplicationCall)
 		}
 	}
+	outputRejected := execution.State == AttemptSucceeded && execution.OutputResolution == OutputResolutionRejected
 	if operation.State() == domain.OperationStateSucceeded && execution.State != AttemptSucceeded {
 		return fmt.Errorf("%w: succeeded operation contradicts execution attempt", ErrInvalidApplicationCall)
 	}
-	if operation.State() == domain.OperationStateFailed && execution.State != AttemptFailed {
+	if operation.State() == domain.OperationStateFailed && execution.State != AttemptFailed && !outputRejected {
 		return fmt.Errorf("%w: failed operation contradicts execution attempt", ErrInvalidApplicationCall)
 	}
 	if operation.State() == domain.OperationStateFailed {
 		operationFailure, ok := operation.Failure()
+		if !ok {
+			return fmt.Errorf("%w: failed operation carries no failure details", ErrInvalidApplicationCall)
+		}
+		if outputRejected {
+			// Backend success plus a rejected output postcondition is the one
+			// honest shape where a failed operation coexists with successful
+			// execution evidence. The stored curated reason must match exactly.
+			if operationFailure.Reason() != execution.OutputFailureReason || operationFailure.Message() != execution.OutputFailureMessage || execution.OutputFailureReason == "" {
+				return fmt.Errorf("%w: failed operation details contradict output postcondition rejection", ErrInvalidApplicationCall)
+			}
+			return nil
+		}
 		failure := normalizeExecutionFailure(evidence.Failure)
-		if !ok || operationFailure.Reason() != failure.Reason || operationFailure.Message() != failure.Message {
+		if operationFailure.Reason() != failure.Reason || operationFailure.Message() != failure.Message {
 			return fmt.Errorf("%w: failed operation details contradict execution evidence", ErrInvalidApplicationCall)
 		}
 	}

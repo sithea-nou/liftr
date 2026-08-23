@@ -341,6 +341,9 @@ func newE2ERuntime(t *testing.T, pulumiRoot string) (http.Handler, func()) {
 		Catalog:               catalog,
 		Provisioners:          map[application.ProvisionerRef]provisioning.Provisioner{defaultRef: provider},
 		DefaultProvisionerRef: defaultRef,
+		// A fast retry base keeps delayed follow-up observations inside the
+		// test pump's quiescence grace window; production intervals differ.
+		WorkerInterval: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -111,20 +111,7 @@ func Contract() (resourcetypes.Contract, error) {
 // the reserved transition keyword so admission reports them through the same
 // structured channel as other spec-contract violations.
 func ValidateTransition(oldValues, newValues map[string]any) []resourcetypes.TransitionViolation {
-	var violations []resourcetypes.TransitionViolation
-	if oldVersion, oldOK := stringField(oldValues, "version"); oldOK {
-		if newVersion, newOK := stringField(newValues, "version"); newOK && newVersion != oldVersion {
-			violations = append(violations, resourcetypes.TransitionViolation{Path: "/version", Keyword: resourcetypes.TransitionKeyword,
-				Message: "the engine version of an existing PostgreSQLDatabase/v1 resource cannot be changed; request a new resource instead"})
-		}
-	}
-	if oldStorage, oldOK := storageField(oldValues); oldOK {
-		if newStorage, newOK := storageField(newValues); newOK && newStorage < oldStorage {
-			violations = append(violations, resourcetypes.TransitionViolation{Path: "/storageGB", Keyword: resourcetypes.TransitionKeyword,
-				Message: "storageGB cannot decrease for an existing PostgreSQLDatabase/v1 resource"})
-		}
-	}
-	return violations
+	return transitionViolations(oldValues, newValues, Version)
 }
 
 func stringField(values map[string]any, key string) (string, bool) {

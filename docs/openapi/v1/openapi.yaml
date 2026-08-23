@@ -31,10 +31,22 @@ info:
 
     Discovery: GET /v1/resource-types lists registered developer contracts as
     summaries; GET /v1/resource-types/{name}/{version} returns one contract
-    including its embedded spec schema. Capabilities in discovery describe the
+    including its embedded spec schema and, when the type declares realized
+    values, its outputContract. Capabilities in discovery describe the
     ResourceType contract itself; they are not guarantees about current
     backend availability or provisioner selection. The "observe" capability is
     contract metadata only; v1 defines no developer-facing observe endpoint.
+
+    Outputs: a Resource representation may carry an optional "outputs" object.
+    It contains "observedGeneration" — the desired generation whose successful
+    reconciliation produced the values — and flat non-secret scalar "values"
+    whose exact names and types are declared by that ResourceType's
+    outputContract. Outputs are absent until first published and are omitted
+    from Deleted tombstones. During pending or failed updates the previous
+    snapshot remains with its older observedGeneration; equality between
+    outputs.observedGeneration and generation means outputs correspond to the
+    current desired state. Outputs are reconciliation snapshots, never live
+    health observations.
 
     Errors follow RFC 9457 Problem Details (application/problem+json) with
     the Liftr extensions "code", "requestId", and narrow fields such as
@@ -606,6 +618,8 @@ components:
           type: string
         specSchema:
           $ref: "#/components/schemas/ResourceSpecSchema"
+        outputContract:
+          $ref: "#/components/schemas/ResourceTypeOutputContract"
     SpecViolation:
       type: object
       description: |
@@ -628,6 +642,63 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ResourceTypeSummary"
+    ResourceTypeOutputField:
+      type: object
+      description: |
+        One declared developer-consumable output of a ResourceType version.
+        Names are provider-neutral and never echo implementation identifiers;
+        secret material has no representation in v1.
+      required: [name, jsonType, requiredWhenReady]
+      properties:
+        name:
+          type: string
+        jsonType:
+          type: string
+          description: The exact scalar JSON type of this output value.
+          enum: [string, integer, number, boolean]
+        requiredWhenReady:
+          type: boolean
+          description: |
+            When true, a successfully reconciled generation must publish this
+            field before Liftr reports reconciliation success.
+    ResourceTypeOutputContract:
+      type: object
+      description: |
+        The declared non-secret output contract of one ResourceType version.
+        It is part of the immutable contract identity; the core API models
+        only this envelope, while each contract declares its exact fields.
+      required: [fields]
+      properties:
+        fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceTypeOutputField"
+    ResourceOutputs:
+      type: object
+      description: |
+        Realized developer-consumable values of one successfully reconciled
+        generation. observedGeneration is an explicit freshness association,
+        not a claim of current runtime health; it can lag resource.generation
+        while an update is pending or after it failed.
+      required: [observedGeneration, values]
+      properties:
+        observedGeneration:
+          type: integer
+          format: int64
+          minimum: 1
+        values:
+          type: object
+          description: |
+            Flat non-secret scalars whose names and exact types are declared
+            by the ResourceType's outputContract. Nested objects, arrays,
+            null, and secret material never appear here. Optional contract
+            fields are omitted rather than rendered as null.
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: number
+              - type: integer
+              - type: boolean
     Condition:
       type: object
       required: [type, status, reason, observedGeneration, lastTransitionAt]
@@ -714,6 +785,8 @@ components:
           $ref: "#/components/schemas/ResourceStatus"
         latestOperation:
           $ref: "#/components/schemas/LatestOperationRef"
+        outputs:
+          $ref: "#/components/schemas/ResourceOutputs"
         createdAt:
           type: string
           format: date-time

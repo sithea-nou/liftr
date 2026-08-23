@@ -20,7 +20,11 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-const envelopeVersion = 1
+const (
+	envelopeVersion    = 1
+	outputMappingRef   = "liftr-recording-outputs-v1"
+	outputEnvelopeName = "liftrOutputs"
+)
 
 var (
 	infraNamePattern  = regexp.MustCompile(`^liftr-[0-9a-f]{20}$`)
@@ -84,6 +88,22 @@ func main() {
 		}
 		ctx.Log.Info(fmt.Sprintf("recording program accepted capability=%q resource=%q infra=%q storage=%d",
 			input.Capability, input.ResourceID, input.InfraName, storage), nil)
+		if input.Capability == "delete" {
+			return nil
+		}
+		// The single allowlisted export: a strictly bounded, non-secret
+		// envelope echoing the persisted mapping identity and execution
+		// identity so the control plane can verify provenance before use.
+		ctx.Export(outputEnvelopeName, pulumi.Map{
+			"version":          pulumi.Int(1),
+			"mapping":          pulumi.String(outputMappingRef),
+			"resourceId":       pulumi.String(input.ResourceID),
+			"targetGeneration": pulumi.Int(int(input.TargetGeneration)),
+			"values": pulumi.Map{
+				"hostname": pulumi.String(fmt.Sprintf("%s.postgres.example.invalid", input.InfraName)),
+				"port":     pulumi.Int(5432),
+			},
+		})
 		return nil
 	})
 }

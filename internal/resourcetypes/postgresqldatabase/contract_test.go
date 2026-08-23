@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 	"github.com/sithea-nou/liftr/internal/resourcetypes"
 	"github.com/sithea-nou/liftr/internal/resourcetypes/postgresqldatabase"
 )
@@ -175,9 +175,9 @@ func TestValidateSpecMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := contract.ValidateSpec(mustSpec(t, tt.values))
-			var invalid *application.InvalidSpecError
+			var invalid *resourcecontract.ValidationError
 			if !errors.As(err, &invalid) {
-				t.Fatalf("ValidateSpec() error = %v (%T), want *application.InvalidSpecError", err, err)
+				t.Fatalf("ValidateSpec() error = %v (%T), want *resourcecontract.ValidationError", err, err)
 			}
 			found := false
 			for _, violation := range invalid.Violations {
@@ -190,9 +190,6 @@ func TestValidateSpecMatrix(t *testing.T) {
 			}
 			if !found {
 				t.Fatalf("violations missing {%s %s %q}, got %+v", tt.wantPath, tt.wantKeyword, tt.wantMessage, invalid.Violations)
-			}
-			if invalid.Truncated {
-				t.Fatal("small payload must not report truncation")
 			}
 		})
 	}
@@ -217,10 +214,10 @@ func TestViolationsAreDeterministic(t *testing.T) {
 	}
 }
 
-func validateViolations(t *testing.T, contract resourcetypes.Contract, spec domain.ResourceSpec) []application.SpecViolation {
+func validateViolations(t *testing.T, contract resourcetypes.Contract, spec domain.ResourceSpec) []resourcecontract.Violation {
 	t.Helper()
 	err := contract.ValidateSpec(spec)
-	var invalid *application.InvalidSpecError
+	var invalid *resourcecontract.ValidationError
 	if !errors.As(err, &invalid) {
 		t.Fatalf("expected InvalidSpecError, got %v", err)
 	}

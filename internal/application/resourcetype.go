@@ -4,12 +4,11 @@ package application
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 )
 
 // MaxSpecViolations caps the number of structured violations returned in a
@@ -17,18 +16,20 @@ import (
 const MaxSpecViolations = 10
 
 // ErrInvalidResourceSpec reports that a ResourceSpec does not satisfy the
-// developer-facing contract of its ResourceType.
-var ErrInvalidResourceSpec = errors.New("resource spec does not satisfy its resource type contract")
+// developer-facing contract of its ResourceType. It aliases the neutral
+// sentinel so producer and consumer sentinels remain interchangeable.
+var ErrInvalidResourceSpec = resourcecontract.ErrInvalidSpec
 
-// SpecViolation is one sanitized, client-safe spec-contract violation.
-// Path is an RFC 6901 JSON Pointer into the submitted spec ("" is the root),
-// Keyword names the violated constraint, and Message is a curated sentence.
-// Violations never echo raw validator-library output or submitted values.
-type SpecViolation struct {
-	Path    string `json:"path"`
-	Keyword string `json:"keyword"`
-	Message string `json:"message"`
-}
+// SpecViolation is one sanitized, client-safe spec-contract violation. It
+// aliases the neutral violation vocabulary so concrete ResourceTypes never
+// need to import this package to author violations.
+type SpecViolation = resourcecontract.Violation
+
+// ResourceContract is the developer-facing contract interface consumed by the
+// application. It aliases the neutral shared vocabulary owned by the
+// resourcecontract package; concrete ResourceType implementations satisfy it
+// structurally and never import this package.
+type ResourceContract = resourcecontract.Contract
 
 // InvalidSpecError carries the structured violations that caused admission to
 // reject a ResourceSpec. It never contains implementation internals.
@@ -42,17 +43,7 @@ type InvalidSpecError struct {
 // keyword, then message. Every violation producer applies this order so
 // repeated validations of identical input always agree.
 func SortSpecViolations(violations []SpecViolation) {
-	sort.Slice(violations, func(i, j int) bool {
-		left, right := violations[i], violations[j]
-		switch {
-		case left.Path != right.Path:
-			return left.Path < right.Path
-		case left.Keyword != right.Keyword:
-			return left.Keyword < right.Keyword
-		default:
-			return left.Message < right.Message
-		}
-	})
+	resourcecontract.SortViolations(violations)
 }
 
 // NewInvalidSpecError normalizes raw violations into the stable public shape:
@@ -83,34 +74,21 @@ func (e *InvalidSpecError) Error() string {
 
 func (e *InvalidSpecError) Is(target error) bool { return target == ErrInvalidResourceSpec }
 
-// ResourceContract is the consumer-owned developer-facing behavior the
-// application needs from a ResourceType. Concrete implementations satisfy it
-// structurally; the application never imports them. It exposes only
-// developer-intent concepts: identity, display metadata, contract
-// capabilities, the domain lifecycle type, spec validation, update-transition
-// validation, and the schema document used for discovery. Provisioner
-// selection and platform state have no representation here.
-type ResourceContract interface {
-	Ref() domain.ResourceTypeRef
-	DisplayName() string
-	Description() string
-	Capabilities() []domain.Capability
-	Domain() domain.ResourceType
-	ValidateSpec(domain.ResourceSpec) error
-	// ValidateUpdate reports whether transitioning a Resource from oldSpec to
-	// newSpec is legal under the developer contract. A schema-valid spec can
-	// still be an illegal transition; contracts own that distinction. The
-	// application enforces it synchronously during update admission, before
-	// any durable effect.
-	ValidateUpdate(oldSpec, newSpec domain.ResourceSpec) error
-	SpecSchema() json.RawMessage
+// invalidSpecFromContract converts a neutral producer-side rejection into the
+// bounded public shape. Response bounding — deduplication happened at the
+// producer, capping happens here — is consuming-application policy.
+func invalidSpecFromContract(rejection *resourcecontract.ValidationError) *InvalidSpecError {
+	capped := NewInvalidSpecError(rejection.TypeRef, rejection.Violations)
+	return &InvalidSpecError{TypeRef: capped.TypeRef, Violations: capped.Violations, Truncated: capped.Truncated}
 }
 
 // ResourceTypeCatalog answers "what developer contracts exist?". Provisioner
-// selection remains a separate concern on ProvisionerSelector.
+// selection remains a separate concern on ProvisionerSelector. Contracts are
+// expressed through the neutral shared interface so concrete registries
+// satisfy this port structurally without importing application.
 type ResourceTypeCatalog interface {
-	Get(context.Context, domain.ResourceTypeRef) (ResourceContract, error)
-	List(context.Context) ([]ResourceContract, error)
+	Get(context.Context, domain.ResourceTypeRef) (resourcecontract.Contract, error)
+	List(context.Context) ([]resourcecontract.Contract, error)
 }
 
 // GetResourceType reads one registered developer contract for discovery.
@@ -130,6 +108,22 @@ func (s *Service) ListResourceTypes(ctx context.Context) ([]ResourceContract, er
 	return s.Types.List(ctx)
 }
 
+// asContractRejection reports whether err is an expected contract rejection
+// and returns its bounded public form. Producer rejections arrive through the
+// neutral ValidationError channel; legacy in-test producers may still supply
+// the application-shaped error directly. Any other error is unexpected.
+func asContractRejection(err error) (*InvalidSpecError, bool) {
+	var neutral *resourcecontract.ValidationError
+	if errors.As(err, &neutral) && neutral != nil {
+		return invalidSpecFromContract(neutral), true
+	}
+	var invalid *InvalidSpecError
+	if errors.As(err, &invalid) && invalid != nil {
+		return invalid, true
+	}
+	return nil, false
+}
+
 // validateCommandSpec enforces the admission boundary: a spec is validated
 // against its ResourceType contract before any lifecycle or persistence work.
 // Validation is a pure predicate; it performs no defaulting, normalization,
@@ -139,8 +133,7 @@ func validateCommandSpec(contract ResourceContract, spec domain.ResourceSpec) er
 	if err == nil {
 		return nil
 	}
-	var invalid *InvalidSpecError
-	if errors.As(err, &invalid) {
+	if invalid, ok := asContractRejection(err); ok {
 		return invalid
 	}
 	return fmt.Errorf("resource type spec validation failed unexpectedly: %w", err)
@@ -156,8 +149,7 @@ func validateCommandTransition(contract ResourceContract, oldSpec, newSpec domai
 	if err == nil {
 		return nil
 	}
-	var invalid *InvalidSpecError
-	if errors.As(err, &invalid) {
+	if invalid, ok := asContractRejection(err); ok {
 		return invalid
 	}
 	return fmt.Errorf("resource type transition validation failed unexpectedly: %w", err)

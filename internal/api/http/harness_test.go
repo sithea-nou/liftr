@@ -31,6 +31,7 @@ type fixture struct {
 	service  *application.Service
 	store    *applicationfake.Store
 	resolver *applicationfake.Resolver
+	catalog  application.ResourceTypeCatalog
 	ref      application.ProvisionerRef
 }
 
@@ -70,6 +71,7 @@ func newFixtureWithParts(t *testing.T, store *applicationfake.Store, catalog app
 		service:  service,
 		store:    store,
 		resolver: resolver,
+		catalog:  catalog,
 		ref:      ref,
 	}
 }
@@ -168,7 +170,7 @@ func (f *fixture) createResource(t *testing.T, id string, spec map[string]any) *
 // their terminal state, mirroring production's asynchronous completion.
 func (f *fixture) drainWorker(t *testing.T) {
 	t.Helper()
-	instance, err := worker.New(f.store, f.resolver)
+	instance, err := worker.NewWithCatalog(f.store, f.resolver, f.catalog)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,9 +17,20 @@ import (
 	"github.com/sithea-nou/liftr/internal/provisioning"
 )
 
+// OutputMappingSource is implemented by provisioners that declare a private,
+// immutable output-mapping identity for their create/update executions. The
+// worker persists the declared identity on the execution at the dispatch
+// claim, before any provider work; recovery resolves decoders through that
+// persisted identity and never through whatever registration happens to be
+// current after a restart.
+type OutputMappingSource interface {
+	OutputMappingRef(resourceType domain.ResourceTypeRef, capability domain.Capability) string
+}
+
 type Worker struct {
 	Transactions application.TransactionRunner
 	Resolver     application.ProvisionerResolver
+	Types        application.ResourceTypeCatalog
 	Lifecycle    lifecycle.Engine
 	Lease        time.Duration
 	RetryBase    time.Duration
@@ -27,10 +38,17 @@ type Worker struct {
 }
 
 func New(transactions application.TransactionRunner, resolver application.ProvisionerResolver) (*Worker, error) {
+	return NewWithCatalog(transactions, resolver, nil)
+}
+
+// NewWithCatalog composes a worker with access to the developer-contract
+// catalog. The catalog validates provider output candidates before any value
+// can be published; without it only types without output contracts complete.
+func NewWithCatalog(transactions application.TransactionRunner, resolver application.ProvisionerResolver, types application.ResourceTypeCatalog) (*Worker, error) {
 	if transactions == nil || resolver == nil {
 		return nil, fmt.Errorf("worker dependencies are required")
 	}
-	return &Worker{Transactions: transactions, Resolver: resolver, Lease: time.Minute, RetryBase: time.Second, Clock: time.Now}, nil
+	return &Worker{Transactions: transactions, Resolver: resolver, Types: types, Lease: time.Minute, RetryBase: time.Second, Clock: time.Now}, nil
 }
 
 // RunOnce recovers one ambiguous expired Dispatch or processes one claimable
@@ -397,6 +415,14 @@ func (w *Worker) prepareDispatch(ctx context.Context, message application.Outbox
 		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptPending); err != nil {
 			return err
 		}
+		// The durable output-mapping identity is bound here, before any
+		// provider work, and never changes afterwards. Recovery must decode
+		// outputs through exactly this identity.
+		if execution.OutputMappingRef == "" {
+			if source, ok := provider.(OutputMappingSource); ok {
+				execution.OutputMappingRef = source.OutputMappingRef(execution.ResourceType, execution.Capability)
+			}
+		}
 		execution.State = application.AttemptDispatching
 		if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
 			return err
@@ -457,7 +483,9 @@ func (w *Worker) recordDispatch(ctx context.Context, message application.OutboxM
 				return err
 			}
 			return tx.Outbox().Enqueue(ctx, observe)
-		case application.SubmissionOutcomeRejected, application.SubmissionOutcomeSucceeded, application.SubmissionOutcomeFailed:
+		case application.SubmissionOutcomeSucceeded:
+			return w.finishSuccessInTx(ctx, tx, message, execution, prepared.version, *finish, observedAt, submission.Observation.Outputs)
+		case application.SubmissionOutcomeRejected, application.SubmissionOutcomeFailed:
 			return w.finishOperation(ctx, tx, message, execution, prepared.version, *finish, observedAt)
 		default:
 			return fmt.Errorf("invalid submission outcome %d", outcome)
@@ -525,6 +553,26 @@ func (w *Worker) recordObservation(ctx context.Context, message application.Outb
 		if err != nil {
 			return err
 		}
+		// Backend success is already durable and only the output dimension is
+		// outstanding. Re-drive extraction through the provider's observation
+		// of existing state — never a re-execution — with evidence timestamps
+		// pinned to the persisted terminal instant so repeated observations of
+		// an unchanged backend are accepted while resolution advances.
+		if execution.State == application.AttemptSucceeded && execution.OutputResolution == application.OutputResolutionPending {
+			operation, opErr := tx.Operations().GetOperation(ctx, execution.OperationID)
+			if opErr != nil {
+				return opErr
+			}
+			if operation.Operation.IsTerminal() {
+				return application.ErrConcurrencyConflict
+			}
+			if observation.Correlation != provisioning.RequestCorrelationFound || observation.Execution == nil || observation.Execution.State != provisioning.ExecutionStateSucceeded {
+				return fmt.Errorf("%w: pending-output observation is not positively correlated terminal success", lifecycle.ErrInvalidTransition)
+			}
+			return w.finishSuccessInTx(ctx, tx, message, execution, execution.Version,
+				application.Finish{Succeeded: true, Reason: "ObservationSucceeded", Facts: observation.Resource},
+				execution.LastObservedAt, observation.Outputs)
+		}
 		observedAt := w.observedAt(observation.ObservedAt)
 		execution, attempt, outcome, finish, err := application.InterpretObservation(execution, attempt, observation, observedAt)
 		if err != nil {
@@ -572,7 +620,9 @@ func (w *Worker) recordObservation(ctx context.Context, message application.Outb
 				return err
 			}
 			return tx.Outbox().Enqueue(ctx, next)
-		case application.ObservationOutcomeSucceeded, application.ObservationOutcomeFailed:
+		case application.ObservationOutcomeSucceeded:
+			return w.finishSuccessInTx(ctx, tx, message, execution, execution.Version, *finish, observedAt, observation.Outputs)
+		case application.ObservationOutcomeFailed:
 			return w.finishOperation(ctx, tx, message, execution, execution.Version, *finish, observedAt)
 		default:
 			return fmt.Errorf("invalid observation outcome %d", outcome)
@@ -646,6 +696,7 @@ func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork,
 	if err != nil {
 		return err
 	}
+	at = alignEvidenceTimeline(at, &execution, resource)
 	result, err := application.BuildFinishEvidence(w.Lifecycle, operation.Operation, resource.Resource, resource.Status, finish, at)
 	if err != nil {
 		return err
@@ -653,6 +704,140 @@ func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork,
 	resource.Status = result.Status
 	if err := tx.Resources().SaveResource(ctx, resource, resource.Version); err != nil {
 		return err
+	}
+	if err := tx.Operations().SaveOperation(ctx, application.OperationRecord{Operation: result.Operation}, operation.Version); err != nil {
+		return err
+	}
+	if err := tx.Events().Append(ctx, result.Event); err != nil {
+		return err
+	}
+	if err := tx.Executions().SaveExecution(ctx, execution, expectedExecutionVersion); err != nil {
+		return err
+	}
+	return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "TerminalExecution")
+}
+
+// finishSuccessInTx applies a positively correlated backend success inside an
+// already-fenced transaction. The output dimension is resolved against the
+// developer contract before any lifecycle completion:
+//
+//   - Publish: validated values persist atomically with reconciliation success.
+//   - Reject: the postcondition failure fails the operation while backend
+//     success evidence stays intact.
+//   - Defer: backend success persists with Pending resolution; extraction is
+//     re-driven through Observe without re-executing the backend.
+//   - None: no outputs are declared; completion is plain.
+func (w *Worker) finishSuccessInTx(ctx context.Context, tx application.UnitOfWork, message application.OutboxMessage, execution application.ProvisioningExecutionRecord, expectedExecutionVersion uint64, finish application.Finish, at time.Time, outputs *provisioning.OutputEvidence) error {
+	operation, err := tx.Operations().GetOperation(ctx, execution.OperationID)
+	if err != nil {
+		return err
+	}
+	if operation.Operation.IsTerminal() {
+		return fmt.Errorf("%w: cannot complete a terminal operation", lifecycle.ErrInvalidTransition)
+	}
+	resource, err := tx.Resources().GetResource(ctx, operation.Operation.ResourceID())
+	if err != nil {
+		return err
+	}
+
+	var plan application.OutputPlan
+	switch {
+	case w.Types == nil && outputs == nil:
+		plan = application.OutputPlan{Action: application.OutputPlanNone}
+	case w.Types == nil:
+		return fmt.Errorf("output evidence requires a composed resource type catalog")
+	default:
+		contract, contractErr := w.Types.Get(ctx, execution.ResourceType)
+		if contractErr != nil {
+			return fmt.Errorf("resource type catalog unavailable for output validation: %w", contractErr)
+		}
+		plan, err = application.PlanTerminalOutputs(contract, execution.Capability, outputs, execution.TargetGeneration, at)
+		if err != nil {
+			return err
+		}
+	}
+
+	if plan.Action == application.OutputPlanDefer {
+		execution.State = application.AttemptSucceeded
+		execution.OutputResolution = application.OutputResolutionPending
+		next := scheduleObserve(&execution, w.RetryBase)
+		if err := tx.Executions().SaveExecution(ctx, execution, expectedExecutionVersion); err != nil {
+			return err
+		}
+		if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "OutputsPending"); err != nil {
+			return err
+		}
+		return tx.Outbox().Enqueue(ctx, next)
+	}
+
+	if plan.Action == application.OutputPlanReject {
+		rejection := application.Finish{Succeeded: false, Reason: plan.Failure.Reason, Message: plan.Failure.Message, Facts: domain.ObservedFacts{}}
+		result, err := application.BuildFinishEvidence(w.Lifecycle, operation.Operation, resource.Resource, resource.Status, rejection, at)
+		if err != nil {
+			return err
+		}
+		execution.State = application.AttemptSucceeded
+		execution.OutputResolution = application.OutputResolutionRejected
+		execution.OutputFailureReason = plan.Failure.Reason
+		execution.OutputFailureMessage = plan.Failure.Message
+		resource.Status = result.Status
+		if err := tx.Resources().SaveResource(ctx, resource, resource.Version); err != nil {
+			return err
+		}
+		if err := tx.Operations().SaveOperation(ctx, application.OperationRecord{Operation: result.Operation}, operation.Version); err != nil {
+			return err
+		}
+		if err := tx.Events().Append(ctx, result.Event); err != nil {
+			return err
+		}
+		if err := tx.Executions().SaveExecution(ctx, execution, expectedExecutionVersion); err != nil {
+			return err
+		}
+		return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "OutputPostconditionRejected")
+	}
+
+	var publishRecord *application.ResourceOutputRecord
+	if plan.Action == application.OutputPlanPublish {
+		contract, contractErr := w.Types.Get(ctx, execution.ResourceType)
+		if contractErr != nil {
+			return fmt.Errorf("resource type catalog unavailable for output provenance: %w", contractErr)
+		}
+		contractDigest, digestErr := application.OutputContractDigest(contract.OutputContract())
+		if digestErr != nil {
+			return digestErr
+		}
+		valuesDigest, digestErr := application.ValuesDigest(plan.Snapshot.Values())
+		if digestErr != nil {
+			return digestErr
+		}
+		publishRecord = &application.ResourceOutputRecord{
+			ResourceID:           resource.Resource.ID(),
+			ObservedGeneration:   plan.Snapshot.ObservedGeneration(),
+			OperationID:          operation.Operation.ID(),
+			Capability:           operation.Operation.Capability(),
+			OutputMappingRef:     execution.OutputMappingRef,
+			OutputContractDigest: contractDigest,
+			Values:               plan.Snapshot,
+			ValuesDigest:         valuesDigest,
+		}
+		execution.OutputResolution = application.OutputResolutionPublished
+	} else {
+		execution.OutputResolution = application.OutputResolutionNone
+	}
+
+	at = alignEvidenceTimeline(at, &execution, resource)
+	result, err := application.BuildFinishEvidence(w.Lifecycle, operation.Operation, resource.Resource, resource.Status, finish, at)
+	if err != nil {
+		return err
+	}
+	resource.Status = result.Status
+	if err := tx.Resources().SaveResource(ctx, resource, resource.Version); err != nil {
+		return err
+	}
+	if publishRecord != nil {
+		if err := tx.Outputs().SaveResourceOutputs(ctx, *publishRecord); err != nil {
+			return err
+		}
 	}
 	if err := tx.Operations().SaveOperation(ctx, application.OperationRecord{Operation: result.Operation}, operation.Version); err != nil {
 		return err
@@ -727,7 +912,8 @@ func executionRequest(execution application.ProvisioningExecutionRecord) provisi
 
 func observationRequest(execution application.ProvisioningExecutionRecord) provisioning.ObservationRequest {
 	return provisioning.ObservationRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType,
-		Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle}
+		Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration, Handle: execution.Handle,
+		OutputMappingRef: execution.OutputMappingRef}
 }
 
 func observeCompletionReason(observation provisioning.ExecutionObservation) string {
@@ -756,6 +942,25 @@ func (w *Worker) backoff(attempt int) time.Duration {
 		attempt = 10
 	}
 	return w.RetryBase * time.Duration(1<<(attempt-1))
+}
+
+// alignEvidenceTimeline pins correlated terminal evidence onto Liftr's
+// monotonic timeline. Backend clocks can be coarser than Liftr's own (for
+// example second-granular history end times), so provider evidence that
+// predates state Liftr durably advanced AFTER launching this very execution
+// is lifted to the persisted frontier instead of being rejected as regressive.
+// The execution's effective observation time moves with it so completion
+// timestamps and evidence stay consistent across restarts and replays.
+func alignEvidenceTimeline(at time.Time, execution *application.ProvisioningExecutionRecord, resource application.ResourceRecord) time.Time {
+	frontier := resource.Status.UpdatedAt()
+	if resource.Resource.UpdatedAt().After(frontier) {
+		frontier = resource.Resource.UpdatedAt()
+	}
+	if at.Before(frontier) {
+		at = frontier
+		execution.LastObservedAt = at
+	}
+	return at
 }
 
 func newToken() (string, error) {

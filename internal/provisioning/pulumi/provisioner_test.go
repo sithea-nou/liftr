@@ -5,6 +5,7 @@ package pulumi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -377,12 +378,13 @@ func (w *fakeWorkspace) CreateStack(_ context.Context, name string) (automationS
 }
 
 type fakeStack struct {
-	summary      updateSummary
-	pages        map[int][]updateSummary
-	upCalls      int
-	destroyCalls int
-	historyCalls int
-	runErr       error
+	summary        updateSummary
+	pages          map[int][]updateSummary
+	upCalls        int
+	destroyCalls   int
+	historyCalls   int
+	runErr         error
+	selectedOutput func(string) []byte
 }
 
 func (s *fakeStack) Up(_ context.Context, message string) (updateSummary, error) {
@@ -403,3 +405,11 @@ func (s *fakeStack) History(_ context.Context, _, page int) ([]updateSummary, er
 }
 
 func (*fakeStack) Info(context.Context) (stackInfo, error) { return stackInfo{}, nil }
+
+// SelectedOutput returns the configured export payload; nil by default.
+func (s *fakeStack) SelectedOutput(_ context.Context, name string) ([]byte, error) {
+	if s.selectedOutput == nil {
+		return nil, fmt.Errorf("selected output %q could not be read", name)
+	}
+	return s.selectedOutput(name), nil
+}

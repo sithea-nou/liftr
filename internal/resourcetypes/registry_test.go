@@ -10,6 +10,7 @@ import (
 
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/resourcecontract"
 	"github.com/sithea-nou/liftr/internal/resourcetypes"
 )
 
@@ -142,10 +143,10 @@ func TestRegistryEmptyList(t *testing.T) {
 }
 
 // TestRegistrySatisfiesApplicationPort pins structural satisfaction of the
-// consumer-owned application port.
+// consumer-owned application port through the neutral contract vocabulary.
 func TestRegistrySatisfiesApplicationPort(t *testing.T) {
 	var catalog application.ResourceTypeCatalog = (*resourcetypes.Registry)(nil)
 	_ = catalog
-	var contract application.ResourceContract = resourcetypes.Contract{}
+	var contract resourcecontract.Contract = resourcetypes.Contract{}
 	_ = contract
 }

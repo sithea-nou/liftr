@@ -67,6 +67,7 @@ func (r *repositories) Executions() application.ExecutionRepository             
 func (r *repositories) Idempotency() application.IdempotencyRepository              { return r }
 func (r *repositories) SubmissionAttempts() application.SubmissionAttemptRepository { return r }
 func (r *repositories) Outbox() application.OutboxRepository                        { return r }
+func (r *repositories) Outputs() application.ResourceOutputRepository               { return r }
 
 func translateError(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {

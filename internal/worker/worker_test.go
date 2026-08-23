@@ -342,26 +342,46 @@ func TestContradictoryNotFoundDoesNotCreateAttempt(t *testing.T) {
 	}
 }
 
-func TestDispatchResultPersistenceFailureRecoversThroughObserve(t *testing.T) {
+// TestRegressiveBackendTimestampStillCompletesWithAlignedTimeline pins the
+// M10 refinement of mixed-clock handling: positively correlated terminal
+// success whose backend timestamp regresses below Liftr's own frontier (for
+// example second-granular history times) completes reconciliation immediately.
+// The completion instant is lifted onto the persisted frontier, the execution
+// evidence dimension moves with it, and the backend is never re-executed.
+// Before ADR-0011 this shape was quarantined as a dispatch-result anomaly and
+// recovered through a follow-up observation; that detour stranded operations
+// whenever follow-up scheduling lost the race against quiescence detection.
+func TestRegressiveBackendTimestampStillCompletesWithAlignedTimeline(t *testing.T) {
 	provider := &staleTerminalProvider{}
 	service, store, instance := newHarness(t, provider)
 	instance.RetryBase = 0
-	command := createCommand(t, "resource-result-failure", "operation-result-failure")
+	command := createCommand(t, "resource-aligned-completion", "operation-aligned-completion")
 	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
 		t.Fatal(err)
 	}
-	for range 4 {
-		if _, err := instance.RunOnce(context.Background()); err != nil {
-			t.Fatal(err)
-		}
+	drain(t, instance, 8)
+
+	record, err := store.GetOperation(context.Background(), command.OperationID)
+	if err != nil || record.Operation.State() != domain.OperationStateSucceeded {
+		failure, _ := record.Operation.Failure()
+		t.Fatalf("operation error=%v state=%s failure=%+v", err, record.Operation.State(), failure)
 	}
 	execution, err := store.GetExecution(context.Background(), command.OperationID)
-	if err != nil || execution.State != application.AttemptUnknown || execution.LastFailure == nil || execution.LastFailure.Reason != "DispatchResultPersistenceFailed" {
-		t.Fatalf("execution error=%v state=%s failure=%v", err, execution.State, execution.LastFailure)
+	if err != nil || execution.State != application.AttemptSucceeded {
+		t.Fatalf("execution error=%v state=%s", err, execution.State)
 	}
-	attempt, err := store.GetSubmissionAttempt(context.Background(), command.OperationID, 1)
-	if err != nil || attempt.State != application.SubmissionAttemptUnknown {
-		t.Fatalf("attempt error=%v state=%s", err, attempt.State)
+	if !record.Operation.CompletedAt().Equal(execution.LastObservedAt) {
+		t.Fatalf("completion %v diverges from evidence %v", record.Operation.CompletedAt(), execution.LastObservedAt)
+	}
+	view := readView(t, store, "resource-aligned-completion")
+	if view.Resource.Status.State() != domain.ResourceStateReady {
+		t.Fatalf("state = %s", view.Resource.Status.State())
+	}
+	if got := execution.Submission.Observation.ObservedAt; !got.Before(view.Resource.Status.UpdatedAt()) && !got.Equal(view.Resource.Status.UpdatedAt()) {
+		t.Logf("backend evidence time %v vs aligned completion %v", got, view.Resource.Status.UpdatedAt())
+	}
+	if provider.submissionCalls != 1 {
+		t.Fatalf("alignment triggered %d submissions", provider.submissionCalls)
 	}
 }
 
@@ -920,10 +940,11 @@ func (*contradictoryProvider) Observe(context.Context, provisioning.ObservationR
 		Execution: &provisioning.Execution{State: provisioning.ExecutionStateRunning}}, nil
 }
 
-type staleTerminalProvider struct{}
+type staleTerminalProvider struct{ submissionCalls int }
 
 func (*staleTerminalProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
-func (*staleTerminalProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+func (p *staleTerminalProvider) Submit(_ context.Context, _ provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	p.submissionCalls++
 	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
 		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts(), ObservedAt: testTime.Add(-time.Hour)}}, nil
 }

@@ -22,17 +22,37 @@ type resourceTypeSummaryDTO struct {
 	Href         string   `json:"href"`
 }
 
+// resourceTypeOutputFieldDTO describes one declared output field of a
+// ResourceType. jsonType is one of the flat scalar types; requiredWhenReady
+// means a successfully reconciled generation must publish this field.
+type resourceTypeOutputFieldDTO struct {
+	Name              string `json:"name"`
+	JSONType          string `json:"jsonType"`
+	RequiredWhenReady bool   `json:"requiredWhenReady"`
+}
+
+// resourceTypeOutputContractDTO is the developer-consumable output contract of
+// one ResourceType version. It declares exact names and types; it never
+// describes provider implementation data, and secret material has no
+// representation in M10.
+type resourceTypeOutputContractDTO struct {
+	Fields []resourceTypeOutputFieldDTO `json:"fields"`
+}
+
 // resourceTypeDTO is the detailed discovery representation. specSchema embeds
 // the registered JSON Schema 2020-12 document verbatim; its keywords are
 // governed by the JSON Schema specification, not by this API's envelope.
+// outputContract appears only for ResourceTypes that declare realized values;
+// list summaries never embed either document.
 type resourceTypeDetailDTO struct {
-	Name         string          `json:"name"`
-	Version      string          `json:"version"`
-	DisplayName  string          `json:"displayName"`
-	Description  string          `json:"description"`
-	Capabilities []string        `json:"capabilities"`
-	Href         string          `json:"href"`
-	SpecSchema   json.RawMessage `json:"specSchema"`
+	Name           string                         `json:"name"`
+	Version        string                         `json:"version"`
+	DisplayName    string                         `json:"displayName"`
+	Description    string                         `json:"description"`
+	Capabilities   []string                       `json:"capabilities"`
+	Href           string                         `json:"href"`
+	SpecSchema     json.RawMessage                `json:"specSchema"`
+	OutputContract *resourceTypeOutputContractDTO `json:"outputContract,omitempty"`
 }
 
 type resourceTypeListDTO struct {
@@ -63,7 +83,7 @@ func newListDTO(contracts []application.ResourceContract) resourceTypeListDTO {
 
 func newResourceTypeDetailDTO(contract application.ResourceContract) resourceTypeDetailDTO {
 	ref := contract.Ref()
-	return resourceTypeDetailDTO{
+	detail := resourceTypeDetailDTO{
 		Name:         ref.Name,
 		Version:      ref.Version,
 		DisplayName:  contract.DisplayName(),
@@ -72,6 +92,18 @@ func newResourceTypeDetailDTO(contract application.ResourceContract) resourceTyp
 		Href:         resourceTypeHref(ref),
 		SpecSchema:   append(json.RawMessage(nil), contract.SpecSchema()...),
 	}
+	if declared := contract.OutputContract(); declared != nil {
+		outputContract := &resourceTypeOutputContractDTO{Fields: []resourceTypeOutputFieldDTO{}}
+		for _, field := range declared.Fields() {
+			outputContract.Fields = append(outputContract.Fields, resourceTypeOutputFieldDTO{
+				Name:              field.Name,
+				JSONType:          string(field.JSONType),
+				RequiredWhenReady: field.RequiredWhenReady,
+			})
+		}
+		detail.OutputContract = outputContract
+	}
+	return detail
 }
 
 func capabilityNames(contract application.ResourceContract) []string {

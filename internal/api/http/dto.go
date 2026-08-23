@@ -50,6 +50,17 @@ type latestOperationRefDTO struct {
 	Href             string `json:"href"`
 }
 
+// resourceOutputsDTO is the public realized-value envelope. observedGeneration
+// identifies the desired generation whose successful reconciliation produced
+// the values; it is an explicit freshness association, not a claim that the
+// values describe current runtime health. Values are flat non-secret scalars
+// whose exact names and types are declared by the ResourceType's output
+// contract in discovery.
+type resourceOutputsDTO struct {
+	ObservedGeneration uint64         `json:"observedGeneration"`
+	Values             map[string]any `json:"values"`
+}
+
 // resourceDTO is the public v1 Resource representation. It carries desired
 // state, normalized observed state, and a monitor link for the latest
 // Operation. Internal concepts such as phases, provisioner references,
@@ -63,6 +74,7 @@ type resourceDTO struct {
 	Spec            map[string]any         `json:"spec"`
 	Status          resourceStatusDTO      `json:"status"`
 	LatestOperation *latestOperationRefDTO `json:"latestOperation,omitempty"`
+	Outputs         *resourceOutputsDTO    `json:"outputs,omitempty"`
 	CreatedAt       time.Time              `json:"createdAt"`
 	UpdatedAt       time.Time              `json:"updatedAt"`
 }
@@ -95,7 +107,7 @@ func instant(at time.Time) *time.Time {
 	return &value
 }
 
-func newResourceDTO(record application.ResourceRecord, latest *domain.Operation) resourceDTO {
+func newResourceDTO(record application.ResourceRecord, latest *domain.Operation, outputs *domain.ResourceOutputs) resourceDTO {
 	resource := record.Resource
 	resourceType := resource.Type()
 	owner := resource.Owner()
@@ -129,6 +141,12 @@ func newResourceDTO(record application.ResourceRecord, latest *domain.Operation)
 	if latest != nil {
 		ref := newLatestOperationRef(*latest)
 		dto.LatestOperation = &ref
+	}
+	if outputs != nil {
+		dto.Outputs = &resourceOutputsDTO{
+			ObservedGeneration: outputs.ObservedGeneration(),
+			Values:             outputs.Values(),
+		}
 	}
 	return dto
 }

@@ -66,9 +66,26 @@ func TestOpenAPIModelsPublicSchemas(t *testing.T) {
 	schemas := componentSchemas(t, document)
 
 	resourceProperties := propertyNames(t, schemas["Resource"])
-	wantResource := []string{"id", "type", "owner", "generation", "spec", "status", "latestOperation", "createdAt", "updatedAt"}
+	wantResource := []string{"id", "type", "owner", "generation", "spec", "status", "latestOperation", "outputs", "createdAt", "updatedAt"}
 	if strings.Join(resourceProperties, ",") != strings.Join(sorted(wantResource), ",") {
 		t.Fatalf("Resource properties = %v, want %v", resourceProperties, wantResource)
+	}
+
+	// The outputs envelope and the discovery output contract must be modeled
+	// explicitly; the values payload stays open because exact names and types
+	// are declared per ResourceType in discovery.
+	for _, name := range []string{"ResourceOutputs", "ResourceTypeOutputContract", "ResourceTypeOutputField"} {
+		if _, ok := schemas[name]; !ok {
+			t.Errorf("component schema %q is not modeled explicitly", name)
+		}
+	}
+	outputEnvelope := propertyNames(t, schemas["ResourceOutputs"])
+	if strings.Join(outputEnvelope, ",") != strings.Join(sorted([]string{"observedGeneration", "values"}), ",") {
+		t.Fatalf("ResourceOutputs properties = %v", outputEnvelope)
+	}
+	outputValuesProperties := propertyNames(t, schemas["ResourceOutputs"].(map[string]any)["properties"].(map[string]any)["values"])
+	if len(outputValuesProperties) != 0 {
+		t.Fatalf("OutputValues must stay open-ended without fixed properties, got %v", outputValuesProperties)
 	}
 
 	operationProperties := propertyNames(t, schemas["Operation"])

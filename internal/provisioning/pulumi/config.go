@@ -49,6 +49,16 @@ type Input struct {
 
 type InputEncoder func(Input) ([]byte, error)
 
+// OutputMapping declares the private, immutable output-mapping identity for
+// one program's create/update executions. Ref is persisted on every execution
+// at dispatch time; recovery resolves decoding through exactly that identity.
+// ExportName is the single allowlisted stack export holding the private
+// output envelope — selected retrieval only, never a full output dump.
+type OutputMapping struct {
+	Ref        string
+	ExportName string
+}
+
 type Program struct {
 	ResourceType domain.ResourceTypeRef
 	Capabilities []domain.Capability
@@ -63,6 +73,10 @@ type Program struct {
 	// does not supply cause a conclusive preflight rejection.
 	RequiredEnvironment     []string
 	SecretInputsUnsupported bool
+	// Outputs declares the realized-value mapping for create/update runs.
+	// Nil means the program publishes no developer-consumable outputs and no
+	// extraction is ever attempted.
+	Outputs *OutputMapping
 }
 
 type Config struct {
@@ -147,6 +161,11 @@ func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 		}
 		if err := validateRequiredEnvironment(program.RequiredEnvironment); err != nil {
 			return nil, err
+		}
+		if program.Outputs != nil {
+			if strings.TrimSpace(program.Outputs.Ref) == "" || strings.TrimSpace(program.Outputs.ExportName) == "" {
+				return nil, fmt.Errorf("Pulumi output mapping identity and export name are required")
+			}
 		}
 		seen := make(map[domain.Capability]struct{}, len(program.Capabilities))
 		for _, capability := range program.Capabilities {

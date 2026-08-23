@@ -278,7 +278,14 @@ func (Engine) Fail(
 	case domain.CapabilityUpdate:
 		state = domain.ResourceStateReady
 	case domain.CapabilityDelete:
+		// A failed delete restores the existence state that preceded the
+		// delete request. A previously Ready Resource returns to Ready; a
+		// cleanup delete of a Failed Resource stays Failed — the backend may
+		// still exist and the Resource was never usable.
 		state = domain.ResourceStateReady
+		if ready := findCondition(conditions, ConditionReady); ready == nil || ready.Status() != domain.ConditionStatusTrue {
+			state = domain.ResourceStateFailed
+		}
 		conditions, err = setCondition(conditions, ConditionDeleted, domain.ConditionStatusFalse, reason, message, operation.TargetGeneration(), failedAt)
 	default:
 		return Result{}, fmt.Errorf("%w: capability %q has no failure semantics", ErrInvalidTransition, operation.Capability())
@@ -373,6 +380,14 @@ func validateRequestPrecondition(resource domain.Resource, status domain.Resourc
 		}
 	case domain.CapabilityDelete:
 		if status.State() == domain.ResourceStateReady {
+			return nil
+		}
+		// Cleanup delete: a Failed Resource may still own managed backend
+		// state — for example a create whose infrastructure succeeded while
+		// required outputs were rejected. Destruction is the only safe way
+		// out, so delete is admissible from Failed. A conclusively absent
+		// managed target satisfies destruction; ambiguity stays ambiguous.
+		if status.State() == domain.ResourceStateFailed {
 			return nil
 		}
 	}

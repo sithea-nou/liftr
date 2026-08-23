@@ -71,12 +71,27 @@ func EvidenceFresh(persistedObservedAt, evidenceAt time.Time) bool {
 	return persistedObservedAt.IsZero() || evidenceAt.After(persistedObservedAt)
 }
 
+// ConclusiveManagedAbsence reports whether a positively uncorrelated,
+// pre-acceptance NotFound proves that the managed target of a cleanup delete
+// is already absent. It requires every ambiguity guard at once: delete
+// capability, fresh NotFound correlation, a conclusive NotFound execution
+// failure, and no confirmed acceptance. Anything less — Unknown evidence,
+// post-launch loss, or an accepted attempt — stays ambiguous and can never
+// satisfy destruction.
+func ConclusiveManagedAbsence(capability domain.Capability, correlation provisioning.RequestCorrelation, execution *provisioning.Execution, acceptanceConfirmed bool) bool {
+	return capability == domain.CapabilityDelete &&
+		correlation == provisioning.RequestCorrelationNotFound &&
+		!acceptanceConfirmed &&
+		execution != nil && execution.State == provisioning.ExecutionStateFailed &&
+		execution.Failure != nil && execution.Failure.Kind == provisioning.FailureNotFound
+}
+
 // InterpretSubmission interprets a provider submission against the leased
 // execution and attempt without touching storage. The worker persists the
 // returned snapshots and, for terminal outcomes, builds the finish evidence.
 func InterpretSubmission(execution ProvisioningExecutionRecord, attempt SubmissionAttemptRecord, submission provisioning.Submission, submitErr error, observedAt time.Time) (ProvisioningExecutionRecord, SubmissionAttemptRecord, SubmissionOutcome, *Finish, error) {
 	backendExecution := submission.Observation.Execution
-	if backendExecution != nil && !submission.Observation.ObservedAt.IsZero() && !EvidenceFresh(execution.LastObservedAt, observedAt) {
+	if backendExecution != nil && providerEvidenceStale(execution, submission.Observation.ObservedAt) {
 		execution.State = AttemptUnknown
 		execution.Correlation = provisioning.RequestCorrelationUnknown
 		execution.LastFailure = &provisioning.ExecutionFailure{Kind: provisioning.FailureUnknown, Reason: "StaleSubmissionEvidence", Message: "submission evidence does not advance the persisted observation timeline"}
@@ -109,6 +124,7 @@ func InterpretSubmission(execution ProvisioningExecutionRecord, attempt Submissi
 	if backendExecution != nil && EvidenceFresh(execution.LastObservedAt, observedAt) {
 		execution.LastObservedAt = observedAt
 	}
+	acceptProviderEvidence(&execution, submission.Observation.ObservedAt)
 	validState := backendExecution != nil && ValidExecutionState(backendExecution.State)
 	preflightRejected := validState && backendExecution.State == provisioning.ExecutionStateFailed && backendExecution.Failure != nil && submission.Observation.Correlation == provisioning.RequestCorrelationNotFound
 	acceptedRequest := validState && submission.Observation.Correlation == provisioning.RequestCorrelationFound
@@ -124,6 +140,20 @@ func InterpretSubmission(execution ProvisioningExecutionRecord, attempt Submissi
 	}
 	attempt.ResolvedAt = observedAt
 	if preflightRejected {
+		// A conclusive pre-launch absence for a delete proves the destruction
+		// objective is already satisfied: there is no managed target. This is
+		// the only path that completes a lifecycle from NotFound evidence, and
+		// it requires the full ConclusiveManagedAbsence guard.
+		if ConclusiveManagedAbsence(execution.Capability, provisioning.RequestCorrelationNotFound, backendExecution, execution.AcceptanceConfirmed) {
+			attempt.State = SubmissionAttemptRejected
+			attempt.Failure = ExecutionFailureFrom(nil, backendExecution)
+			execution.Correlation = provisioning.RequestCorrelationNotFound
+			execution.AcceptanceConfirmed = false
+			execution.State = AttemptSucceeded
+			return execution, attempt, SubmissionOutcomeSucceeded,
+				&Finish{Succeeded: true, Reason: ManagedTargetAbsentReason,
+					Facts: domain.ObservedFacts{Presence: domain.ResourcePresenceNotFound, Readiness: domain.ResourceReadinessUnknown, Drift: domain.ResourceDriftUnknown}}, nil
+		}
 		attempt.State = SubmissionAttemptRejected
 		attempt.Failure = ExecutionFailureFrom(nil, backendExecution)
 		execution.Correlation = provisioning.RequestCorrelationNotFound
@@ -158,7 +188,12 @@ func InterpretObservation(execution ProvisioningExecutionRecord, attempt Submiss
 	if observation.Correlation == provisioning.RequestCorrelationNotFound && observation.Execution != nil && observation.Execution.State != provisioning.ExecutionStateFailed {
 		return ProvisioningExecutionRecord{}, SubmissionAttemptRecord{}, 0, nil, fmt.Errorf("contradictory observation reports NotFound with an execution")
 	}
-	if !execution.LastObservedAt.IsZero() && !observedAt.After(execution.LastObservedAt) {
+	stale := providerEvidenceStale(execution, observation.ObservedAt)
+	if observation.ObservedAt.IsZero() && !execution.LastObservedAt.IsZero() && !observedAt.After(execution.LastObservedAt) {
+		stale = true
+	}
+	acceptProviderEvidence(&execution, observation.ObservedAt)
+	if stale {
 		return execution, attempt, ObservationOutcomeStale, nil, nil
 	}
 	if factsErr := validateObservedFacts(observation.Resource); factsErr != nil {
@@ -204,6 +239,7 @@ func InterpretObservation(execution ProvisioningExecutionRecord, attempt Submiss
 		execution.Handle = observation.Execution.Handle
 	}
 	execution.AcceptanceConfirmed = true
+	acceptProviderEvidence(&execution, observation.ObservedAt)
 	switch observation.Execution.State {
 	case provisioning.ExecutionStateAccepted, provisioning.ExecutionStateRunning, provisioning.ExecutionStateUnknown:
 		execution.State = AttemptAccepted
@@ -256,6 +292,29 @@ func sanitizeObservedFacts(facts domain.ObservedFacts) domain.ObservedFacts {
 		return domain.ObservedFacts{}
 	}
 	return facts
+}
+
+// providerEvidenceStale reports whether backend-supplied evidence regresses
+// the backend's own evidence timeline. Liftr receipt instants are a separate
+// dimension and never gate backend evidence: provider clocks may be coarser
+// than Liftr's, and a receipt recorded after a backend completion must not
+// strand later correlated observations of that same completion.
+func providerEvidenceStale(execution ProvisioningExecutionRecord, providerAt time.Time) bool {
+	if providerAt.IsZero() {
+		return false
+	}
+	return !execution.LastProviderObservedAt.IsZero() && !providerAt.After(execution.LastProviderObservedAt)
+}
+
+// acceptProviderEvidence records backend-supplied evidence time on the
+// backend dimension of the execution timeline.
+func acceptProviderEvidence(execution *ProvisioningExecutionRecord, providerAt time.Time) {
+	if providerAt.IsZero() {
+		return
+	}
+	if execution.LastProviderObservedAt.Before(providerAt) {
+		execution.LastProviderObservedAt = providerAt
+	}
 }
 
 // ValidCorrelation reports whether a provider request correlation is one of the
