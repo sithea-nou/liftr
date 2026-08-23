@@ -32,6 +32,7 @@ Liftr is in early development. The repository currently implements:
 - Platform-scoped infrastructure naming, a registration-scoped environment allowlist for provider credentials, generated-and-encrypted administrator secrets that never reach any public surface, and honest normalized observations (`Ready` means the latest desired-generation execution succeeded; drift is not yet detected).
 - Resource outputs: `PostgreSQLDatabase/v2` declares required non-secret realized values (`hostname`, `port`) as part of its immutable contract. Validated output snapshots persist per generation, are embedded in Resource representations with an explicit `outputs.observedGeneration`, and survive restarts. `PostgreSQLDatabase/v1` remains unchanged and spec-only.
 - An initial runtime composition: `liftr-server` wires durable persistence, the contract registry, the Pulumi adapter, and a ticker-driven outbox worker loop with context-driven shutdown. API serving and worker execution remain independently deployable.
+- The official `liftr` CLI ([ADR-0013](docs/adr/0013-cli-as-a-public-api-client.md)): a pure client of the public HTTP API with ResourceType discovery, generation-safe create/update/delete, Operation inspection, `--wait` polling of the authoritative monitor Operation, automatic idempotency keys with explicit replay override, JSON/text output that preserves server number representations verbatim, and stable exit codes. It consumes externally issued bearer tokens (`--token-file`, `LIFTR_TOKEN_FILE`, or `LIFTR_TOKEN`), requires HTTPS everywhere except loopback plaintext HTTP, treats server-supplied links as untrusted same-origin navigation only, and never implements login flows or persists credentials.
 - Initial tests and continuous integration.
 
 ## Future Direction
@@ -63,6 +64,23 @@ Check its health:
 ```sh
 curl http://localhost:8080/healthz
 ```
+
+Use the CLI against it. Start the server in explicit development mode, then:
+
+```sh
+go run ./cmd/liftr version
+LIFTR_TOKEN=dev go run ./cmd/liftr resource-type list
+LIFTR_TOKEN=dev go run ./cmd/liftr resource-type get PostgreSQLDatabase v2
+LIFTR_TOKEN=dev go run ./cmd/liftr resource create \
+    --id orders-db --type PostgreSQLDatabase --version v2 \
+    --owner team=payments --spec spec.json
+LIFTR_TOKEN=dev go run ./cmd/liftr resource get orders-db
+LIFTR_TOKEN=dev go run ./cmd/liftr operation get op-xxxx
+LIFTR_TOKEN=dev go run ./cmd/liftr resource update orders-db --spec new-spec.json --wait
+LIFTR_TOKEN=dev go run ./cmd/liftr resource delete orders-db
+```
+
+The CLI defaults to `http://localhost:8080` (override with `--server` or `LIFTR_SERVER`; non-loopback servers require HTTPS). Tokens are read from files or the environment and never persisted; see [ADR-0013](docs/adr/0013-cli-as-a-public-api-client.md) for the credential-handling and exit-code contract.
 
 Run all checks:
 
