@@ -154,3 +154,83 @@ func TestFreshConclusiveNotFoundIsTheOnlyResubmissionPath(t *testing.T) {
 		t.Fatal("Found correlation did not confirm acceptance")
 	}
 }
+
+// TestPresentButUncorrelatedObjectAuthorizesSafeResubmission is the M14
+// Crossplane shape for Correction 1A: the managed XR physically exists and
+// belongs to this Resource (Presence=Present) while the current Operation's
+// write provably never landed (RequestCorrelation NotFound with no
+// Execution). The existing machinery must treat exactly this combination as
+// safe resubmission evidence.
+func TestPresentButUncorrelatedObjectAuthorizesSafeResubmission(t *testing.T) {
+	execution, attempt := ambiguityFixture(t)
+	handle, err := provisioning.NewExecutionHandle("ambiguity-test-handle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, attempt, _, _, err = application.InterpretSubmission(
+		execution, attempt, provisioning.Submission{Observation: ambiguousObservation(handle)}, provisioning.ErrAmbiguousSubmission, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	presentButUncorrelated := provisioning.ExecutionObservation{
+		Correlation: provisioning.RequestCorrelationNotFound,
+		Resource: domain.ObservedFacts{
+			Presence:  domain.ResourcePresencePresent,
+			Readiness: domain.ResourceReadinessUnknown,
+			Drift:     domain.ResourceDriftUnknown,
+		},
+	}
+	retryExecution, _, retryOutcome, retryFinish, observeErr :=
+		application.InterpretObservation(execution, attempt, presentButUncorrelated, time.Now().Add(time.Second))
+	if observeErr != nil {
+		t.Fatal(observeErr)
+	}
+	if retryOutcome != application.ObservationOutcomeRetry {
+		t.Fatalf("outcome = %d, want retry: physical presence must not block resubmission when correlation is conclusively absent", retryOutcome)
+	}
+	if retryFinish != nil {
+		t.Fatal("resubmission authorization produced terminal finish evidence")
+	}
+	if retryExecution.CurrentAttempt != execution.CurrentAttempt+1 || retryExecution.State != application.AttemptPending {
+		t.Fatalf("resubmission state = attempt %d/%s", retryExecution.CurrentAttempt, retryExecution.State)
+	}
+}
+
+// TestForeignIdentityConflictFailsClosedWithoutResubmission is Correction 1B:
+// a Found + Failed TargetIdentityConflict over Present facts is terminal. It
+// must never become NotFound (which would authorize resubmission onto a
+// foreign object) and must never leave the operation active.
+func TestForeignIdentityConflictFailsClosedWithoutResubmission(t *testing.T) {
+	execution, attempt := ambiguityFixture(t)
+
+	conflict := &provisioning.ExecutionFailure{Kind: provisioning.FailureExecution, Reason: "TargetIdentityConflict", Message: "a foreign object occupies the managed target name"}
+	submission := provisioning.Submission{Observation: provisioning.ExecutionObservation{
+		Correlation: provisioning.RequestCorrelationFound,
+		Execution:   &provisioning.Execution{State: provisioning.ExecutionStateFailed, Failure: conflict},
+		Resource: domain.ObservedFacts{
+			Presence:  domain.ResourcePresencePresent,
+			Readiness: domain.ResourceReadinessUnknown,
+			Drift:     domain.ResourceDriftUnknown,
+		},
+	}}
+	nextExecution, _, outcome, finish, err :=
+		application.InterpretSubmission(execution, attempt, submission, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != application.SubmissionOutcomeFailed {
+		t.Fatalf("outcome = %d, want failed", outcome)
+	}
+	if finish == nil || finish.Succeeded {
+		t.Fatal("identity conflict did not fail the operation")
+	}
+	// Found correlation means the backend dimension recognized the request
+	// (ADR-0004); the terminal Failed outcome is what prevents any further
+	// submission work. There is no path from a terminal Failed execution back
+	// to a new attempt, so the conflict can never be retried onto the
+	// foreign object.
+	if nextExecution.State != application.AttemptFailed {
+		t.Fatalf("execution state = %s, want terminal Failed", nextExecution.State)
+	}
+}

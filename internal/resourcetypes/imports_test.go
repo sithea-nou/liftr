@@ -26,6 +26,8 @@ func TestContractPackageDoesNotImportOrchestration(t *testing.T) {
 		"github.com/sithea-nou/liftr/internal/persistence",
 		"github.com/sithea-nou/liftr/internal/worker",
 		"github.com/pulumi",
+		"github.com/sithea-nou/liftr/internal/provisioning/crossplane",
+		"k8s.io/",
 	}
 	assertNoForbiddenImports(t, ".", forbidden)
 }

@@ -27,6 +27,8 @@ func TestClientImportsOnlyThePublicContract(t *testing.T) {
 		"github.com/sithea-nou/liftr/internal/resourcetypes",
 		"github.com/sithea-nou/liftr/internal/server",
 		"github.com/sithea-nou/liftr/internal/worker",
+		"github.com/sithea-nou/liftr/internal/provisioning/crossplane",
+		"k8s.io/",
 		"github.com/santhosh-tekuri/jsonschema",
 		"gopkg.in/yaml",
 		"github.com/spf13/cobra",

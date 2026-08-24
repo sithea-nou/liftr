@@ -21,6 +21,8 @@ func TestDomainHasNoJSONSchemaDependency(t *testing.T) {
 		"github.com/sithea-nou/liftr/internal/api",
 		"github.com/sithea-nou/liftr/internal/persistence",
 		"net/http",
+		"github.com/sithea-nou/liftr/internal/provisioning/crossplane",
+		"k8s.io/",
 	}
 	assertPackageImports(t, ".", forbidden)
 }
