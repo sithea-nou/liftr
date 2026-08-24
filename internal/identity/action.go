@@ -19,8 +19,17 @@ const (
 	ActionResourceUpdate   Action = "resource:update"
 	ActionResourceDelete   Action = "resource:delete"
 	ActionResourceRetry    Action = "resource:retry"
+	ActionResourceList     Action = "resource:list"
 	ActionResourceTypeRead Action = "resourceType:read"
 )
+
+// ActionResourceList is the enumeration permission. It is decided only
+// through the collection authorization path (application.Authorizer's list
+// method), never through single-target Authorize calls, because a collection
+// has no ResourceTarget. The default owner-membership policy grants it
+// together with resource:read from the same memberships; a future policy may
+// grant read-without-list or list-without-read, but inventory visibility must
+// never exceed what resource:read would disclose (ADR-0016).
 
 // ActionSecretResolve is reserved for the future SecretReference resolver
 // defined by ADR-0011. It is intentionally never produced by M11 code paths;

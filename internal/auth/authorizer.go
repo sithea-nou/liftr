@@ -26,6 +26,10 @@ var ErrDenied = errors.New("denied by authorization policy")
 //     capabilities but never secrets or provider configuration.
 //   - resource actions require an exact structural membership match between
 //     the target's OwnerRef and one of the principal's typed memberships.
+//   - collection listing is authorized for every authenticated principal,
+//     with visibility exactly the principal's memberships: list visibility
+//     therefore equals, and can never exceed, resource:read scope (ADR-0016).
+//     The unrestricted marker is never produced by this policy.
 //   - unknown actions — including the reserved secret:resolve — are denied
 //     until a milestone explicitly implements them.
 //
@@ -34,7 +38,9 @@ var ErrDenied = errors.New("denied by authorization policy")
 type OwnerAuthorizer struct{}
 
 // Authorize decides one action. Denial returns ErrDenied; the caller is
-// responsible for choosing the externally visible form.
+// responsible for choosing the externally visible form. resource:list is
+// intentionally not accepted here: enumeration flows exclusively through
+// AuthorizeResourceList because collections carry no ResourceTarget.
 func (OwnerAuthorizer) Authorize(_ context.Context, principal identity.Principal, action identity.Action, target identity.ResourceTarget) error {
 	if principal.ID == "" {
 		return fmt.Errorf("%w: no principal", ErrDenied)
@@ -52,6 +58,18 @@ func (OwnerAuthorizer) Authorize(_ context.Context, principal identity.Principal
 	default:
 		return fmt.Errorf("%w: action %q is not granted", ErrDenied, string(action))
 	}
+}
+
+// AuthorizeResourceList grants enumeration to every authenticated principal
+// with visibility exactly equal to the principal's normalized typed
+// memberships. A principal with zero memberships is authorized to enumerate
+// and sees nothing — denial and empty visibility remain distinct (ADR-0016).
+func (OwnerAuthorizer) AuthorizeResourceList(_ context.Context, principal identity.Principal) (identity.ResourceVisibility, error) {
+	if principal.ID == "" {
+		return identity.ResourceVisibility{}, fmt.Errorf("%w: no principal", ErrDenied)
+	}
+	owners := append([]domain.OwnerRef(nil), principal.Memberships...)
+	return identity.ResourceVisibility{Owners: owners}, nil
 }
 
 // LoadStaticGrants reads and validates the optional deployment grants file:

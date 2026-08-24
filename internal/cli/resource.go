@@ -24,10 +24,118 @@ func newResourceCommand(a *App) *cobra.Command {
 	command.AddCommand(
 		newResourceCreateCommand(a),
 		newResourceGetCommand(a),
+		newResourceListCommand(a),
 		newResourceUpdateCommand(a),
 		newResourceDeleteCommand(a),
 	)
 	return command
+}
+
+// resourceListOptions carries one inventory request. There is deliberately no
+// --all: pages are bounded server-side and traversals continue via --cursor.
+type resourceListOptions struct {
+	owner          string
+	typeName       string
+	typeVersion    string
+	state          string
+	includeDeleted bool
+	limit          int
+	cursor         string
+}
+
+func newResourceListCommand(a *App) *cobra.Command {
+	options := &resourceListOptions{}
+	command := &cobra.Command{
+		Use:   "list",
+		Short: "List the Resources visible to the authenticated principal",
+		Long: `List one page of the ownership-scoped Resource inventory.
+
+The server returns exactly the Resources your current authorization allows
+you to read, newest first, as summaries without spec or outputs. Filters only
+narrow what you can already see; they never grant access. Deleted Resources
+are excluded unless --include-deleted is supplied.
+
+Pagination is cursor-based: pass the printed continuation hint back verbatim.
+If your authorization changed since a cursor was issued, the server rejects
+it and traversal restarts from the first page.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("limit") && (options.limit < 1 || options.limit > 100) {
+				return fmt.Errorf("--limit must be an integer between 1 and 100")
+			}
+			if options.typeVersion != "" && options.typeName == "" {
+				return fmt.Errorf("--version requires --type")
+			}
+			if options.state != "" && !validResourceListState(options.state) {
+				return fmt.Errorf("--state must be one of Unknown, Pending, Ready, Deleting, Deleted, Failed")
+			}
+			if err := a.prepare(); err != nil {
+				return err
+			}
+			opts := client.ResourceListOptions{Limit: options.limit, Cursor: options.cursor, IncludeDeleted: options.includeDeleted, TypeName: options.typeName, TypeVersion: options.typeVersion, State: options.state}
+			if options.owner != "" {
+				kind, id, err := parseOwnerRef(options.owner)
+				if err != nil {
+					return err
+				}
+				opts.OwnerKind, opts.OwnerID = kind, id
+			}
+			list, err := a.api.ListResources(cmd.Context(), opts)
+			if err != nil {
+				return exit(classifyInterrupted(cmd.Context(), a.reportReadFailure(err)))
+			}
+			if a.output == outputJSON {
+				if err := emitJSON(a.stdout, list.Raw); err != nil {
+					fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					return exit(ExitFailure)
+				}
+			} else {
+				a.renderResourceListText(a.stdout, list)
+			}
+			if list.NextCursor != "" {
+				fmt.Fprintf(a.stderr, "next page: liftr resource list")
+				if options.owner != "" {
+					fmt.Fprintf(a.stderr, " --owner %s", a.clean(options.owner))
+				}
+				if options.typeName != "" {
+					fmt.Fprintf(a.stderr, " --type %s", a.clean(options.typeName))
+				}
+				if options.typeVersion != "" {
+					fmt.Fprintf(a.stderr, " --version %s", a.clean(options.typeVersion))
+				}
+				if options.state != "" {
+					fmt.Fprintf(a.stderr, " --state %s", a.clean(options.state))
+				}
+				if options.includeDeleted {
+					fmt.Fprintf(a.stderr, " --include-deleted")
+				}
+				if cmd.Flags().Changed("limit") {
+					fmt.Fprintf(a.stderr, " --limit %d", options.limit)
+				}
+				fmt.Fprintf(a.stderr, " --cursor %s\n", a.clean(list.NextCursor))
+			}
+			return nil
+		},
+	}
+	command.Flags().StringVar(&options.owner, "owner", "", "narrow to one owner as KIND=ID (must already be within your visibility)")
+	command.Flags().StringVar(&options.typeName, "type", "", "exact ResourceType name filter")
+	command.Flags().StringVar(&options.typeVersion, "version", "", "exact ResourceType version filter (requires --type)")
+	command.Flags().StringVar(&options.state, "state", "", "exact state filter: Unknown|Pending|Ready|Deleting|Deleted|Failed")
+	command.Flags().BoolVar(&options.includeDeleted, "include-deleted", false, "include retained Deleted tombstones")
+	command.Flags().IntVar(&options.limit, "limit", 0, "maximum summaries to return (1-100; server default when omitted)")
+	command.Flags().StringVar(&options.cursor, "cursor", "", "opaque continuation cursor returned by the server")
+	return command
+}
+
+// validResourceListState mirrors the server's public ResourceState filter
+// vocabulary so obvious mistakes fail locally.
+func validResourceListState(state string) bool {
+	switch state {
+	case "Unknown", "Pending", "Ready", "Deleting", "Deleted", "Failed":
+		return true
+	default:
+		return false
+	}
 }
 
 type mutationOptions struct {

@@ -157,6 +157,74 @@ func newResourceDTO(record application.ResourceRecord, latest *domain.Operation,
 	return dto
 }
 
+// resourceSummaryStatusDTO is the inventory observation of a Resource: state
+// and freshness only. Conditions belong to the detail representation.
+type resourceSummaryStatusDTO struct {
+	State              string    `json:"state"`
+	ObservedGeneration uint64    `json:"observedGeneration"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+// resourceSummaryDTO is the public v1 inventory summary. It is built from the
+// application's dedicated inventory read model, so spec, conditions, outputs,
+// provisioner bindings, execution metadata, and private sequences have no
+// representation here by construction (ADR-0016). Clients read the full
+// representation from /v1/resources/{id}.
+type resourceSummaryDTO struct {
+	ID              string                   `json:"id"`
+	Type            resourceTypeDTO          `json:"type"`
+	Owner           ownerDTO                 `json:"owner"`
+	Generation      uint64                   `json:"generation"`
+	Status          resourceSummaryStatusDTO `json:"status"`
+	LatestOperation *latestOperationRefDTO   `json:"latestOperation,omitempty"`
+	CreatedAt       time.Time                `json:"createdAt"`
+	UpdatedAt       time.Time                `json:"updatedAt"`
+}
+
+// resourceListDTO is one ownership-scoped inventory page. items is never nil
+// so an empty page serializes as an empty array; nextCursor is absent on the
+// final page and there is deliberately no total count.
+type resourceListDTO struct {
+	Items      []resourceSummaryDTO `json:"items"`
+	NextCursor string               `json:"nextCursor,omitempty"`
+}
+
+func newResourceSummaryDTO(item application.ResourceInventoryItem) resourceSummaryDTO {
+	summary := resourceSummaryDTO{
+		ID:         string(item.ID),
+		Type:       resourceTypeDTO{Name: item.Type.Name, Version: item.Type.Version},
+		Owner:      ownerDTO{Kind: item.Owner.Kind, ID: item.Owner.ID},
+		Generation: item.Generation,
+		Status: resourceSummaryStatusDTO{
+			State:              string(item.Status.State),
+			ObservedGeneration: item.Status.ObservedGeneration,
+			UpdatedAt:          item.Status.UpdatedAt.UTC(),
+		},
+		CreatedAt: item.CreatedAt.UTC(),
+		UpdatedAt: item.UpdatedAt.UTC(),
+	}
+	if item.Latest != nil {
+		id := string(item.Latest.ID)
+		summary.LatestOperation = &latestOperationRefDTO{
+			ID:               id,
+			Capability:       string(item.Latest.Capability),
+			State:            string(item.Latest.State),
+			TargetGeneration: item.Latest.TargetGeneration,
+			Href:             "/v1/operations/" + id,
+		}
+	}
+	return summary
+}
+
+func newResourceListDTO(page application.ResourceInventoryPageView) resourceListDTO {
+	body := resourceListDTO{Items: make([]resourceSummaryDTO, 0, len(page.Items))}
+	for i := range page.Items {
+		body.Items = append(body.Items, newResourceSummaryDTO(page.Items[i]))
+	}
+	body.NextCursor = page.NextCursor
+	return body
+}
+
 func newLatestOperationRef(operation domain.Operation) latestOperationRefDTO {
 	id := string(operation.ID())
 	return latestOperationRefDTO{

@@ -146,6 +146,64 @@ func (c *Client) GetResource(ctx context.Context, id string) (*Resource, error) 
 	return c.decodeResource(rsp)
 }
 
+// ResourceListOptions narrows one inventory page. Zero values mean "not
+// supplied"; the server applies its defaults. Filters only ever narrow the
+// caller's server-side visibility.
+type ResourceListOptions struct {
+	OwnerKind      string
+	OwnerID        string
+	TypeName       string
+	TypeVersion    string
+	State          string
+	IncludeDeleted bool
+	Limit          int
+	Cursor         string
+}
+
+// ListResources reads one ownership-scoped inventory page.
+func (c *Client) ListResources(ctx context.Context, opts ResourceListOptions) (*ResourceList, error) {
+	query := url.Values{}
+	if opts.OwnerKind != "" || opts.OwnerID != "" {
+		query.Set("ownerKind", opts.OwnerKind)
+		query.Set("ownerId", opts.OwnerID)
+	}
+	if opts.TypeName != "" {
+		query.Set("type", opts.TypeName)
+	}
+	if opts.TypeVersion != "" {
+		query.Set("version", opts.TypeVersion)
+	}
+	if opts.State != "" {
+		query.Set("state", opts.State)
+	}
+	if opts.IncludeDeleted {
+		query.Set("includeDeleted", "true")
+	}
+	if opts.Limit > 0 {
+		query.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Cursor != "" {
+		query.Set("cursor", opts.Cursor)
+	}
+	path := "/v1/resources"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	rsp, err := c.do(ctx, http.MethodGet, path, nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	if apiErr := toError(rsp); apiErr != nil {
+		return nil, apiErr
+	}
+	list := &ResourceList{}
+	if err := decodeInto(rsp.raw, list); err != nil {
+		return nil, err
+	}
+	list.Raw = rsp.raw
+	return list, nil
+}
+
 // GetOperation reads one lifecycle Operation.
 func (c *Client) GetOperation(ctx context.Context, id string) (*Operation, error) {
 	rsp, err := c.do(ctx, http.MethodGet, "/v1/operations/"+url.PathEscape(id), nil, nil, false)

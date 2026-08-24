@@ -132,6 +132,93 @@ type ResourceRepository interface {
 	GetResource(context.Context, domain.ResourceID) (ResourceRecord, error)
 	CreateResource(context.Context, ResourceRecord) error
 	SaveResource(context.Context, ResourceRecord, uint64) error
+	// ListResources returns one keyset page of the trusted ResourceListQuery.
+	// The query is built exclusively by the ListResources use case after its
+	// single authoritative authorization decision; repositories execute it
+	// mechanically and evaluate no authorization policy (ADR-0016). The
+	// returned items are summary read models: spec and conditions are never
+	// loaded, and the private ordering sequence is never serialized publicly.
+	ListResources(context.Context, ResourceListQuery) (ResourceInventoryPage, error)
+}
+
+// MaxResourcePageSize bounds one inventory page. It mirrors the operation
+// history bound: bounded responses, no unbounded fetches anywhere.
+const MaxResourcePageSize = 100
+
+// DefaultResourcePageSize is the inventory page size used when a client does
+// not request one.
+const DefaultResourcePageSize = 20
+
+// ResourceListQuery is the trusted selection handed to persistence. Every
+// field originates in either the authorized visibility scope or an already
+// validated transport filter that can only narrow that scope; owner filters
+// never grant access (ADR-0016).
+type ResourceListQuery struct {
+	// AllowedOwners is the complete normalized authorized owner set copied
+	// from identity.ResourceVisibility.Owners. Persistence receives plain
+	// domain values — never principals, claims, tokens, or visibility types.
+	AllowedOwners []domain.OwnerRef
+	// Unrestricted mirrors Visibility.AllOwners: only explicit insecure
+	// development composition produces it; no secured policy may set it.
+	Unrestricted bool
+	// OwnerFilter narrows within AllowedOwners. Out-of-scope values simply
+	// select nothing; they never widen authorization.
+	OwnerFilter    *domain.OwnerRef
+	TypeName       string
+	TypeVersion    string
+	StateFilter    *domain.ResourceState
+	IncludeDeleted bool
+	// AfterSequence is the exclusive keyset boundary: zero starts at the
+	// newest Resources, any other value continues strictly below it so later
+	// inserts cannot shift an open traversal window.
+	AfterSequence uint64
+	Limit         int
+}
+
+// ResourceInventoryStatus is the summary observation of one Resource: state
+// and freshness only. Conditions belong to the detail representation.
+type ResourceInventoryStatus struct {
+	State              domain.ResourceState
+	ObservedGeneration uint64
+	UpdatedAt          time.Time
+}
+
+// ResourceInventoryLatestOperation is the four-field latest-Operation
+// projection carried by inventory summaries. Inventory deliberately loads
+// these fields alone; a partially populated domain.Operation would be an
+// invalid read model (ADR-0016).
+type ResourceInventoryLatestOperation struct {
+	ID               domain.OperationID
+	Capability       domain.Capability
+	State            domain.OperationState
+	TargetGeneration uint64
+}
+
+// ResourceInventoryItem is one summary row of the ownership-scoped inventory.
+// Spec, conditions, outputs, provisioner bindings, and execution metadata are
+// absent structurally: the repository SELECT never reads them, so summaries
+// cannot disclose them by construction (ADR-0016).
+type ResourceInventoryItem struct {
+	ID         domain.ResourceID
+	Type       domain.ResourceTypeRef
+	Owner      domain.OwnerRef
+	Generation uint64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	Status     ResourceInventoryStatus
+	// Sequence is the private immutable insertion sequence. It orders the
+	// traversal and binds cursors; it has no public representation anywhere.
+	Sequence uint64
+	// Latest is nil when the Resource has no Operation yet.
+	Latest *ResourceInventoryLatestOperation
+}
+
+// ResourceInventoryPage is one ordered inventory page plus the private
+// continuation position. NextSequence is zero when no further page exists;
+// the use case encodes it into the opaque public cursor before returning.
+type ResourceInventoryPage struct {
+	Items        []ResourceInventoryItem
+	NextSequence uint64
 }
 
 type OperationRecord struct {

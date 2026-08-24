@@ -76,6 +76,7 @@ LIFTR_TOKEN=dev go run ./cmd/liftr resource create \
     --id orders-db --type PostgreSQLDatabase --version v2 \
     --owner team=payments --spec spec.json
 LIFTR_TOKEN=dev go run ./cmd/liftr resource get orders-db
+LIFTR_TOKEN=dev go run ./cmd/liftr resource list --owner team=payments
 LIFTR_TOKEN=dev go run ./cmd/liftr operation get op-xxxx
 LIFTR_TOKEN=dev go run ./cmd/liftr operation list --resource orders-db
 LIFTR_TOKEN=dev go run ./cmd/liftr operation retry op-failed --wait

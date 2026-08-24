@@ -19,10 +19,15 @@ info:
     create requires permission under the requested owner; reads, updates, and
     deletes require permission under the stored owner; Operations authorize
     through their owning Resource; ResourceType discovery is readable by every
-    authenticated principal. Forbidden Resource access is externally
-    indistinguishable from absence (404) so existence, generation, state, and
-    outputs are never disclosed to unauthorized callers; forbidden creates
-    answer 403 FORBIDDEN.
+    authenticated principal. Inventory listing is its own action
+    (resource:list): it grants enumeration only, and the Resources a list may
+    disclose are exactly the caller's current authorized visibility, which can
+    never exceed what resource:read would disclose for the same principal
+    (ADR-0016). Forbidden Resource access is externally indistinguishable from
+    absence (404) so existence, generation, state, and outputs are never
+    disclosed to unauthorized callers; forbidden creates and forbidden
+    inventory listings answer 403 FORBIDDEN because collections hide nothing
+    per record.
 
     Idempotency keys are scoped per authenticated principal: two principals
     may use the same key independently, and possessing another principal's
@@ -145,6 +150,95 @@ paths:
         "503":
           $ref: "#/components/responses/PersistenceUnavailable"
   /v1/resources:
+    get:
+      operationId: listResources
+      summary: List the Resources visible to the authenticated principal
+      description: |
+        Returns one ownership-scoped inventory page of Resource summaries:
+        discovery, not a bulk configuration dump. Summaries carry id, type,
+        owner, generation, status (state, observedGeneration, updatedAt), an
+        optional latestOperation reference, and timestamps. They never carry
+        spec, conditions, or outputs; read those from
+        GET /v1/resources/{id}, which remains byte-for-byte unchanged.
+
+        Visibility is authorization, not filtering. Every request — including
+        every continuation page — re-authenticates and re-derives the
+        caller's current visibility; list visibility can never exceed what
+        resource:read discloses for the same principal. A principal whose
+        current visibility is empty receives 200 with an empty items array;
+        only a whole-list denial answers 403 FORBIDDEN.
+
+        Filters can only narrow the already-authorized visibility and never
+        grant access: an owner filter outside the caller's visibility yields
+        an empty collection indistinguishable from "no such Resources", and
+        unknown but well-formed type values yield an empty collection rather
+        than a type-existence signal. state=Deleted together with
+        includeDeleted=false is rejected as a contradictory query.
+
+        Pagination is keyset over Liftr's private insertion order, newest
+        first. The cursor is opaque, versioned, unsigned, bounded to 128
+        characters, bound to this request's filters AND to the visibility
+        scope as of issuance; if authorization changes between pages the old
+        cursor is rejected and traversal must restart, so possession of a
+        cursor is never authorization. The response always contains items,
+        omits nextCursor on the final page, and never reports a total.
+      parameters:
+        - $ref: "#/components/parameters/ResourcesPageLimit"
+        - $ref: "#/components/parameters/ResourcesCursor"
+        - $ref: "#/components/parameters/OwnerKindFilter"
+        - $ref: "#/components/parameters/OwnerIdFilter"
+        - $ref: "#/components/parameters/TypeFilter"
+        - $ref: "#/components/parameters/TypeVersionFilter"
+        - $ref: "#/components/parameters/StateFilter"
+        - $ref: "#/components/parameters/IncludeDeleted"
+        - $ref: "#/components/parameters/XCorrelationId"
+      responses:
+        "200":
+          description: |
+            One ownership-scoped inventory page. An authorized principal with
+            no visible Resources, or whose owner filter lies outside their
+            visibility, receives 200 with an empty array.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceList"
+              example:
+                items:
+                  - id: orders-db
+                    type:
+                      name: PostgreSQLDatabase
+                      version: v2
+                    owner:
+                      kind: team
+                      id: payments
+                    generation: 3
+                    status:
+                      state: Ready
+                      observedGeneration: 3
+                      updatedAt: "2026-08-24T09:30:00Z"
+                    latestOperation:
+                      id: op-123
+                      capability: update
+                      state: Succeeded
+                      targetGeneration: 3
+                      href: /v1/operations/op-123
+                    createdAt: "2026-08-20T10:00:00Z"
+                    updatedAt: "2026-08-24T09:30:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
     post:
       operationId: createResource
       summary: Admit an asynchronous resource create request
@@ -644,6 +738,85 @@ components:
       schema:
         type: string
         maxLength: 64
+    ResourcesPageLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of Resource summaries to return.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    ResourcesCursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque, versioned, unsigned continuation cursor returned by a
+        preceding inventory page with identical filters. The cursor is bound
+        to the request's filters and to the visibility scope as of issuance;
+        if authorization changes between pages it is rejected with
+        INVALID_ARGUMENT and traversal restarts. It is never an
+        authorization token.
+      schema:
+        type: string
+        maxLength: 128
+    OwnerKindFilter:
+      name: ownerKind
+      in: query
+      required: false
+      description: |
+        Narrows the page to one owner; must be supplied together with
+        ownerId. Filters operate inside the already-authorized visibility and
+        never grant access: an owner outside the caller's visibility yields
+        an empty collection.
+      schema:
+        type: string
+    OwnerIdFilter:
+      name: ownerId
+      in: query
+      required: false
+      description: Narrows the page to one owner; must be supplied together with ownerKind.
+      schema:
+        type: string
+    TypeFilter:
+      name: type
+      in: query
+      required: false
+      description: |
+        Exact ResourceType name filter. Unknown but well-formed values yield
+        an empty collection rather than a type-existence signal.
+      schema:
+        type: string
+    TypeVersionFilter:
+      name: version
+      in: query
+      required: false
+      description: Exact ResourceType version filter; requires the type query parameter.
+      schema:
+        type: string
+    StateFilter:
+      name: state
+      in: query
+      required: false
+      description: |
+        Exact public ResourceState filter. state=Deleted additionally requires
+        includeDeleted=true; the combination state=Deleted without
+        includeDeleted is rejected as contradictory (400).
+      schema:
+        type: string
+        enum: [Unknown, Pending, Ready, Deleting, Deleted, Failed]
+    IncludeDeleted:
+      name: includeDeleted
+      in: query
+      required: false
+      description: |
+        Include retained Deleted tombstones under exactly the same current
+        authorization; the tombstone's stored owner remains authoritative.
+        Deleted Resources are excluded by default.
+      schema:
+        type: boolean
     XCorrelationId:
       name: X-Correlation-ID
       in: header
@@ -958,6 +1131,78 @@ components:
         updatedAt:
           type: string
           format: date-time
+    ResourceSummaryStatus:
+      type: object
+      description: |
+        Inventory observation of a Resource: state and freshness only.
+        Conditions belong to the detailed Resource representation.
+      required: [state, observedGeneration, updatedAt]
+      properties:
+        state:
+          type: string
+          enum: [Unknown, Pending, Ready, Deleting, Deleted, Failed]
+        observedGeneration:
+          type: integer
+          minimum: 0
+          maximum: 18446744073709551615
+        updatedAt:
+          type: string
+          format: date-time
+    ResourceSummary:
+      type: object
+      description: |
+        One inventory entry. Summaries disclose discovery facts only — never
+        spec, conditions, outputs, provisioner bindings, execution metadata,
+        or private ordering state; read the full representation from
+        GET /v1/resources/{id}.
+      required:
+        - id
+        - type
+        - owner
+        - generation
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        type:
+          $ref: "#/components/schemas/ResourceTypeRef"
+        owner:
+          $ref: "#/components/schemas/OwnerRef"
+        generation:
+          type: integer
+          minimum: 1
+          maximum: 18446744073709551615
+        status:
+          $ref: "#/components/schemas/ResourceSummaryStatus"
+        latestOperation:
+          $ref: "#/components/schemas/LatestOperationRef"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ResourceList:
+      type: object
+      description: |
+        One ownership-scoped inventory page in Liftr's private insertion
+        order, newest first. Visibility is the caller's current authorized
+        scope on every page; there is no total count.
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceSummary"
+        nextCursor:
+          type: string
+          description: |
+            Opaque continuation cursor bound to this page's filters and to
+            the visibility scope as of issuance; absent on the final page and
+            rejected after authorization changes.
+          maxLength: 128
     CreateResourceRequest:
       type: object
       required: [id, type, owner, spec]
@@ -1129,8 +1374,9 @@ components:
       description: |
         FORBIDDEN; the authenticated principal is not authorized. Resource
         reads, updates, and deletes render the same 404 as absent records
-        instead, so this status is reserved for create admissions and
-        discovery policy denials that hide nothing.
+        instead, so this status is reserved for create admissions,
+        discovery policy denials, and inventory listing denials — cases that
+        hide no per-record existence (ADR-0012, ADR-0016).
       content:
         application/problem+json:
           schema:

@@ -101,6 +101,37 @@ type OperationList struct {
 	NextCursor string          `json:"nextCursor,omitempty"`
 }
 
+// ResourceSummaryStatus is the inventory observation of a Resource: state
+// and freshness only. Conditions belong to Resource.
+type ResourceSummaryStatus struct {
+	State              string    `json:"state"`
+	ObservedGeneration uint64    `json:"observedGeneration"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+// ResourceSummary is one inventory entry. It deliberately carries no spec,
+// conditions, outputs, or execution metadata; read those from Resource via
+// GetResource.
+type ResourceSummary struct {
+	Raw             json.RawMessage       `json:"-"`
+	ID              string                `json:"id"`
+	Type            ResourceTypeRef       `json:"type"`
+	Owner           OwnerRef              `json:"owner"`
+	Generation      uint64                `json:"generation"`
+	Status          ResourceSummaryStatus `json:"status"`
+	LatestOperation *LatestOperationRef   `json:"latestOperation,omitempty"`
+	CreatedAt       time.Time             `json:"createdAt"`
+	UpdatedAt       time.Time             `json:"updatedAt"`
+}
+
+// ResourceList is one ownership-scoped inventory page. Raw keeps the exact
+// server bytes for verbatim JSON output; NextCursor is empty on the final page.
+type ResourceList struct {
+	Raw        json.RawMessage   `json:"-"`
+	Items      []ResourceSummary `json:"items"`
+	NextCursor string            `json:"nextCursor,omitempty"`
+}
+
 const (
 	StatePending   = "Pending"
 	StateRunning   = "Running"

@@ -103,6 +103,29 @@ func TestOpenAPIModelsPublicSchemas(t *testing.T) {
 		t.Fatalf("OperationList required = %v, want [items]", required)
 	}
 
+	// Inventory summaries disclose discovery facts only; spec, conditions,
+	// outputs, and every internal concept are absent by construction
+	// (ADR-0016).
+	summaryProperties := propertyNames(t, schemas["ResourceSummary"])
+	wantSummary := []string{"createdAt", "generation", "id", "latestOperation", "owner", "status", "type", "updatedAt"}
+	if strings.Join(summaryProperties, ",") != strings.Join(sorted(wantSummary), ",") {
+		t.Fatalf("ResourceSummary properties = %v, want %v", summaryProperties, wantSummary)
+	}
+	summaryStatusProperties := propertyNames(t, schemas["ResourceSummaryStatus"])
+	wantSummaryStatus := []string{"observedGeneration", "state", "updatedAt"}
+	if strings.Join(summaryStatusProperties, ",") != strings.Join(sorted(wantSummaryStatus), ",") {
+		t.Fatalf("ResourceSummaryStatus properties = %v", summaryStatusProperties)
+	}
+	resourceListProperties := propertyNames(t, schemas["ResourceList"])
+	wantResourceList := []string{"items", "nextCursor"}
+	if strings.Join(resourceListProperties, ",") != strings.Join(sorted(wantResourceList), ",") {
+		t.Fatalf("ResourceList properties = %v", resourceListProperties)
+	}
+	listRequired, ok := schemas["ResourceList"].(map[string]any)["required"].([]any)
+	if !ok || len(listRequired) != 1 || listRequired[0] != "items" {
+		t.Fatalf("ResourceList required = %v, want [items]", listRequired)
+	}
+
 	problemProperties := propertyNames(t, schemas["Problem"])
 	for _, field := range []string{"type", "title", "status", "detail", "instance", "code", "requestId", "currentGeneration"} {
 		found := false

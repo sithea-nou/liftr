@@ -52,3 +52,12 @@ type allowAllAuthorizer struct{}
 func (allowAllAuthorizer) Authorize(context.Context, identity.Principal, identity.Action, identity.ResourceTarget) error {
 	return nil
 }
+
+// AuthorizeResourceList mirrors the single-target decision: development
+// visibility is unrestricted, because the fixed development principal holds
+// no memberships while its creates are authorized under any owner. This is
+// the one shipped producer of the unrestricted visibility marker; the secured
+// owner-membership policy never emits it (ADR-0016).
+func (allowAllAuthorizer) AuthorizeResourceList(context.Context, identity.Principal) (identity.ResourceVisibility, error) {
+	return identity.ResourceVisibility{AllOwners: true}, nil
+}

@@ -18,7 +18,8 @@ import (
 var ErrNotAuthorized = errors.New("not authorized")
 
 // Authorizer decides whether a principal may perform an action against a
-// target. It is an application-owned consumer port (ADR-0012): the neutral
+// target, and whether a principal may enumerate the Resource inventory at
+// all. It is an application-owned consumer port (ADR-0012): the neutral
 // vocabulary lives in internal/identity, concrete policy implementations
 // satisfy this interface structurally, and composition supplies the
 // implementation at startup.
@@ -28,12 +29,28 @@ var ErrNotAuthorized = errors.New("not authorized")
 // continues already-admitted Operations regardless of later membership,
 // token, or authorizer availability changes.
 //
+// The single-target decision (Authorize) and the collection decision
+// (AuthorizeResourceList) are deliberately separate: a collection has no
+// ResourceTarget to authorize against. resource:list is the enumeration
+// permission; the returned visibility is what inventory may disclose and must
+// never exceed the principal's resource:read scope (ADR-0016). Denying the
+// collection while granting reads remains supported; exposing summaries of
+// otherwise unreadable Resources through listing does not.
+//
 // M11 implementations are pure in-memory functions of configuration. An
 // implementation that performs network I/O should cache decisions or probe at
-// the transport edge; use cases invoke the authorizer inside their admission
-// transactions where the decision must be atomic with persisted effects.
+// the transport edge; use cases invoke the authorizer inside their page or
+// admission transactions where the decision must be atomic with the effects
+// it governs.
 type Authorizer interface {
 	Authorize(ctx context.Context, principal identity.Principal, action identity.Action, target identity.ResourceTarget) error
+
+	// AuthorizeResourceList decides whether the principal may enumerate
+	// Resources and returns the closed visibility scope that inventory may
+	// disclose. Denial is an error; success with an empty owner set and no
+	// unrestricted marker is a valid "authorized but sees nothing" answer,
+	// not a denial.
+	AuthorizeResourceList(ctx context.Context, principal identity.Principal) (identity.ResourceVisibility, error)
 }
 
 // authorize enforces the authentication precondition and delegates the

@@ -36,6 +36,12 @@ func (AllowAll) Authorize(context.Context, identity.Principal, identity.Action, 
 	return nil
 }
 
+// AuthorizeResourceList allows enumeration with unrestricted visibility,
+// mirroring the insecure development composition's allow-everything policy.
+func (AllowAll) AuthorizeResourceList(context.Context, identity.Principal) (identity.ResourceVisibility, error) {
+	return identity.ResourceVisibility{AllOwners: true}, nil
+}
+
 // DenyAll denies every action, exercising fail-closed paths.
 type DenyAll struct{}
 
@@ -44,9 +50,15 @@ func (DenyAll) Authorize(context.Context, identity.Principal, identity.Action, i
 	return identity.ErrInvalidPrincipal
 }
 
+// AuthorizeResourceList denies enumeration entirely.
+func (DenyAll) AuthorizeResourceList(context.Context, identity.Principal) (identity.ResourceVisibility, error) {
+	return identity.ResourceVisibility{}, identity.ErrInvalidPrincipal
+}
+
 // RecordingAuthorizer counts invocations and applies configured denials, so
 // tests can assert that admission consulted policy exactly once and that
-// worker execution never does.
+// worker execution never does. Collection decisions are counted separately:
+// ListInvocations must be exactly one per list request (ADR-0016).
 type RecordingAuthorizer struct {
 	AllowAll AllowAll
 	Denied   map[identity.Action]error
@@ -55,6 +67,14 @@ type RecordingAuthorizer struct {
 	LastAction  identity.Action
 	LastTarget  identity.ResourceTarget
 	LastActor   identity.Principal
+
+	// ListErr denies every collection decision when set.
+	ListErr error
+	// ListScope overrides the returned visibility; nil means unrestricted,
+	// matching AllowAll semantics.
+	ListScope       *identity.ResourceVisibility
+	ListInvocations int
+	LastListActor   identity.Principal
 }
 
 // Authorize records the decision request and answers from configuration.
@@ -67,4 +87,18 @@ func (r *RecordingAuthorizer) Authorize(_ context.Context, principal identity.Pr
 		return denial
 	}
 	return nil
+}
+
+// AuthorizeResourceList records the collection request and answers from
+// configuration.
+func (r *RecordingAuthorizer) AuthorizeResourceList(_ context.Context, principal identity.Principal) (identity.ResourceVisibility, error) {
+	r.ListInvocations++
+	r.LastListActor = principal
+	if r.ListErr != nil {
+		return identity.ResourceVisibility{}, r.ListErr
+	}
+	if r.ListScope != nil {
+		return *r.ListScope, nil
+	}
+	return r.AllowAll.AuthorizeResourceList(context.Background(), principal)
 }

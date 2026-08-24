@@ -186,6 +186,28 @@ func (a *App) renderOperationListText(w io.Writer, list *client.OperationList) {
 	_ = tw.Flush()
 }
 
+// renderResourceListText renders one inventory page. Summaries carry no
+// spec, outputs, or conditions by contract, so none are printed; detail
+// lives in `liftr resource get`.
+func (a *App) renderResourceListText(w io.Writer, list *client.ResourceList) {
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tTYPE\tOWNER\tSTATE\tGENERATION\tOBSERVED\tLATEST OPERATION")
+	for i := range list.Items {
+		summary := &list.Items[i]
+		latest := "-"
+		if summary.LatestOperation != nil {
+			latest = a.clean(summary.LatestOperation.ID) + "/" + a.clean(summary.LatestOperation.State)
+		}
+		fmt.Fprintf(tw, "%s\t%s/%s\t%s/%s\t%s\t%d\t%d\t%s\n",
+			a.clean(summary.ID),
+			a.clean(summary.Type.Name), a.clean(summary.Type.Version),
+			a.clean(summary.Owner.Kind), a.clean(summary.Owner.ID),
+			a.clean(summary.Status.State), summary.Generation,
+			summary.Status.ObservedGeneration, latest)
+	}
+	_ = tw.Flush()
+}
+
 func (a *App) renderResourceTypeListText(w io.Writer, list *client.ResourceTypeList) {
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tVERSION\tDISPLAY NAME\tCAPABILITIES")

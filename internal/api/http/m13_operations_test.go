@@ -30,6 +30,11 @@ func (a denyActionAuthorizer) Authorize(_ context.Context, _ identity.Principal,
 	return nil
 }
 
+// AuthorizeResourceList mirrors AllowAll so existing fixtures keep composing.
+func (denyActionAuthorizer) AuthorizeResourceList(context.Context, identity.Principal) (identity.ResourceVisibility, error) {
+	return identity.ResourceVisibility{AllOwners: true}, nil
+}
+
 func updateResourceForHistory(t *testing.T, f *fixture, id, key string, generation uint64) string {
 	t.Helper()
 	response := f.request(t, http.MethodPut, "/v1/resources/"+id, map[string]string{

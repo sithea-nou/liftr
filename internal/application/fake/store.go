@@ -24,8 +24,12 @@ import (
 var ErrNotFound = errors.New("fake record not found")
 
 type Store struct {
-	mu                    sync.Mutex
-	resources             map[domain.ResourceID]application.ResourceRecord
+	mu        sync.Mutex
+	resources map[domain.ResourceID]application.ResourceRecord
+	// resourceSequences mirrors PostgreSQL's private immutable insertion
+	// sequence so fake and durable stores order inventory identically.
+	resourceSequences     map[domain.ResourceID]uint64
+	nextResourceSequence  uint64
 	operations            map[domain.OperationID]application.OperationRecord
 	nextOperationSequence uint64
 	events                map[domain.EventID]domain.Event
@@ -38,14 +42,15 @@ type Store struct {
 
 func NewStore() *Store {
 	return &Store{
-		resources:   make(map[domain.ResourceID]application.ResourceRecord),
-		operations:  make(map[domain.OperationID]application.OperationRecord),
-		events:      make(map[domain.EventID]domain.Event),
-		executions:  make(map[domain.OperationID]application.ProvisioningExecutionRecord),
-		idempotency: make(map[string]application.IdempotencyRecord),
-		attempts:    make(map[string]application.SubmissionAttemptRecord),
-		outbox:      make(map[string]application.OutboxMessage),
-		outputs:     make(map[domain.ResourceID]map[uint64]application.ResourceOutputRecord),
+		resources:         make(map[domain.ResourceID]application.ResourceRecord),
+		resourceSequences: make(map[domain.ResourceID]uint64),
+		operations:        make(map[domain.OperationID]application.OperationRecord),
+		events:            make(map[domain.EventID]domain.Event),
+		executions:        make(map[domain.OperationID]application.ProvisioningExecutionRecord),
+		idempotency:       make(map[string]application.IdempotencyRecord),
+		attempts:          make(map[string]application.SubmissionAttemptRecord),
+		outbox:            make(map[string]application.OutboxMessage),
+		outputs:           make(map[domain.ResourceID]map[uint64]application.ResourceOutputRecord),
 	}
 }
 
@@ -54,6 +59,8 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 	defer s.mu.Unlock()
 	tx := &Store{
 		resources:             cloneMap(s.resources),
+		resourceSequences:     cloneMap(s.resourceSequences),
+		nextResourceSequence:  s.nextResourceSequence,
 		operations:            cloneMap(s.operations),
 		nextOperationSequence: s.nextOperationSequence,
 		events:                cloneEvents(s.events),
@@ -67,9 +74,12 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 		// PostgreSQL identity sequences are non-transactional: allocated values
 		// remain consumed when the surrounding transaction rolls back.
 		s.nextOperationSequence = tx.nextOperationSequence
+		s.nextResourceSequence = tx.nextResourceSequence
 		return err
 	}
 	s.resources = tx.resources
+	s.resourceSequences = tx.resourceSequences
+	s.nextResourceSequence = tx.nextResourceSequence
 	s.operations = tx.operations
 	s.nextOperationSequence = tx.nextOperationSequence
 	s.events = tx.events
@@ -258,10 +268,16 @@ func (s *Store) CreateResource(_ context.Context, record application.ResourceRec
 	if record.Version == 0 {
 		record.Version = 1
 	}
+	// The private insertion sequence is allocated once at creation and never
+	// changes afterwards, mirroring the durable store's identity column.
+	s.nextResourceSequence++
+	s.resourceSequences[record.Resource.ID()] = s.nextResourceSequence
 	s.resources[record.Resource.ID()] = record
 	return nil
 }
 
+// SaveResource mirrors the durable store's immutability triggers: ownership
+// is fixed at creation and no application flow may change it (ADR-0016).
 func (s *Store) SaveResource(_ context.Context, record application.ResourceRecord, expectedVersion uint64) error {
 	current, ok := s.resources[record.Resource.ID()]
 	if !ok {
@@ -270,9 +286,123 @@ func (s *Store) SaveResource(_ context.Context, record application.ResourceRecor
 	if current.Version != expectedVersion {
 		return application.ErrConcurrencyConflict
 	}
+	if current.Resource.Owner() != record.Resource.Owner() {
+		return fmt.Errorf("%w: resource owner is immutable", application.ErrInvalidApplicationCall)
+	}
 	record.Version = expectedVersion + 1
 	s.resources[record.Resource.ID()] = record
 	return nil
+}
+
+// ListResources executes the trusted query mechanically: owner-scope filter,
+// narrowing filters, Deleted policy, and the same descending keyset order as
+// the durable store, so both implementations produce identical pages.
+func (s *Store) ListResources(_ context.Context, query application.ResourceListQuery) (application.ResourceInventoryPage, error) {
+	if query.Limit <= 0 {
+		return application.ResourceInventoryPage{}, fmt.Errorf("%w: resource page limit must be greater than zero", application.ErrInvalidApplicationCall)
+	}
+	if !query.Unrestricted && len(query.AllowedOwners) == 0 {
+		return application.ResourceInventoryPage{Items: []application.ResourceInventoryItem{}}, nil
+	}
+	allowed := make(map[domain.OwnerRef]struct{}, len(query.AllowedOwners))
+	for _, owner := range query.AllowedOwners {
+		allowed[owner] = struct{}{}
+	}
+	type row struct {
+		item     application.ResourceInventoryItem
+		sequence uint64
+	}
+	matches := make([]row, 0)
+	for id, record := range s.resources {
+		resource := record.Resource
+		owner := resource.Owner()
+		if !query.Unrestricted {
+			if _, ok := allowed[owner]; !ok {
+				continue
+			}
+		}
+		if query.OwnerFilter != nil && owner != *query.OwnerFilter {
+			continue
+		}
+		if query.TypeName != "" && resource.Type().Name != query.TypeName {
+			continue
+		}
+		if query.TypeVersion != "" && resource.Type().Version != query.TypeVersion {
+			continue
+		}
+		state := record.Status.State()
+		if state == domain.ResourceStateDeleted && !query.IncludeDeleted {
+			continue
+		}
+		if query.StateFilter != nil && state != *query.StateFilter {
+			continue
+		}
+		sequence := s.resourceSequences[id]
+		if query.AfterSequence != 0 && sequence >= query.AfterSequence {
+			continue
+		}
+		item := application.ResourceInventoryItem{
+			ID:         resource.ID(),
+			Type:       resource.Type(),
+			Owner:      owner,
+			Generation: resource.Generation(),
+			CreatedAt:  resource.CreatedAt(),
+			UpdatedAt:  resource.UpdatedAt(),
+			Status: application.ResourceInventoryStatus{
+				State:              state,
+				ObservedGeneration: record.Status.ObservedGeneration(),
+				UpdatedAt:          record.Status.UpdatedAt(),
+			},
+			Sequence: sequence,
+		}
+		if latest, found := s.latestOperationOf(id); found {
+			capability := latest.Capability()
+			state := latest.State()
+			targetGeneration := latest.TargetGeneration()
+			item.Latest = &application.ResourceInventoryLatestOperation{
+				ID:               latest.ID(),
+				Capability:       capability,
+				State:            state,
+				TargetGeneration: targetGeneration,
+			}
+		}
+		matches = append(matches, row{item: item, sequence: sequence})
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].sequence > matches[j].sequence })
+	page := application.ResourceInventoryPage{Items: []application.ResourceInventoryItem{}}
+	for _, candidate := range matches {
+		if len(page.Items) == query.Limit {
+			page.NextSequence = page.Items[len(page.Items)-1].Sequence
+			break
+		}
+		page.Items = append(page.Items, candidate.item)
+	}
+	return page, nil
+}
+
+// latestOperationOf selects the newest inserted Operation for a Resource by
+// insertion sequence, mirroring LatestForResource.
+func (s *Store) latestOperationOf(id domain.ResourceID) (domain.Operation, bool) {
+	var latest domain.Operation
+	found := false
+	for _, record := range s.operations {
+		if record.Operation.ResourceID() != id {
+			continue
+		}
+		if !found || record.Sequence > s.operationSequenceOf(latest) {
+			latest = record.Operation
+			found = true
+		}
+	}
+	return latest, found
+}
+
+func (s *Store) operationSequenceOf(operation domain.Operation) uint64 {
+	record, ok := s.operations[operation.ID()]
+	if !ok {
+		return 0
+	}
+	return record.Sequence
 }
 
 func (s *Store) GetOperation(_ context.Context, id domain.OperationID) (application.OperationRecord, error) {

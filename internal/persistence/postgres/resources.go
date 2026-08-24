@@ -131,6 +131,19 @@ func (r *repositories) CreateResource(ctx context.Context, record application.Re
 }
 
 func (r *repositories) SaveResource(ctx context.Context, record application.ResourceRecord, expectedVersion uint64) error {
+	// Ownership is fixed at creation and every authorization decision keys on
+	// the stored owner, so an update carrying a different owner fails closed
+	// instead of being silently ignored (ADR-0016). The row is already locked
+	// by GetResource on mutation paths; the explicit comparison keeps the
+	// guarantee for any caller.
+	var storedKind, storedID string
+	if err := r.tx.QueryRow(ctx, `SELECT owner_kind, owner_id FROM resources WHERE id=$1 FOR UPDATE`,
+		record.Resource.ID()).Scan(&storedKind, &storedID); err != nil {
+		return translateError(err)
+	}
+	if storedKind != record.Resource.Owner().Kind || storedID != record.Resource.Owner().ID {
+		return fmt.Errorf("%w: resource owner is immutable", application.ErrInvalidApplicationCall)
+	}
 	codecVersion, spec, err := encodeResourceSpec(record.Resource.Spec())
 	if err != nil {
 		return err

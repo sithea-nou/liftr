@@ -28,6 +28,13 @@ func (h *handler) mapReadError(w http.ResponseWriter, r *http.Request, err error
 		writeProblem(w, r, CodeOperationNotFound, "no Operation exists with this ID", nil)
 		return
 	}
+	// Collection and cursor semantics normalize to one invalid-argument form
+	// after the single authorization decision, so responses never disclose
+	// which part of a request mismatched (ADR-0016).
+	if errors.Is(err, application.ErrInvalidApplicationCall) {
+		writeProblem(w, r, CodeInvalidArgument, "the request is not valid for this endpoint", nil)
+		return
+	}
 	// Discovery addresses a ResourceType entity directly, so an unknown
 	// name/version pair is a 404 rather than the 422 used by mutations.
 	if errors.Is(err, application.ErrResourceTypeNotFound) {

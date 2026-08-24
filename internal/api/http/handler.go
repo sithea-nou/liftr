@@ -36,6 +36,7 @@ type route struct {
 func apiRoutes(h *handler) []route {
 	return []route{
 		{Method: http.MethodPost, Pattern: "/v1/resources", Handle: h.createResource},
+		{Method: http.MethodGet, Pattern: "/v1/resources", Handle: h.listResources},
 		{Method: http.MethodGet, Pattern: "/v1/resources/{id}", Handle: h.getResource},
 		{Method: http.MethodPut, Pattern: "/v1/resources/{id}", Handle: h.updateResource},
 		{Method: http.MethodDelete, Pattern: "/v1/resources/{id}", Handle: h.deleteResource},
