@@ -1,0 +1,52 @@
+{
+  "realm": "liftr",
+  "enabled": true,
+  "sslRequired": "external",
+  "clients": [
+    {
+      "clientId": "backstage-portal",
+      "publicClient": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
+      "defaultScopes": ["openid", "profile", "groups"]
+    },
+    {
+      "clientId": "liftr-backstage-bff",
+      "secret": "bff-dev-secret",
+      "confidentialClient": true,
+      "serviceAccountsEnabled": true,
+      "publicClient": false,
+      "protocolMappers": [
+        {
+          "name": "backstage-user-ref",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "backstage_user_ref",
+            "claim.name": "backstage_user_ref",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": ["profile", "roles", "groups"]
+    },
+    {
+      "clientId": "liftr-api",
+      "bearerOnly": true
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "attributes": { "backstage_user_ref": ["user:default/alice"] },
+      "groups": ["/payments"]
+    }
+  ],
+  "groups": [{ "name": "payments", "path": "/payments" }]
+}

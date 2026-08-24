@@ -1,0 +1,18 @@
+{
+  "name": "@liftr/plugin-liftr-common",
+  "description": "Shared Liftr public /v1 API contracts for the Backstage integration: DTO types mirroring docs/openapi/v1/openapi.yaml, a lossless-JSON representation layer, monitor-link validation, opaque idempotency handling, origin validation, Problem sanitization, and delegation subject binding. Framework-free and free of any server implementation imports by design.",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "devDependencies": {
+    "@backstage/cli": "^0.32.0"
+  },
+  "backstage": {
+    "role": "web-library"
+  },
+  "scripts": {
+    "build": "backstage-cli package build"
+  }
+}

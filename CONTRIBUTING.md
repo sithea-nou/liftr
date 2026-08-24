@@ -10,7 +10,7 @@ Install Go 1.24 or newer, then run:
 make verify
 ```
 
-The verification target checks formatting, runs `go vet`, and executes all tests.
+The verification target checks formatting, runs `go vet`, and executes all tests. It stays Go-only: changes under `integrations/backstage` are additionally checked with `make verify-backstage`, which requires Node >= 20 and runs as an independent CI job.
 
 ## Making Changes
 

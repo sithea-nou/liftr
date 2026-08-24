@@ -1,0 +1,27 @@
+{
+  "name": "@liftr/plugin-liftr-backend",
+  "description": "Liftr BFF backend plugin for Backstage. A constrained client of the Liftr public /v1 API: authenticates Backstage user principals, acquires user-delegated Liftr credentials, mirrors an explicit finite route set, and never makes authorization decisions or holds Resource/Operation state.",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@backstage/backend-plugin-api": "^1.3.0",
+    "@backstage/config": "^1.3.0",
+    "@backstage/errors": "^1.2.7",
+    "@liftr/plugin-liftr-common": "workspace:^"
+  },
+  "devDependencies": {
+    "@backstage/cli": "^0.32.0",
+    "typescript": "~5.8.3",
+    "vitest": "^3.1.4"
+  },
+  "configSchema": "config-schema.json",
+  "backstage": {
+    "role": "backend-plugin"
+  },
+  "scripts": {
+    "build": "backstage-cli package build"
+  }
+}

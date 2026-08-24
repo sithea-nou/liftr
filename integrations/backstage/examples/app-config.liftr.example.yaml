@@ -1,0 +1,82 @@
+# Liftr Backstage integration — reference configuration
+
+Three deployment compositions exist. Pick exactly one `liftr.auth.mode`.
+
+## 1) Delegated (reference; bound-user semantics via RFC 8693)
+
+```yaml
+liftr:
+  baseUrl: https://liftr.example.com
+  auth:
+    mode: delegated
+    tokenEndpoint: https://sts.example.com/realms/liftr/protocol/openid-connect/token
+    clientId: liftr-backstage-bff            # confidential client; secret via env
+    clientSecret: ${LIFTR_BFF_CLIENT_SECRET}
+    clientAuthMethod: basic                  # OAuth CLIENT authentication
+    audience: liftr-api                      # or resource: <uri> per STS support
+    subjectTokenType: urn:ietf:params:oauth:token-type:access_token
+    assertionIssuer: https://sts.example.com/realms/liftr
+    binding:
+      strategy: claim                        # trusted issuer embeds the ref
+      claimName: backstage_user_ref
+      trustedIssuer: https://sts.example.com/realms/liftr
+      # strategy: static is also supported:
+      #   entries:
+      #     - backstageRef: user:default/alice
+      #       issuer: https://sts.example.com/realms/liftr
+      #       subject: alice-idp-sub
+  requestTimeoutMs: 30000
+  maxResponseBytes: 4194304
+
+# Frontend delegation source (generic OIDC provider example):
+auth:
+  providers:
+    oidc:
+      metadataUrl: https://sts.example.com/realms/liftr/.well-known/openid-configuration
+      clientId: backstage-portal
+      clientSecret: ${AUTH_OIDC_CLIENT_SECRET}
+      scope: openid profile groups
+```
+
+The SPA obtains its assertion through the provider session (`oauthLiftrAuth`
+adapter in plugins/liftr); the BFF exchanges it for a short-lived
+Liftr-audience RFC 9068 token and verifies the bound subject before every
+upstream call.
+
+## 2) Passthrough (IdP already issues Liftr-audience tokens to the SPA)
+
+```yaml
+liftr:
+  baseUrl: https://liftr.example.com
+  auth:
+    mode: passthrough
+```
+
+NOTE: passthrough does NOT verify that the Backstage principal and the Liftr
+principal are the same identity; the Liftr token is authoritative. Do not
+claim bound-user equivalence in audits or logs.
+
+## 3) Insecure local development (loopback only)
+
+```yaml
+liftr:
+  baseUrl: http://localhost:8080
+  auth:
+    mode: insecure-development
+```
+
+Pairs with `LIFTR_AUTH_MODE=insecure` on a loopback-bound liftr-server and
+Backstage's guest auth. Startup refuses this mode for any non-literal-loopback
+target, with or without DNS tricks.
+
+## Owner display mapping (navigation only; NEVER authorization)
+
+```yaml
+liftr:
+  ownerDisplay:
+    team:
+      backstageKind: group
+      namespace: default
+```
+
+Requests are byte-identical regardless of this mapping or of catalog contents.

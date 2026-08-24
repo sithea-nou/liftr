@@ -1,0 +1,18 @@
+app:
+  title: Liftr host fixture
+  baseUrl: http://localhost:3000
+
+backend:
+  baseUrl: http://localhost:7007
+  listeningAddress: 127.0.0.1:7007
+
+liftr:
+  # Insecure development composition against literal loopback only; the
+  # fixture never targets remote Liftr instances.
+  baseUrl: http://127.0.0.1:8080
+  auth:
+    mode: insecure-development
+  ownerDisplay:
+    team:
+      backstageKind: group
+      namespace: default

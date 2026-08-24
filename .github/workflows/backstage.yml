@@ -1,0 +1,52 @@
+name: Backstage Integration CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backstage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node (pinned via integrations/backstage/.nvmrc)
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: integrations/backstage/.nvmrc
+
+      - name: Enable Corepack (Yarn version pinned by packageManager)
+        run: corepack enable
+        working-directory: integrations/backstage
+
+      - name: Install dependencies (immutable; lockfile is authoritative)
+        working-directory: integrations/backstage
+        run: |
+          COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn install --immutable
+
+      - name: Typecheck
+        working-directory: integrations/backstage
+        run: COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn typecheck
+
+      - name: Lint (source hygiene)
+        working-directory: integrations/backstage
+        run: COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn lint
+
+      - name: Unit + integration tests (L0/L1) incl. frontend wiring smoke
+        working-directory: integrations/backstage
+        run: COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn test
+
+      - name: Host Backstage workspace compatibility fixture
+        working-directory: integrations/backstage
+        run: COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn verify:host
+
+      - name: Verify the dependency graph was not modified
+        working-directory: integrations/backstage
+        run: git diff --exit-code -- . ':(exclude).yarn'
+
+      # The Go job lives in ci.yml; the two are independent by design so Go
+      # contributors never need Node and vice versa.

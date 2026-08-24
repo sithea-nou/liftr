@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Liftr backend (BFF) configuration",
+  "type": "object",
+  "properties": {
+    "liftr": {
+      "type": "object",
+      "required": [
+        "baseUrl"
+      ],
+      "properties": {
+        "baseUrl": {
+          "type": "string",
+          "description": "Liftr origin. HTTPS except explicit insecure-development against literal loopback."
+        },
+        "requestTimeoutMs": {
+          "type": "integer"
+        },
+        "maxResponseBytes": {
+          "type": "integer"
+        },
+        "correlationMaxLength": {
+          "type": "integer"
+        },
+        "maxRequestBodyBytes": {
+          "type": "integer"
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "delegated",
+                "passthrough",
+                "insecure-development"
+              ]
+            },
+            "tokenEndpoint": {
+              "type": "string"
+            },
+            "clientId": {
+              "type": "string"
+            },
+            "clientSecret": {
+              "type": "string"
+            },
+            "clientAuthMethod": {
+              "enum": [
+                "basic",
+                "body"
+              ]
+            },
+            "audience": {
+              "type": "string"
+            },
+            "resource": {
+              "type": "string"
+            },
+            "subjectTokenType": {
+              "enum": [
+                "urn:ietf:params:oauth:token-type:access_token",
+                "urn:ietf:params:oauth:token-type:id_token",
+                "urn:ietf:params:oauth:token-type:jwt"
+              ]
+            },
+            "assertionIssuer": {
+              "type": "string"
+            },
+            "exchangeTimeoutMs": {
+              "type": "integer"
+            },
+            "binding": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "enum": [
+                    "claim",
+                    "static"
+                  ]
+                },
+                "claimName": {
+                  "type": "string"
+                },
+                "trustedIssuer": {
+                  "type": "string"
+                },
+                "entries": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "backstageRef",
+                      "issuer",
+                      "subject"
+                    ],
+                    "properties": {
+                      "backstageRef": {
+                        "type": "string"
+                      },
+                      "issuer": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

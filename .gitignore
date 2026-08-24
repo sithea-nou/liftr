@@ -22,3 +22,16 @@ coverage.*
 .idea/
 .vscode/
 *.swp
+
+# Backstage integration (Node toolchain lives entirely under integrations/)
+integrations/backstage/node_modules/
+integrations/backstage/*/dist/
+integrations/backstage/.yarn/*
+!integrations/backstage/.yarn/patches
+!integrations/backstage/.yarn/plugins
+!integrations/backstage/.yarn/releases
+integrations/backstage/.pnp.*
+/node_modules/
+/integrations/node_modules/
+/integrations/backstage/*/*/*/dist/
+/integrations/backstage/*/*/dist/

@@ -1,4 +1,4 @@
-.PHONY: build fmt fmt-check test test-race test-integration build-programs test-acceptance-azure vet verify
+.PHONY: build fmt fmt-check test test-race test-integration build-programs test-acceptance-azure vet verify verify-backstage
 
 build:
 	go build ./cmd/...
@@ -36,3 +36,17 @@ vet:
 	go vet ./...
 
 verify: fmt-check vet test
+
+# Backstage integration checks. Never part of `verify`: Go contributors do
+# not need Node. CI runs this as an independent job.
+# Yarn is pinned via packageManager + Corepack; installation is immutable and
+# must never modify the working tree (enforced by the git diff gate).
+verify-backstage:
+	@command -v node >/dev/null 2>&1 || { echo "Node.js >= 20 is required for verify-backstage."; exit 1; }
+	cd integrations/backstage && \
+		COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn@4.9.2 install --immutable && \
+		COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn@4.9.2 typecheck && \
+		COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn@4.9.2 lint && \
+		COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn@4.9.2 test && \
+		COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn@4.9.2 verify:host && \
+		git diff --exit-code -- . ':(exclude).yarn'

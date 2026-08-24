@@ -92,6 +92,16 @@ Run all checks:
 make verify
 ```
 
+Backstage integration checks live under Node and never run inside `make verify`:
+
+```sh
+make verify-backstage   # requires Node >= 20; see integrations/backstage/README.md
+```
+
+CI runs the Go and Backstage jobs independently. See
+[ADR-0017](docs/adr/0017-backstage-as-a-delegated-public-api-client.md) for the
+integration architecture.
+
 PostgreSQL-backed tests run when `LIFTR_TEST_DATABASE_URL` is set. Start the local database and run all checks with:
 
 ```sh

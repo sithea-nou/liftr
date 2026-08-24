@@ -1,0 +1,21 @@
+{
+  "name": "@liftr/testhost-backend",
+  "version": "0.0.0",
+  "private": true,
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "backstage-cli package build",
+    "config:check": "backstage-cli config:check --config ../../app-config.yaml"
+  },
+  "dependencies": {
+    "@backstage/backend-defaults": "^0.8.0",
+    "@backstage/backend-plugin-api": "^1.3.0",
+    "@liftr/plugin-liftr-backend": "workspace:^"
+  },
+  "devDependencies": {
+    "@backstage/cli": "^0.32.0"
+  },
+  "backstage": {
+    "role": "backend"
+  }
+}

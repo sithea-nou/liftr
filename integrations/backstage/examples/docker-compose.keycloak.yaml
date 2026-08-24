@@ -1,0 +1,26 @@
+# Local Keycloak STS for full-auth development and L3 testing.
+#
+#   docker compose up -d
+#
+# Realm 'liftr' is preconfigured (realm-import.json):
+#   - client 'backstage-portal' (SPA) and confidential 'liftr-backstage-bff'
+#   - Standard Token Exchange enabled on 'liftr-backstage-bff'
+#   - protocol mapper injecting backstage_user_ref = user entity ref
+#   - group claims shaped as liftr:team:<name> for LIFTR_AUTH_GROUP_PREFIX
+#
+# Start Liftr secured against it:
+#   LIFTR_AUTH_ISSUER=http://127.0.0.1:8081/realms/liftr \
+#   LIFTR_AUTH_AUDIENCE=liftr-api \
+#   LIFTR_AUTH_GROUP_CLAIM=groups LIFTR_AUTH_GROUP_PREFIX=liftr:team: \
+#   go run ./cmd/liftr-server
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: ["start-dev", "--import-realm", "--http-port=8081"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./keycloak/realm-import.json:/opt/keycloak/data/import/realm.json:ro
