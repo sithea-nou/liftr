@@ -34,10 +34,5 @@
   "scripts": {
     "build": "backstage-cli package build",
     "test": "backstage-cli package test"
-  },
-  "jest": {
-    "moduleNameMapper": {
-      "^react-router-dom$": "/Users/sithea/Documents/mySaaS/liftr/integrations/backstage/node_modules/react-router-dom"
-    }
   }
 }
