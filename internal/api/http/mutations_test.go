@@ -27,6 +27,12 @@ func TestUpdateRequiresConcreteGenerationHeader(t *testing.T) {
 		"If-Liftr-Generation": "1.0",
 	}, map[string]any{"spec": map[string]any{"size": int64(2)}})
 	expectProblem(t, malformed, http.StatusBadRequest, "INVALID_ARGUMENT")
+
+	zero := f.request(t, http.MethodPut, "/v1/resources/resource-precondition", map[string]string{
+		"Idempotency-Key":     "k",
+		"If-Liftr-Generation": "0",
+	}, map[string]any{"spec": map[string]any{"size": int64(2)}})
+	expectProblem(t, zero, http.StatusBadRequest, "INVALID_ARGUMENT")
 }
 
 func TestDeleteRequiresConcreteGenerationHeader(t *testing.T) {

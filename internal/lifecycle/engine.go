@@ -64,6 +64,8 @@ func (Engine) Request(
 	}
 
 	retry := false
+	var retryOfOperationID domain.OperationID
+	targetGeneration := resource.Generation()
 	if latest != nil {
 		if latest.ResourceID() != resource.ID() {
 			return Result{}, fmt.Errorf("%w: latest operation belongs to a different resource", ErrInvalidTransition)
@@ -75,13 +77,17 @@ func (Engine) Request(
 			return Result{}, fmt.Errorf("%w: resource %q has operation %q", ErrOperationActive, resource.ID(), latest.ID())
 		}
 		retry = latest.State() == domain.OperationStateFailed && latest.Capability() == capability
+		if retry {
+			retryOfOperationID = latest.ID()
+			targetGeneration = latest.TargetGeneration()
+		}
 	}
 
 	if err := validateRequestPrecondition(resource, status, capability, retry); err != nil {
 		return Result{}, err
 	}
 
-	operation, err := domain.NewOperation(operationID, resource.ID(), capability, resource.Generation(), requestedAt)
+	operation, err := domain.NewOperation(operationID, resource.ID(), capability, targetGeneration, requestedAt, retryOfOperationID)
 	if err != nil {
 		return Result{}, err
 	}

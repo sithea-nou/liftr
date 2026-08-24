@@ -4,6 +4,8 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -83,11 +85,68 @@ func TestPostgresMigrationRejectsUnknownAppliedVersion(t *testing.T) {
 	}
 }
 
-// TestPostgresLatestForResourceDeterministicOrdering pins Correction 3:
-// LatestForResource orders by requested_at descending with a deterministic
-// byte-wise Operation ID tiebreak, and the PostgreSQL implementation agrees
-// with the fake repository's logical ordering.
-func TestPostgresLatestForResourceDeterministicOrdering(t *testing.T) {
+func TestPostgresOutputRecoveryMigrationUpgradesExistingExecution(t *testing.T) {
+	pool, cleanup := testPool(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `CREATE TABLE liftr_schema_migrations (
+		version bigint PRIMARY KEY, name text NOT NULL, checksum text NOT NULL,
+		applied_at timestamptz NOT NULL DEFAULT clock_timestamp())`); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{
+		"000001_initial.sql", "000002_operations_id_c_collation.sql", "000003_resource_outputs.sql",
+		"000004_provider_evidence_time.sql", "000005_operation_history.sql",
+	}
+	for version, name := range names {
+		raw, err := os.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, string(raw)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+		digest := sha256.Sum256(raw)
+		if _, err := pool.Exec(ctx, `INSERT INTO liftr_schema_migrations(version,name,checksum) VALUES ($1,$2,$3)`,
+			version+1, name, hex.EncodeToString(digest[:])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	statements := []string{
+		`INSERT INTO resources(id,type_name,type_version,owner_kind,owner_id,generation,spec_codec_version,spec,record_version,created_at_ns,updated_at_ns)
+		 VALUES ('upgrade-resource','Widget','v1','team','platform',1,1,'{}',1,1,1)`,
+		`INSERT INTO resource_statuses(resource_id,observed_generation,state,updated_at_ns) VALUES ('upgrade-resource',1,'Failed',2)`,
+		`INSERT INTO provisioner_bindings(resource_id,provisioner_ref) VALUES ('upgrade-resource','provider')`,
+		`INSERT INTO operations(id,resource_id,capability,target_generation,state,phase,requested_at_ns,started_at_ns,phase_changed_at_ns,completed_at_ns,failure_reason,failure_message,record_version)
+		 VALUES ('upgrade-operation','upgrade-resource','create',1,'Failed','Applying',1,1,2,2,'OutputPostconditionRejected','invalid outputs',1)`,
+		`INSERT INTO provisioning_executions(operation_id,resource_id,provisioner_ref,resource_type_name,resource_type_version,capability,target_generation,
+		 spec_codec_version,submitted_spec,state,acceptance_confirmed,correlation_status,latest_observation,last_observed_at_ns,current_attempt_number,next_observation_sequence,
+		 record_version,output_mapping_ref,output_resolution,output_failure_reason,output_failure_message,last_provider_observed_at_ns)
+		 VALUES ('upgrade-operation','upgrade-resource','provider','Widget','v1','create',1,1,'{}','Succeeded',true,'Found',
+		 '{"correlation":"Found","execution":{"state":"Succeeded"},"resource":{},"observedAtNs":2}',2,1,1,1,'mapping-v1','Rejected','OutputPostconditionRejected','invalid outputs',2)`,
+		`INSERT INTO provisioning_submission_attempts(operation_id,attempt_number,state,dispatch_message_id,resolved_at)
+		 VALUES ('upgrade-operation',1,'Accepted','dispatch:upgrade-operation:1',clock_timestamp())`,
+	}
+	for _, statement := range statements {
+		if _, err := pool.Exec(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := postgres.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	var sourceOperation, sourceAttempt *string
+	var mapping string
+	if err := pool.QueryRow(ctx, `SELECT recovery_source_operation_id,recovery_source_attempt::text,output_mapping_ref
+		FROM provisioning_executions WHERE operation_id='upgrade-operation'`).Scan(&sourceOperation, &sourceAttempt, &mapping); err != nil {
+		t.Fatal(err)
+	}
+	if sourceOperation != nil || sourceAttempt != nil || mapping != "mapping-v1" {
+		t.Fatalf("upgraded execution source=%v attempt=%v mapping=%q", sourceOperation, sourceAttempt, mapping)
+	}
+}
+
+func TestPostgresOperationHistorySequenceOrdering(t *testing.T) {
 	pool, cleanup := migratedPool(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -97,16 +156,14 @@ func TestPostgresLatestForResourceDeterministicOrdering(t *testing.T) {
 	}
 	service, _ := postgresService(t, store, provisioningfake.New(provisioningfake.ModeSynchronous))
 
-	// The admitted create Operation carries an older RequestedAt than the two
-	// equal-timestamp Operations seeded below, so the tiebreak winner is also
-	// the overall latest.
 	command := postgresCreateCommand(t, "resource-latest", "operation-latest", map[string]any{"n": int64(1)})
 	admitted, err := service.AdmitCreateResource(ctx, command)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	requestedAt := time.Date(2026, 8, 20, 9, 30, 0, 0, time.UTC)
+	// Insertion sequence, not client request time, defines history order.
+	requestedAt := command.RequestedAt.Add(-time.Hour)
 	equalOlder := mustEqualTimestampOperation(t, "op-a-equal-older", command.ID, domain.CapabilityUpdate, requestedAt)
 	equalNewer := mustEqualTimestampOperation(t, "op-b-equal-newer", command.ID, domain.CapabilityDelete, requestedAt)
 
@@ -144,12 +201,31 @@ func TestPostgresLatestForResourceDeterministicOrdering(t *testing.T) {
 
 	for attempt := 0; attempt < 25; attempt++ {
 		if got := latestFromPostgres(t); got != equalNewer.ID() {
-			t.Fatalf("attempt %d: equal RequestedAt selected %q, want deterministic %q", attempt, got, equalNewer.ID())
+			t.Fatalf("attempt %d: latest selected %q, want last inserted %q", attempt, got, equalNewer.ID())
 		}
 	}
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		first, err := tx.Operations().PageForResource(ctx, command.ID, 0, 2)
+		if err != nil {
+			return err
+		}
+		if len(first.Records) != 2 || first.Records[0].Operation.ID() != equalNewer.ID() || first.Records[1].Operation.ID() != equalOlder.ID() || first.NextSequence == 0 {
+			return fmt.Errorf("unexpected first operation page: %#v", first)
+		}
+		second, err := tx.Operations().PageForResource(ctx, command.ID, first.NextSequence, 2)
+		if err != nil {
+			return err
+		}
+		if len(second.Records) != 1 || second.Records[0].Operation.ID() != admitted.Operation.ID() || second.NextSequence != 0 {
+			return fmt.Errorf("unexpected second operation page: %#v", second)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	// The fake repository must agree with PostgreSQL on identical data,
-	// including the admitted create Operation.
+	// The fake repository must agree with PostgreSQL on identical insertion
+	// order, including request timestamps that run backwards.
 	fakeStore := applicationfake.NewStore()
 	err = fakeStore.Within(ctx, func(tx application.UnitOfWork) error {
 		create := admitted.Operation
@@ -175,6 +251,148 @@ func TestPostgresLatestForResourceDeterministicOrdering(t *testing.T) {
 	if pgLatest != fakeLatest.Operation.ID() || pgLatest != equalNewer.ID() {
 		t.Fatalf("ordering disagreement: postgres selected %q, fake selected %q, want tiebreak winner %q",
 			pgLatest, fakeLatest.Operation.ID(), equalNewer.ID())
+	}
+}
+
+func TestPostgresOutputRecoveryProvenanceRoundTripsAndIsImmutable(t *testing.T) {
+	pool, cleanup := migratedPool(t)
+	defer cleanup()
+	ctx := context.Background()
+	store, err := postgres.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, resolver := postgresService(t, store, provisioningfake.New(provisioningfake.ModeSynchronous))
+	command := postgresCreateCommand(t, "resource-recovery-provenance", "operation-recovery-source", map[string]any{"n": int64(1)})
+	admitted, err := service.AdmitCreateResource(ctx, command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := worker.New(store, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainWorker(t, instance)
+	source := getExecution(t, store, admitted.Operation.ID())
+	if source.CurrentAttempt == 0 {
+		t.Fatal("source execution has no submission attempt")
+	}
+	resource := getResource(t, store, command.ID)
+	childOperation, err := domain.NewOperation("operation-recovery-child", command.ID, domain.CapabilityUpdate,
+		resource.Resource.Generation(), command.RequestedAt.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := application.ProvisioningExecutionRecord{
+		OperationID: childOperation.ID(), ProvisionerRef: source.ProvisionerRef, ResourceID: source.ResourceID,
+		ResourceType: source.ResourceType, Capability: childOperation.Capability(), TargetGeneration: childOperation.TargetGeneration(),
+		Spec: source.Spec, OutputMappingRef: "mapping-v2", OutputResolution: application.OutputResolutionPending,
+		State: application.AttemptSucceeded, RecoverySourceOperationID: source.OperationID,
+		RecoverySourceAttempt: source.CurrentAttempt, NextObservation: 1, Version: 1,
+	}
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		if err := tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: childOperation, Version: 1}); err != nil {
+			return err
+		}
+		return tx.Executions().CreateExecution(ctx, child)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := getExecution(t, store, child.OperationID)
+	if reloaded.RecoverySourceOperationID != source.OperationID || reloaded.RecoverySourceAttempt != source.CurrentAttempt || reloaded.OutputMappingRef != child.OutputMappingRef {
+		t.Fatalf("reloaded recovery provenance = %+v", reloaded)
+	}
+	expectPostgresFailure(t, func() error {
+		_, err := pool.Exec(ctx, `UPDATE provisioning_executions SET recovery_source_attempt=recovery_source_attempt+1 WHERE operation_id=$1`, child.OperationID)
+		return err
+	})
+	expectPostgresFailure(t, func() error {
+		_, err := pool.Exec(ctx, `UPDATE provisioning_executions SET recovery_source_operation_id=NULL WHERE operation_id=$1`, child.OperationID)
+		return err
+	})
+	expectPostgresFailure(t, func() error {
+		_, err := pool.Exec(ctx, `UPDATE provisioning_executions SET record_version=record_version+1 WHERE operation_id=$1`, source.OperationID)
+		return err
+	})
+	expectPostgresFailure(t, func() error {
+		_, err := pool.Exec(ctx, `DELETE FROM provisioning_executions WHERE operation_id=$1`, source.OperationID)
+		return err
+	})
+	expectPostgresFailure(t, func() error {
+		_, err := pool.Exec(ctx, `UPDATE provisioning_submission_attempts SET failure_message='mutated' WHERE operation_id=$1 AND attempt_number=$2`, source.OperationID, source.CurrentAttempt)
+		return err
+	})
+	expectPostgresFailure(t, func() error {
+		_, err := pool.Exec(ctx, `DELETE FROM provisioning_submission_attempts WHERE operation_id=$1 AND attempt_number=$2`, source.OperationID, source.CurrentAttempt)
+		return err
+	})
+}
+
+func TestPostgresOperationRetryConstraintsAndTerminalImmutability(t *testing.T) {
+	pool, cleanup := migratedPool(t)
+	defer cleanup()
+	ctx := context.Background()
+	store, err := postgres.NewStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, _ := postgresService(t, store, provisioningfake.New(provisioningfake.ModeSynchronous))
+	command := postgresCreateCommand(t, "resource-retry-history", "operation-failed-source", map[string]any{"n": int64(1)})
+	if _, err := service.AdmitCreateResource(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+
+	var source application.OperationRecord
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		var err error
+		source, err = tx.Operations().GetOperation(ctx, command.OperationID)
+		if err != nil {
+			return err
+		}
+		if err := source.Operation.Fail("DispatchFailed", "failed before dispatch", command.RequestedAt.Add(time.Second)); err != nil {
+			return err
+		}
+		return tx.Operations().SaveOperation(ctx, application.OperationRecord{Operation: source.Operation}, source.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	retry, err := domain.NewOperation("operation-valid-retry", command.ID, source.Operation.Capability(), source.Operation.TargetGeneration(), command.RequestedAt.Add(time.Minute), source.Operation.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		return tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: retry})
+	}); err != nil {
+		t.Fatalf("valid retry rejected: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE operations SET failure_message='mutated' WHERE id=$1`, source.Operation.ID()); err == nil {
+		t.Fatal("terminal operation row was mutable")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE operations SET operation_seq=operation_seq+100 WHERE id=$1`, retry.ID()); err == nil {
+		t.Fatal("operation sequence was mutable")
+	}
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		record, err := tx.Operations().GetOperation(ctx, retry.ID())
+		if err != nil {
+			return err
+		}
+		if err := record.Operation.Cancel(command.RequestedAt.Add(2 * time.Minute)); err != nil {
+			return err
+		}
+		return tx.Operations().SaveOperation(ctx, application.OperationRecord{Operation: record.Operation}, record.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	invalidRetry, err := domain.NewOperation("operation-invalid-retry", command.ID, retry.Capability(), retry.TargetGeneration(), command.RequestedAt.Add(3*time.Minute), retry.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.Within(ctx, func(tx application.UnitOfWork) error {
+		return tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: invalidRetry})
+	})
+	if !errors.Is(err, application.ErrInvalidApplicationCall) {
+		t.Fatalf("non-failed retry source error = %v, want ErrInvalidApplicationCall", err)
 	}
 }
 

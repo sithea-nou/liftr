@@ -185,6 +185,93 @@ func (a *App) waitForOperation(ctx context.Context, admission *client.MutationRe
 	}
 }
 
+// waitForRetryOperation follows only the child Operation admitted by retry.
+// Unlike Resource mutation waits, every terminal result is the Operation
+// itself and no Resource snapshot is read.
+func (a *App) waitForRetryOperation(ctx context.Context, admission *client.MutationResult, timeout time.Duration) int {
+	operationID, err := a.retryMonitorOperationID(admission)
+	if err != nil {
+		fmt.Fprintf(a.stderr, "error: cannot determine the admitted Operation: %s\n", a.clean(err.Error()))
+		return ExitFailure
+	}
+	if a.output == outputText {
+		fmt.Fprintf(a.stderr, "waiting for operation %s (timeout %s)\n", a.clean(operationID), timeout)
+	}
+
+	deadline := time.Now().Add(timeout)
+	consecutiveFailures := 0
+	lastState := ""
+	for {
+		operation, err := a.api.GetOperation(ctx, operationID)
+		if ctx.Err() != nil {
+			return ExitInterrupted
+		}
+		if err == nil {
+			consecutiveFailures = 0
+			if operation.State != lastState {
+				if a.output == outputText && lastState != "" {
+					fmt.Fprintf(a.stderr, "operation %s: %s\n", a.clean(operationID), a.clean(operation.State))
+				}
+				lastState = operation.State
+			}
+			switch operation.State {
+			case client.StateSucceeded:
+				if err := a.outputOperation(operation); err != nil {
+					fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					return ExitFailure
+				}
+				return ExitOK
+			case client.StateFailed, client.StateCanceled:
+				if err := a.outputOperation(operation); err != nil {
+					fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					return ExitFailure
+				}
+				a.renderTerminalFailure(operation)
+				return ExitOperationFailed
+			}
+		} else {
+			var apiErr *client.APIError
+			if errors.As(err, &apiErr) {
+				if apiErr.IsAuthentication() {
+					return a.reportReadFailure(err)
+				}
+				if apiErr.HasCode(client.CodeOperationNotFound) {
+					fmt.Fprintf(a.stderr, "error: operation %s unexpectedly disappeared while waiting; this is a protocol violation\n", a.clean(operationID))
+					return ExitFailure
+				}
+			}
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutivePollFailures {
+				fmt.Fprintf(a.stderr, "error: waiting for operation %s failed after repeated request failures: %s\n", a.clean(operationID), a.clean(err.Error()))
+				return ExitFailure
+			}
+		}
+
+		sleep := jittered(pollInterval)
+		if remaining := time.Until(deadline); remaining <= 0 {
+			a.renderWaitTimeout(operationID, timeout)
+			return ExitOperationFailed
+		} else if sleep > remaining {
+			sleep = remaining
+		}
+		timer := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ExitInterrupted
+		case <-timer.C:
+		}
+	}
+}
+
+func (a *App) outputOperation(operation *client.Operation) error {
+	if a.output == outputJSON {
+		return emitJSON(a.stdout, operation.Raw)
+	}
+	a.renderOperationText(a.stdout, operation)
+	return nil
+}
+
 func (a *App) renderTerminalFailure(operation *client.Operation) {
 	state := "failed"
 	if operation.State == client.StateCanceled {

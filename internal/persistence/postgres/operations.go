@@ -14,11 +14,26 @@ import (
 )
 
 func (r *repositories) GetOperation(ctx context.Context, id domain.OperationID) (application.OperationRecord, error) {
-	row := r.tx.QueryRow(ctx, `SELECT resource_id, capability, target_generation::text, state, phase,
+	row := r.tx.QueryRow(ctx, `SELECT id, resource_id, operation_seq::text, retry_of_operation_id, capability, target_generation::text, state, phase,
 		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
 		failure_reason, failure_message, record_version::text
 		FROM operations WHERE id=$1 FOR UPDATE`, id)
-	record, err := scanOperation(id, row)
+	record, err := scanOperation(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return application.OperationRecord{}, application.ErrOperationNotFound
+	}
+	if err != nil {
+		return application.OperationRecord{}, translateError(err)
+	}
+	return record, nil
+}
+
+func (r *repositories) LookupOperation(ctx context.Context, id domain.OperationID) (application.OperationRecord, error) {
+	row := r.tx.QueryRow(ctx, `SELECT id, resource_id, operation_seq::text, retry_of_operation_id, capability, target_generation::text, state, phase,
+		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
+		failure_reason, failure_message, record_version::text
+		FROM operations WHERE id=$1`, id)
+	record, err := scanOperation(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return application.OperationRecord{}, application.ErrOperationNotFound
 	}
@@ -28,67 +43,96 @@ func (r *repositories) GetOperation(ctx context.Context, id domain.OperationID) 
 	return record, nil
 }
 func (r *repositories) ActiveForResource(ctx context.Context, id domain.ResourceID) (application.OperationRecord, bool, error) {
-	row := r.tx.QueryRow(ctx, `SELECT id, capability, target_generation::text, state, phase,
+	row := r.tx.QueryRow(ctx, `SELECT id, resource_id, operation_seq::text, retry_of_operation_id, capability, target_generation::text, state, phase,
 		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
 		failure_reason, failure_message, record_version::text
 		FROM operations WHERE resource_id=$1 AND state IN ('Pending','Running') FOR UPDATE`, id)
-	var operationID domain.OperationID
-	var capability, targetText, state, phase string
-	var requestedNS, phaseChangedNS int64
-	var startedNS, completedNS *int64
-	var failureReason, failureMessage *string
-	var versionText string
-	if err := row.Scan(&operationID, &capability, &targetText, &state, &phase, &requestedNS, &startedNS, &phaseChangedNS, &completedNS, &failureReason, &failureMessage, &versionText); err != nil {
+	record, err := scanOperation(row)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return application.OperationRecord{}, false, nil
 		}
 		return application.OperationRecord{}, false, translateError(err)
 	}
-	record, err := restoreOperation(operationID, id, capability, targetText, state, phase, requestedNS, startedNS, phaseChangedNS, completedNS, failureReason, failureMessage, versionText)
-	return record, err == nil, err
+	return record, true, nil
 }
 
-// LatestForResource selects the newest Operation for a Resource with a fully
-// deterministic total order: requested_at_ns descending, then the byte-wise
-// Operation ID descending. The "C" collation on operations.id makes the
-// tiebreak independent of database locale settings.
+// LatestForResource selects the newest inserted Operation for a Resource.
 func (r *repositories) LatestForResource(ctx context.Context, id domain.ResourceID) (application.OperationRecord, bool, error) {
-	row := r.tx.QueryRow(ctx, `SELECT id, capability, target_generation::text, state, phase,
+	row := r.tx.QueryRow(ctx, `SELECT id, resource_id, operation_seq::text, retry_of_operation_id, capability, target_generation::text, state, phase,
 		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
 		failure_reason, failure_message, record_version::text
-		FROM operations WHERE resource_id=$1 ORDER BY requested_at_ns DESC, id DESC LIMIT 1`, id)
-	var operationID domain.OperationID
-	var capability, targetText, state, phase string
-	var requestedNS, phaseChangedNS int64
-	var startedNS, completedNS *int64
-	var failureReason, failureMessage *string
-	var versionText string
-	if err := row.Scan(&operationID, &capability, &targetText, &state, &phase, &requestedNS, &startedNS, &phaseChangedNS, &completedNS, &failureReason, &failureMessage, &versionText); err != nil {
+		FROM operations WHERE resource_id=$1 ORDER BY operation_seq DESC LIMIT 1`, id)
+	record, err := scanOperation(row)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return application.OperationRecord{}, false, nil
 		}
 		return application.OperationRecord{}, false, translateError(err)
 	}
-	record, err := restoreOperation(operationID, id, capability, targetText, state, phase, requestedNS, startedNS, phaseChangedNS, completedNS, failureReason, failureMessage, versionText)
-	return record, err == nil, err
+	return record, true, nil
 }
 
-func scanOperation(id domain.OperationID, row pgx.Row) (application.OperationRecord, error) {
+func (r *repositories) PageForResource(ctx context.Context, id domain.ResourceID, beforeSequence uint64, limit int) (application.OperationPage, error) {
+	if limit <= 0 {
+		return application.OperationPage{}, fmt.Errorf("%w: operation page limit must be greater than zero", application.ErrInvalidApplicationCall)
+	}
+	rows, err := r.tx.Query(ctx, `SELECT id, resource_id, operation_seq::text, retry_of_operation_id, capability, target_generation::text, state, phase,
+		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
+		failure_reason, failure_message, record_version::text
+		FROM operations WHERE resource_id=$1 AND ($2::numeric=0 OR operation_seq < $2::numeric)
+		ORDER BY operation_seq DESC LIMIT $3`, id, uintText(beforeSequence), limit+1)
+	if err != nil {
+		return application.OperationPage{}, translateError(err)
+	}
+	defer rows.Close()
+	records := make([]application.OperationRecord, 0, limit+1)
+	for rows.Next() {
+		record, err := scanOperation(rows)
+		if err != nil {
+			return application.OperationPage{}, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return application.OperationPage{}, translateError(err)
+	}
+	page := application.OperationPage{}
+	if len(records) > limit {
+		page.Records = records[:limit]
+		page.NextSequence = page.Records[len(page.Records)-1].Sequence
+	} else {
+		page.Records = records
+	}
+	return page, nil
+}
+
+type operationScanner interface {
+	Scan(...any) error
+}
+
+func scanOperation(row operationScanner) (application.OperationRecord, error) {
+	var id domain.OperationID
 	var resourceID domain.ResourceID
-	var capability, targetText, state, phase string
+	var sequenceText, capability, targetText, state, phase string
+	var retryOf *string
 	var requestedNS, phaseChangedNS int64
 	var startedNS, completedNS *int64
 	var failureReason, failureMessage *string
 	var versionText string
 	// The raw scan error is preserved so GetOperation can distinguish a
 	// missing row (pgx.ErrNoRows) before persistence translation.
-	if err := row.Scan(&resourceID, &capability, &targetText, &state, &phase, &requestedNS, &startedNS, &phaseChangedNS, &completedNS, &failureReason, &failureMessage, &versionText); err != nil {
+	if err := row.Scan(&id, &resourceID, &sequenceText, &retryOf, &capability, &targetText, &state, &phase, &requestedNS, &startedNS, &phaseChangedNS, &completedNS, &failureReason, &failureMessage, &versionText); err != nil {
 		return application.OperationRecord{}, err
 	}
-	return restoreOperation(id, resourceID, capability, targetText, state, phase, requestedNS, startedNS, phaseChangedNS, completedNS, failureReason, failureMessage, versionText)
+	return restoreOperation(id, resourceID, sequenceText, retryOf, capability, targetText, state, phase, requestedNS, startedNS, phaseChangedNS, completedNS, failureReason, failureMessage, versionText)
 }
 
-func restoreOperation(id domain.OperationID, resourceID domain.ResourceID, capability, targetText, state, phase string, requestedNS int64, startedNS *int64, phaseChangedNS int64, completedNS *int64, failureReason, failureMessage *string, versionText string) (application.OperationRecord, error) {
+func restoreOperation(id domain.OperationID, resourceID domain.ResourceID, sequenceText string, retryOf *string, capability, targetText, state, phase string, requestedNS int64, startedNS *int64, phaseChangedNS int64, completedNS *int64, failureReason, failureMessage *string, versionText string) (application.OperationRecord, error) {
+	sequence, err := parseUint64(sequenceText)
+	if err != nil {
+		return application.OperationRecord{}, err
+	}
 	target, err := parseUint64(targetText)
 	if err != nil {
 		return application.OperationRecord{}, err
@@ -99,6 +143,9 @@ func restoreOperation(id domain.OperationID, resourceID domain.ResourceID, capab
 	}
 	snapshot := domain.OperationSnapshot{ID: id, ResourceID: resourceID, Capability: domain.Capability(capability), TargetGeneration: target,
 		State: domain.OperationState(state), Phase: domain.OperationPhase(phase), RequestedAt: time.Unix(0, requestedNS).UTC(), PhaseChangedAt: time.Unix(0, phaseChangedNS).UTC()}
+	if retryOf != nil {
+		snapshot.RetryOfOperationID = domain.OperationID(*retryOf)
+	}
 	if startedNS != nil {
 		snapshot.StartedAt = time.Unix(0, *startedNS).UTC()
 	}
@@ -115,7 +162,7 @@ func restoreOperation(id domain.OperationID, resourceID domain.ResourceID, capab
 	if err != nil {
 		return application.OperationRecord{}, fmt.Errorf("restore operation %q: %w", id, err)
 	}
-	return application.OperationRecord{Operation: operation, Version: version}, nil
+	return application.OperationRecord{Operation: operation, Sequence: sequence, Version: version}, nil
 }
 
 func (r *repositories) CreateOperation(ctx context.Context, record application.OperationRecord) error {
@@ -124,14 +171,18 @@ func (r *repositories) CreateOperation(ctx context.Context, record application.O
 		version = 1
 	}
 	operation := record.Operation
+	var retryOf any
+	if operation.RetryOfOperationID() != "" {
+		retryOf = operation.RetryOfOperationID()
+	}
 	failure, failed := operation.Failure()
 	var failureReason, failureMessage any
 	if failed {
 		failureReason, failureMessage = failure.Reason(), failure.Message()
 	}
 	_, err := r.tx.Exec(ctx, `INSERT INTO operations
-		(id,resource_id,capability,target_generation,state,phase,requested_at_ns,started_at_ns,phase_changed_at_ns,completed_at_ns,failure_reason,failure_message,record_version)
-		VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8,$9,$10,$11,$12,$13::numeric)`, operation.ID(), operation.ResourceID(), operation.Capability(), uintText(operation.TargetGeneration()),
+		(id,resource_id,retry_of_operation_id,capability,target_generation,state,phase,requested_at_ns,started_at_ns,phase_changed_at_ns,completed_at_ns,failure_reason,failure_message,record_version)
+		VALUES ($1,$2,$3,$4,$5::numeric,$6,$7,$8,$9,$10,$11,$12,$13,$14::numeric)`, operation.ID(), operation.ResourceID(), retryOf, operation.Capability(), uintText(operation.TargetGeneration()),
 		operation.State(), operation.Phase(), operation.RequestedAt().UnixNano(), nullableUnixNano(operation.StartedAt()), operation.PhaseChangedAt().UnixNano(), nullableUnixNano(operation.CompletedAt()),
 		failureReason, failureMessage, uintText(version))
 	return translateError(err)
@@ -139,15 +190,20 @@ func (r *repositories) CreateOperation(ctx context.Context, record application.O
 
 func (r *repositories) SaveOperation(ctx context.Context, record application.OperationRecord, expectedVersion uint64) error {
 	operation := record.Operation
+	var retryOf any
+	if operation.RetryOfOperationID() != "" {
+		retryOf = operation.RetryOfOperationID()
+	}
 	failure, failed := operation.Failure()
 	var failureReason, failureMessage any
 	if failed {
 		failureReason, failureMessage = failure.Reason(), failure.Message()
 	}
 	command, err := r.tx.Exec(ctx, `UPDATE operations SET state=$2, phase=$3, started_at_ns=$4, phase_changed_at_ns=$5,
-		completed_at_ns=$6, failure_reason=$7, failure_message=$8, record_version=record_version+1
-		WHERE id=$1 AND record_version=$9::numeric`, operation.ID(), operation.State(), operation.Phase(), nullableUnixNano(operation.StartedAt()), operation.PhaseChangedAt().UnixNano(),
-		nullableUnixNano(operation.CompletedAt()), failureReason, failureMessage, uintText(expectedVersion))
+		completed_at_ns=$6, failure_reason=$7, failure_message=$8, record_version=record_version+1,
+		resource_id=$9, capability=$10, target_generation=$11::numeric, requested_at_ns=$12, retry_of_operation_id=$13
+		WHERE id=$1 AND record_version=$14::numeric`, operation.ID(), operation.State(), operation.Phase(), nullableUnixNano(operation.StartedAt()), operation.PhaseChangedAt().UnixNano(),
+		nullableUnixNano(operation.CompletedAt()), failureReason, failureMessage, operation.ResourceID(), operation.Capability(), uintText(operation.TargetGeneration()), operation.RequestedAt().UnixNano(), retryOf, uintText(expectedVersion))
 	if err != nil {
 		return translateError(err)
 	}

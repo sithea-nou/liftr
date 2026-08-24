@@ -43,7 +43,8 @@ func (OwnerAuthorizer) Authorize(_ context.Context, principal identity.Principal
 	case identity.ActionResourceTypeRead:
 		return nil
 	case identity.ActionResourceCreate, identity.ActionResourceRead,
-		identity.ActionResourceUpdate, identity.ActionResourceDelete:
+		identity.ActionResourceUpdate, identity.ActionResourceDelete,
+		identity.ActionResourceRetry:
 		if !principal.IsMember(target.Owner) {
 			return fmt.Errorf("%w: no membership under %s/%s", ErrDenied, target.Owner.Kind, target.Owner.ID)
 		}

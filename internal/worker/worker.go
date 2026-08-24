@@ -165,16 +165,20 @@ func (w *Worker) drive(ctx context.Context, message application.OutboxMessage) e
 		if current.State != application.OutboxLeased || current.LeaseToken != message.LeaseToken {
 			return application.ErrConcurrencyConflict
 		}
+		preflight, err := tx.Operations().LookupOperation(ctx, message.OperationID)
+		if err != nil {
+			return err
+		}
+		resource, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+		if err != nil {
+			return err
+		}
 		operation, err := tx.Operations().GetOperation(ctx, message.OperationID)
 		if err != nil {
 			return err
 		}
 		if operation.Version != message.ExpectedVersion || operation.Operation.IsTerminal() {
 			return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "StaleDrive")
-		}
-		resource, err := tx.Resources().GetResource(ctx, operation.Operation.ResourceID())
-		if err != nil {
-			return err
 		}
 		next, ok := nextPhase(operation.Operation)
 		if !ok {
@@ -205,6 +209,17 @@ func (w *Worker) drive(ctx context.Context, message application.OutboxMessage) e
 			}
 			if execution.CurrentAttempt != 0 {
 				return application.ErrConcurrencyConflict
+			}
+			if execution.IsOutputRecovery() {
+				if next != domain.OperationPhaseApplying || execution.Capability == domain.CapabilityDelete ||
+					execution.State != application.AttemptSucceeded || execution.OutputResolution != application.OutputResolutionPending {
+					return fmt.Errorf("%w: invalid output recovery execution", application.ErrInvalidApplicationCall)
+				}
+				observe := scheduleObserve(&execution, 0)
+				if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
+					return err
+				}
+				return tx.Outbox().Enqueue(ctx, observe)
 			}
 			execution.CurrentAttempt = 1
 			dispatch := application.DispatchMessage(message.OperationID, 1, execution.Version+1)
@@ -240,6 +255,72 @@ type dispatchContext struct {
 	execution application.ProvisioningExecutionRecord
 	version   uint64
 	provider  provisioning.Provisioner
+}
+
+type observationRecords struct {
+	execution application.ProvisioningExecutionRecord
+	source    application.ProvisioningExecutionRecord
+	operation application.OperationRecord
+}
+
+// lockObservationRecords uses unlocked execution metadata only to discover
+// IDs, then acquires every mutable row in the same order as retry replay.
+func lockObservationRecords(ctx context.Context, tx application.UnitOfWork, operationID domain.OperationID, expectedVersion, expectedNextObservation uint64) (observationRecords, error) {
+	preflight, err := tx.Executions().LookupExecution(ctx, operationID)
+	if err != nil {
+		return observationRecords{}, err
+	}
+	if preflight.Version != expectedVersion || preflight.NextObservation != expectedNextObservation {
+		return observationRecords{}, application.ErrConcurrencyConflict
+	}
+	resource, err := tx.Resources().GetResource(ctx, preflight.ResourceID)
+	if err != nil {
+		return observationRecords{}, err
+	}
+
+	var sourceOperation application.OperationRecord
+	if preflight.IsOutputRecovery() {
+		sourceOperation, err = tx.Operations().GetOperation(ctx, preflight.RecoverySourceOperationID)
+		if err != nil {
+			return observationRecords{}, err
+		}
+	}
+	operation, err := tx.Operations().GetOperation(ctx, operationID)
+	if err != nil {
+		return observationRecords{}, err
+	}
+
+	var source application.ProvisioningExecutionRecord
+	if preflight.IsOutputRecovery() {
+		source, err = tx.Executions().GetExecution(ctx, preflight.RecoverySourceOperationID)
+		if err != nil {
+			return observationRecords{}, err
+		}
+	}
+	execution, err := tx.Executions().GetExecution(ctx, operationID)
+	if err != nil {
+		return observationRecords{}, err
+	}
+
+	var sourceAttempt application.SubmissionAttemptRecord
+	if preflight.IsOutputRecovery() {
+		sourceAttempt, err = tx.SubmissionAttempts().GetSubmissionAttempt(ctx, preflight.RecoverySourceOperationID, preflight.RecoverySourceAttempt)
+		if err != nil {
+			return observationRecords{}, err
+		}
+	}
+
+	if execution.ResourceID != preflight.ResourceID || execution.RecoverySourceOperationID != preflight.RecoverySourceOperationID ||
+		execution.RecoverySourceAttempt != preflight.RecoverySourceAttempt || resource.Resource.ID() != execution.ResourceID ||
+		operation.Operation.ID() != execution.OperationID || operation.Operation.ResourceID() != execution.ResourceID {
+		return observationRecords{}, application.ErrConcurrencyConflict
+	}
+	if execution.IsOutputRecovery() {
+		if err := application.ValidateOutputRecoverySource(execution, source, sourceOperation.Operation, sourceAttempt); err != nil {
+			return observationRecords{}, err
+		}
+	}
+	return observationRecords{execution: execution, source: source, operation: operation}, nil
 }
 
 func (w *Worker) dispatch(ctx context.Context, message application.OutboxMessage) error {
@@ -375,6 +456,9 @@ func (w *Worker) prepareDispatch(ctx context.Context, message application.Outbox
 		if execution.Version != message.ExpectedVersion || execution.CurrentAttempt != message.AttemptNumber || execution.State != application.AttemptPending {
 			return application.ErrConcurrencyConflict
 		}
+		if execution.IsOutputRecovery() {
+			return fmt.Errorf("%w: output recovery cannot be dispatched", application.ErrInvalidApplicationCall)
+		}
 		result.execution = execution
 		return nil
 	})
@@ -495,6 +579,7 @@ func (w *Worker) recordDispatch(ctx context.Context, message application.OutboxM
 
 func (w *Worker) observe(ctx context.Context, message application.OutboxMessage) error {
 	var loaded application.ProvisioningExecutionRecord
+	var request provisioning.ObservationRequest
 	var provider provisioning.Provisioner
 	if err := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
 		current, err := tx.Outbox().GetOutbox(ctx, message.ID)
@@ -504,12 +589,24 @@ func (w *Worker) observe(ctx context.Context, message application.OutboxMessage)
 		if current.State != application.OutboxLeased || current.LeaseToken != message.LeaseToken {
 			return application.ErrConcurrencyConflict
 		}
-		loaded, err = tx.Executions().GetExecution(ctx, message.OperationID)
+		records, err := lockObservationRecords(ctx, tx, message.OperationID, message.ExpectedVersion, message.Sequence+1)
 		if err != nil {
 			return err
 		}
+		loaded = records.execution
 		if loaded.Version != message.ExpectedVersion || loaded.NextObservation != message.Sequence+1 {
 			return application.ErrConcurrencyConflict
+		}
+		request = observationRequest(loaded)
+		if loaded.IsOutputRecovery() {
+			source := records.source
+			request = provisioning.ObservationRequest{
+				OperationID: source.OperationID, AttemptNumber: loaded.RecoverySourceAttempt,
+				ResourceID: source.ResourceID, ResourceType: source.ResourceType, Spec: source.Spec,
+				Capability: source.Capability, TargetGeneration: source.TargetGeneration,
+				Handle: source.Handle, OutputMappingRef: loaded.OutputMappingRef,
+				OutputSourceMappingRef: source.OutputMappingRef,
+			}
 		}
 		return nil
 	}); err != nil {
@@ -520,7 +617,7 @@ func (w *Worker) observe(ctx context.Context, message application.OutboxMessage)
 	if err != nil || provider == nil {
 		return fmt.Errorf("%w: %v", application.ErrProvisionerNotFound, err)
 	}
-	observation, observeErr := provider.Observe(ctx, observationRequest(loaded))
+	observation, observeErr := provider.Observe(ctx, request)
 	if observeErr != nil {
 		return observeErr
 	}
@@ -542,16 +639,13 @@ func (w *Worker) recordObservation(ctx context.Context, message application.Outb
 		if currentMessage.State != application.OutboxLeased || currentMessage.LeaseToken != message.LeaseToken {
 			return application.ErrConcurrencyConflict
 		}
-		execution, err := tx.Executions().GetExecution(ctx, message.OperationID)
+		records, err := lockObservationRecords(ctx, tx, message.OperationID, loaded.Version, message.Sequence+1)
 		if err != nil {
 			return err
 		}
+		execution := records.execution
 		if execution.Version != loaded.Version || execution.CurrentAttempt != loaded.CurrentAttempt || execution.NextObservation != message.Sequence+1 {
 			return application.ErrConcurrencyConflict
-		}
-		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, execution.OperationID, execution.CurrentAttempt)
-		if err != nil {
-			return err
 		}
 		// Backend success is already durable and only the output dimension is
 		// outstanding. Re-drive extraction through the provider's observation
@@ -559,19 +653,48 @@ func (w *Worker) recordObservation(ctx context.Context, message application.Outb
 		// pinned to the persisted terminal instant so repeated observations of
 		// an unchanged backend are accepted while resolution advances.
 		if execution.State == application.AttemptSucceeded && execution.OutputResolution == application.OutputResolutionPending {
-			operation, opErr := tx.Operations().GetOperation(ctx, execution.OperationID)
-			if opErr != nil {
-				return opErr
-			}
-			if operation.Operation.IsTerminal() {
+			if records.operation.Operation.IsTerminal() {
 				return application.ErrConcurrencyConflict
 			}
 			if observation.Correlation != provisioning.RequestCorrelationFound || observation.Execution == nil || observation.Execution.State != provisioning.ExecutionStateSucceeded {
+				if execution.IsOutputRecovery() {
+					execution.LastObservation = &observation
+					execution.LastObservedAt = w.observedAt(observation.ObservedAt)
+					execution.Correlation = observation.Correlation
+					if !observation.ObservedAt.IsZero() && (execution.LastProviderObservedAt.IsZero() || observation.ObservedAt.After(execution.LastProviderObservedAt)) {
+						execution.LastProviderObservedAt = observation.ObservedAt
+					}
+					next := scheduleObserve(&execution, w.RetryBase)
+					if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
+						return err
+					}
+					if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, observeCompletionReason(observation)); err != nil {
+						return err
+					}
+					return tx.Outbox().Enqueue(ctx, next)
+				}
 				return fmt.Errorf("%w: pending-output observation is not positively correlated terminal success", lifecycle.ErrInvalidTransition)
+			}
+			finishAt := execution.LastObservedAt
+			if execution.IsOutputRecovery() {
+				finishAt = w.observedAt(observation.ObservedAt)
+				execution.LastObservation = &observation
+				execution.LastObservedAt = finishAt
+				execution.Correlation = observation.Correlation
+				if observation.Execution.Handle != nil {
+					execution.Handle = observation.Execution.Handle
+				}
+				if !observation.ObservedAt.IsZero() {
+					execution.LastProviderObservedAt = observation.ObservedAt
+				}
 			}
 			return w.finishSuccessInTx(ctx, tx, message, execution, execution.Version,
 				application.Finish{Succeeded: true, Reason: "ObservationSucceeded", Facts: observation.Resource},
-				execution.LastObservedAt, observation.Outputs)
+				finishAt, observation.Outputs)
+		}
+		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, execution.OperationID, execution.CurrentAttempt)
+		if err != nil {
+			return err
 		}
 		observedAt := w.observedAt(observation.ObservedAt)
 		execution, attempt, outcome, finish, err := application.InterpretObservation(execution, attempt, observation, observedAt)
@@ -688,11 +811,15 @@ func (w *Worker) passiveObserve(ctx context.Context, message application.OutboxM
 }
 
 func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork, message application.OutboxMessage, execution application.ProvisioningExecutionRecord, expectedExecutionVersion uint64, finish application.Finish, at time.Time) error {
-	operation, err := tx.Operations().GetOperation(ctx, execution.OperationID)
+	preflight, err := tx.Operations().LookupOperation(ctx, execution.OperationID)
 	if err != nil {
 		return err
 	}
-	resource, err := tx.Resources().GetResource(ctx, operation.Operation.ResourceID())
+	resource, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+	if err != nil {
+		return err
+	}
+	operation, err := tx.Operations().GetOperation(ctx, execution.OperationID)
 	if err != nil {
 		return err
 	}
@@ -728,6 +855,14 @@ func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork,
 //     re-driven through Observe without re-executing the backend.
 //   - None: no outputs are declared; completion is plain.
 func (w *Worker) finishSuccessInTx(ctx context.Context, tx application.UnitOfWork, message application.OutboxMessage, execution application.ProvisioningExecutionRecord, expectedExecutionVersion uint64, finish application.Finish, at time.Time, outputs *provisioning.OutputEvidence) error {
+	preflight, err := tx.Operations().LookupOperation(ctx, execution.OperationID)
+	if err != nil {
+		return err
+	}
+	resource, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+	if err != nil {
+		return err
+	}
 	operation, err := tx.Operations().GetOperation(ctx, execution.OperationID)
 	if err != nil {
 		return err
@@ -735,8 +870,7 @@ func (w *Worker) finishSuccessInTx(ctx context.Context, tx application.UnitOfWor
 	if operation.Operation.IsTerminal() {
 		return fmt.Errorf("%w: cannot complete a terminal operation", lifecycle.ErrInvalidTransition)
 	}
-	resource, err := tx.Resources().GetResource(ctx, operation.Operation.ResourceID())
-	if err != nil {
+	if err := application.ValidateOutputEvidenceMapping(execution.OutputMappingRef, outputs); err != nil {
 		return err
 	}
 
@@ -907,7 +1041,8 @@ func scheduleObserve(execution *application.ProvisioningExecutionRecord, delay t
 
 func executionRequest(execution application.ProvisioningExecutionRecord) provisioning.ExecutionRequest {
 	return provisioning.ExecutionRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID, ResourceType: execution.ResourceType,
-		Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration}
+		Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration,
+		OutputMappingRef: execution.OutputMappingRef}
 }
 
 func observationRequest(execution application.ProvisioningExecutionRecord) provisioning.ObservationRequest {

@@ -89,9 +89,18 @@ func TestOpenAPIModelsPublicSchemas(t *testing.T) {
 	}
 
 	operationProperties := propertyNames(t, schemas["Operation"])
-	wantOperation := []string{"id", "resourceId", "capability", "state", "targetGeneration", "requestedAt", "startedAt", "completedAt", "failure"}
+	wantOperation := []string{"id", "resourceId", "retryOf", "capability", "state", "targetGeneration", "requestedAt", "startedAt", "completedAt", "failure"}
 	if strings.Join(operationProperties, ",") != strings.Join(sorted(wantOperation), ",") {
 		t.Fatalf("Operation properties = %v, want %v", operationProperties, wantOperation)
+	}
+	operationListProperties := propertyNames(t, schemas["OperationList"])
+	wantOperationList := []string{"items", "nextCursor"}
+	if strings.Join(operationListProperties, ",") != strings.Join(sorted(wantOperationList), ",") {
+		t.Fatalf("OperationList properties = %v, want %v", operationListProperties, wantOperationList)
+	}
+	required, ok := schemas["OperationList"].(map[string]any)["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "items" {
+		t.Fatalf("OperationList required = %v, want [items]", required)
 	}
 
 	problemProperties := propertyNames(t, schemas["Problem"])
@@ -137,7 +146,8 @@ func TestOpenAPIModelsPublicSchemas(t *testing.T) {
 func assertNoInternalConcepts(t *testing.T, schemas map[string]any) {
 	t.Helper()
 	forbidden := []string{
-		"phase", "phaseChangedAt", "provisionerRef", "handle", "attemptNumber", "fingerprint",
+		"sequence", "operationSeq", "phase", "phaseChangedAt", "provisionerRef", "handle",
+		"mapping", "outputMappingRef", "attempt", "attemptNumber", "fingerprint",
 		"recordVersion", "leaseToken", "pulumi", "terraform", "crossplane", "stack",
 		"workspace", "cloudAccount", "subscription", "gitRepository",
 	}

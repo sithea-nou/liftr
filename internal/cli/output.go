@@ -145,6 +145,9 @@ func (a *App) renderOperationText(w io.Writer, operation *client.Operation) {
 	c := a.clean
 	fmt.Fprintf(w, "ID:                 %s\n", c(operation.ID))
 	fmt.Fprintf(w, "Resource:           %s\n", c(operation.ResourceID))
+	if operation.RetryOf != "" {
+		fmt.Fprintf(w, "Retry of:           %s\n", c(operation.RetryOf))
+	}
 	fmt.Fprintf(w, "Capability:         %s\n", c(operation.Capability))
 	fmt.Fprintf(w, "State:              %s\n", c(operation.State))
 	fmt.Fprintf(w, "Target generation:  %d\n", operation.TargetGeneration)
@@ -161,6 +164,26 @@ func (a *App) renderOperationText(w io.Writer, operation *client.Operation) {
 			fmt.Fprintf(w, "  %s\n", c(operation.Failure.Message))
 		}
 	}
+}
+
+func (a *App) renderOperationListText(w io.Writer, list *client.OperationList) {
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tCAPABILITY\tSTATE\tTARGET GENERATION\tREQUESTED\tCOMPLETED\tRETRY OF")
+	for i := range list.Items {
+		operation := &list.Items[i]
+		completed := "-"
+		if operation.CompletedAt != nil {
+			completed = formatTimestamp(*operation.CompletedAt)
+		}
+		retryOf := "-"
+		if operation.RetryOf != "" {
+			retryOf = a.clean(operation.RetryOf)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			a.clean(operation.ID), a.clean(operation.Capability), a.clean(operation.State),
+			operation.TargetGeneration, formatTimestamp(operation.RequestedAt), completed, retryOf)
+	}
+	_ = tw.Flush()
 }
 
 func (a *App) renderResourceTypeListText(w io.Writer, list *client.ResourceTypeList) {

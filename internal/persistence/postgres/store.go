@@ -76,8 +76,10 @@ func translateError(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
-		case "23505", "40001", "40P01":
+		case "23505":
 			return fmt.Errorf("%w: %s", application.ErrConcurrencyConflict, pgErr.Message)
+		case "40001", "40P01":
+			return fmt.Errorf("%w: %s", application.ErrRetryablePersistence, pgErr.Message)
 		case "23503", "23514", "23000":
 			return fmt.Errorf("%w: %s", application.ErrInvalidApplicationCall, pgErr.Message)
 		}

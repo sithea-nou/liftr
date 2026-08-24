@@ -372,8 +372,11 @@ func testRetryCreatesNewOperation(t *testing.T) {
 	if retry.Operation.ID() == failed.Operation.ID() {
 		t.Fatal("retry reused the failed operation ID")
 	}
-	if retry.Operation.TargetGeneration() != 3 {
-		t.Fatalf("retry target generation = %d, want 3", retry.Operation.TargetGeneration())
+	if retry.Operation.TargetGeneration() != failed.Operation.TargetGeneration() {
+		t.Fatalf("retry target generation = %d, want failed generation %d", retry.Operation.TargetGeneration(), failed.Operation.TargetGeneration())
+	}
+	if retry.Operation.RetryOfOperationID() != failed.Operation.ID() {
+		t.Fatalf("retry source = %q, want %q", retry.Operation.RetryOfOperationID(), failed.Operation.ID())
 	}
 	if retry.Event.Reason() != "UpdateRetryRequested" {
 		t.Fatalf("retry event reason = %q, want UpdateRetryRequested", retry.Event.Reason())

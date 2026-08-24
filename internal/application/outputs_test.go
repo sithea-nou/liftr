@@ -59,6 +59,10 @@ func (p *scriptedProvider) Capabilities() []provisioning.ProvisionerCapability {
 	return []provisioning.ProvisionerCapability{{ResourceType: domain.ResourceTypeRef{Name: "Widget", Version: "v1"}, Capability: domain.CapabilityCreate}}
 }
 
+func (p *scriptedProvider) OutputMappingRef(domain.ResourceTypeRef, domain.Capability) string {
+	return p.mappingRef
+}
+
 func (p *scriptedProvider) Submit(ctx context.Context, request provisioning.ExecutionRequest) (provisioning.Submission, error) {
 	p.submitCalls[request.OperationID]++
 	if p.onSubmit == nil {
@@ -254,6 +258,39 @@ func TestCreatePublishesGenerationAssociatedOutputs(t *testing.T) {
 	}
 	if got := view.Outputs.Values()["hostname"]; got != "orders-db.postgres.example" {
 		t.Fatalf("hostname = %v", got)
+	}
+}
+
+func TestEagerCompletionRejectsOutputEvidenceMappingThatContradictsExecution(t *testing.T) {
+	provider := newScriptedProvider(outputMappingV1)
+	provider.onSubmit = func(request provisioning.ExecutionRequest, call int) (provisioning.Submission, error) {
+		handle, _ := provisioning.NewExecutionHandle("h-" + string(request.OperationID))
+		evidence := availableEvidence(validOutputValues())
+		evidence.OutputMappingRef = "liftr-test-outputs-v2"
+		return provisioning.Submission{Observation: successObservation(handle, evidence)}, nil
+	}
+	service, store, _, _ := outputFixture(t, provider)
+	_, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: appfake.Principal("tester"),
+		ID: "mapping-conflict", Type: domain.ResourceTypeRef{Name: "Widget", Version: "v1"},
+		Owner: domain.OwnerRef{Kind: "team", ID: "platform"}, Spec: validSpec(map[string]any{"name": "gear"}),
+		OperationID: "op-mapping-conflict", EventID: "evt-mapping-conflict",
+		RequestedAt: time.Date(2026, 8, 23, 8, 55, 0, 0, time.UTC)})
+	if !errors.Is(err, application.ErrInvalidApplicationCall) {
+		t.Fatalf("mapping conflict error = %v", err)
+	}
+	view, viewErr := storeView(t, store, "mapping-conflict")
+	if viewErr != nil {
+		t.Fatal(viewErr)
+	}
+	if view.Outputs != nil {
+		t.Fatal("contradictory output evidence was published")
+	}
+	execution, loadErr := store.GetExecution(context.Background(), "op-mapping-conflict")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if execution.OutputMappingRef != outputMappingV1 {
+		t.Fatalf("execution mapping provenance changed to %q", execution.OutputMappingRef)
 	}
 }
 

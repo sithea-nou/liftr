@@ -90,6 +90,7 @@ type operationFailureDTO struct {
 type operationDTO struct {
 	ID               string               `json:"id"`
 	ResourceID       string               `json:"resourceId"`
+	RetryOf          string               `json:"retryOf,omitempty"`
 	Capability       string               `json:"capability"`
 	State            string               `json:"state"`
 	TargetGeneration uint64               `json:"targetGeneration"`
@@ -97,6 +98,11 @@ type operationDTO struct {
 	StartedAt        *time.Time           `json:"startedAt,omitempty"`
 	CompletedAt      *time.Time           `json:"completedAt,omitempty"`
 	Failure          *operationFailureDTO `json:"failure,omitempty"`
+}
+
+type operationListDTO struct {
+	Items      []operationDTO `json:"items"`
+	NextCursor string         `json:"nextCursor,omitempty"`
 }
 
 func instant(at time.Time) *time.Time {
@@ -166,6 +172,7 @@ func newOperationDTO(operation domain.Operation) operationDTO {
 	dto := operationDTO{
 		ID:               string(operation.ID()),
 		ResourceID:       string(operation.ResourceID()),
+		RetryOf:          string(operation.RetryOfOperationID()),
 		Capability:       string(operation.Capability()),
 		State:            string(operation.State()),
 		TargetGeneration: operation.TargetGeneration(),

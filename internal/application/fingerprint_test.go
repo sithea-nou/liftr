@@ -56,3 +56,17 @@ func TestCreateCommandFingerprintNulDistinguishesResourceAndType(t *testing.T) {
 		t.Fatalf("command fingerprints collide across NUL-joined parts: %s", first)
 	}
 }
+
+func TestRetryCommandFingerprintV1CoversOnlySourceAndExpectedGeneration(t *testing.T) {
+	command := RetryOperationCommand{OperationID: "operation-source", ExpectedGeneration: 42}
+	want := fingerprintHash("retry-operation-v1", "operation-source", "42")
+	if got := retryCommandFingerprint(command); got != want {
+		t.Fatalf("retry fingerprint = %q, want %q", got, want)
+	}
+	changed := command
+	changed.NewOperationID = "ignored-child-id"
+	changed.EventID = "ignored-event-id"
+	if got := retryCommandFingerprint(changed); got != want {
+		t.Fatalf("non-fingerprinted retry fields changed fingerprint to %q", got)
+	}
+}

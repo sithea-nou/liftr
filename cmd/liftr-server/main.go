@@ -289,10 +289,11 @@ func composePulumiProvisioner() (application.ProvisionerRef, provisioning.Provis
 				RequiredEnvironment:     azureCredentialVariables,
 				EncodeInput:             bindings.PostgresEncoder(identity, namespace, platform),
 				SecretInputsUnsupported: true,
-				Outputs: &pulumiprovisioner.OutputMapping{
+				OutputMappings: []pulumiprovisioner.OutputMapping{{
 					Ref:        "liftr-azure-pg-outputs-v1",
 					ExportName: "liftrOutputs",
-				},
+				}},
+				CurrentOutputMappingRef: "liftr-azure-pg-outputs-v1",
 			},
 		},
 	}

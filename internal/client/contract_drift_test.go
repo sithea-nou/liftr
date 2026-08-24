@@ -103,11 +103,37 @@ func TestClientRepresentationsMatchOpenAPI(t *testing.T) {
 	assertShapeMatches(t, schemas, "LatestOperationRef", client.LatestOperationRef{})
 	assertShapeMatches(t, schemas, "ResourceOutputs", client.ResourceOutputs{})
 	assertShapeMatches(t, schemas, "Operation", client.Operation{})
+	assertShapeMatches(t, schemas, "OperationList", client.OperationList{})
 	assertShapeMatches(t, schemas, "OperationFailure", client.OperationFailure{})
 	assertShapeMatches(t, schemas, "ResourceTypeSummary", client.ResourceTypeSummary{})
 	assertShapeMatches(t, schemas, "ResourceType", client.ResourceTypeDetail{})
 	assertShapeMatches(t, schemas, "Problem", client.Problem{})
 	assertShapeMatches(t, schemas, "SpecViolation", client.SpecViolation{})
+}
+
+func TestOperationContractsExcludePrivateExecutionFields(t *testing.T) {
+	schemas := loadOpenAPISchemas(t)
+	operation := schemas["Operation"]
+	if _, ok := operation.Properties["retryOf"]; !ok {
+		t.Fatal("Operation schema does not document retryOf")
+	}
+	for _, schemaName := range []string{"Operation", "OperationList"} {
+		shape := schemas[schemaName]
+		for _, private := range []string{"sequence", "operationSeq", "mapping", "outputMappingRef", "attempt", "attemptNumber", "phase", "phaseChangedAt"} {
+			if _, exposed := shape.Properties[private]; exposed {
+				t.Errorf("%s exposes private field %q", schemaName, private)
+			}
+		}
+	}
+	for typeName, instance := range map[string]any{"Operation": client.Operation{}, "OperationList": client.OperationList{}} {
+		for field := range jsonTags(reflect.TypeOf(instance)) {
+			for _, private := range []string{"sequence", "operationSeq", "mapping", "outputMappingRef", "attempt", "attemptNumber", "phase", "phaseChangedAt"} {
+				if field == private {
+					t.Errorf("client %s exposes private field %q", typeName, field)
+				}
+			}
+		}
+	}
 }
 
 func TestCreateEnvelopeKeysMatchOpenAPI(t *testing.T) {

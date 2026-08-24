@@ -4,6 +4,7 @@ package application_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -39,11 +40,7 @@ func seedOperations(t *testing.T, store *fake.Store, operations ...domain.Operat
 	}
 }
 
-// TestLatestForResourceIsDeterministicWithEqualTimestamps pins Correction 3:
-// two Operations for one Resource sharing an identical RequestedAt are
-// ordered by descending Operation ID, so repeated LatestForResource calls
-// always select the same Operation.
-func TestLatestForResourceIsDeterministicWithEqualTimestamps(t *testing.T) {
+func TestOperationHistoryUsesInsertionSequence(t *testing.T) {
 	store := fake.NewStore()
 	requestedAt := applicationTime
 	resourceID := domain.ResourceID("resource-latest")
@@ -71,12 +68,95 @@ func TestLatestForResourceIsDeterministicWithEqualTimestamps(t *testing.T) {
 	)
 	latest, found, err := store.LatestForResource(context.Background(), resourceID)
 	if err != nil || !found || latest.Operation.ID() != newestID {
-		t.Fatalf("newest timestamp must win: latest=%v found=%t err=%v", latest, found, err)
+		t.Fatalf("newest insertion must win: latest=%v found=%t err=%v", latest, found, err)
+	}
+	regressedClockID := domain.OperationID("op-d-regressed-clock")
+	seedOperations(t, store,
+		readTestOperation(t, regressedClockID, resourceID, domain.CapabilityDelete, requestedAt.Add(-time.Second)),
+	)
+	latest, found, err = store.LatestForResource(context.Background(), resourceID)
+	if err != nil || !found || latest.Operation.ID() != regressedClockID {
+		t.Fatalf("clock regression changed insertion order: latest=%v found=%t err=%v", latest, found, err)
 	}
 
 	var missing bool
 	if _, missing, err = store.LatestForResource(context.Background(), "resource-without-operations"); err != nil || missing {
 		t.Fatalf("LatestForResource for unknown Resource = found %t err %v, want false nil", missing, err)
+	}
+
+	firstPage, err := store.PageForResource(context.Background(), resourceID, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage.Records) != 2 || firstPage.Records[0].Operation.ID() != regressedClockID || firstPage.Records[1].Operation.ID() != newestID || firstPage.NextSequence == 0 {
+		t.Fatalf("first page = %#v", firstPage)
+	}
+	secondPage, err := store.PageForResource(context.Background(), resourceID, firstPage.NextSequence, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondPage.Records) != 2 || secondPage.Records[0].Operation.ID() != newerID || secondPage.Records[1].Operation.ID() != olderID || secondPage.NextSequence != 0 {
+		t.Fatalf("second page = %#v", secondPage)
+	}
+	if _, err := store.PageForResource(context.Background(), resourceID, 0, 0); err == nil {
+		t.Fatal("PageForResource accepted a zero limit")
+	}
+}
+
+func TestFakeOperationRetryValidationAndTerminalImmutability(t *testing.T) {
+	store := fake.NewStore()
+	failed := readTestOperation(t, "operation-failed", "resource-retry-history", domain.CapabilityUpdate, applicationTime)
+	if err := failed.Fail("ApplyFailed", "failed", applicationTime.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateOperation(context.Background(), application.OperationRecord{Operation: failed, Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	retry, err := domain.NewOperation("operation-retry", failed.ResourceID(), failed.Capability(), failed.TargetGeneration(), applicationTime.Add(time.Minute), failed.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateOperation(context.Background(), application.OperationRecord{Operation: retry, Version: 1}); err != nil {
+		t.Fatalf("valid retry rejected: %v", err)
+	}
+	retryRecord, err := store.GetOperation(context.Background(), retry.ID())
+	if err != nil || retryRecord.Sequence == 0 {
+		t.Fatalf("stored retry sequence=%d err=%v", retryRecord.Sequence, err)
+	}
+
+	wrongIntent, err := domain.NewOperation("operation-wrong-intent", failed.ResourceID(), failed.Capability(), failed.TargetGeneration()+1, applicationTime.Add(2*time.Minute), failed.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateOperation(context.Background(), application.OperationRecord{Operation: wrongIntent, Version: 1}); !errors.Is(err, application.ErrInvalidApplicationCall) {
+		t.Fatalf("mismatched retry error = %v, want ErrInvalidApplicationCall", err)
+	}
+	if err := store.SaveOperation(context.Background(), application.OperationRecord{Operation: failed}, 1); !errors.Is(err, application.ErrInvalidApplicationCall) {
+		t.Fatalf("terminal save error = %v, want ErrInvalidApplicationCall", err)
+	}
+}
+
+func TestFakeOperationSequenceSurvivesRollback(t *testing.T) {
+	store := fake.NewStore()
+	rolledBack := errors.New("roll back")
+	err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
+		operation := readTestOperation(t, "operation-rolled-back", "resource-sequence", domain.CapabilityCreate, applicationTime)
+		if err := tx.Operations().CreateOperation(context.Background(), application.OperationRecord{Operation: operation}); err != nil {
+			return err
+		}
+		return rolledBack
+	})
+	if !errors.Is(err, rolledBack) {
+		t.Fatalf("transaction error = %v, want rollback sentinel", err)
+	}
+	operation := readTestOperation(t, "operation-after-rollback", "resource-sequence", domain.CapabilityCreate, applicationTime.Add(time.Minute))
+	if err := store.CreateOperation(context.Background(), application.OperationRecord{Operation: operation}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GetOperation(context.Background(), operation.ID())
+	if err != nil || record.Sequence != 2 {
+		t.Fatalf("sequence after rollback = %d, err=%v, want 2", record.Sequence, err)
 	}
 }
 

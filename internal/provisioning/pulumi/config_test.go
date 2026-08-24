@@ -34,6 +34,44 @@ func TestSeparateProgramRegistrationPerResourceTypeIsAccepted(t *testing.T) {
 	}
 }
 
+func TestOutputMappingRegistrationRequiresExplicitCurrentAndUnambiguousCompatibility(t *testing.T) {
+	base := testConfig(t)
+	base.Programs[0].OutputMappings = []OutputMapping{
+		{Ref: "mapping-v1", ExportName: "outputsV1"},
+		{Ref: "mapping-v2", ExportName: "outputsV2", CompatibleSourceMappingRef: "mapping-broken"},
+	}
+	base.Programs[0].CurrentOutputMappingRef = "mapping-v2"
+	if _, err := newProvisioner(base, &fakeFactory{}); err != nil {
+		t.Fatalf("valid versioned mappings rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Program)
+	}{
+		{name: "missing current", mutate: func(program *Program) { program.CurrentOutputMappingRef = "" }},
+		{name: "unknown current", mutate: func(program *Program) { program.CurrentOutputMappingRef = "mapping-v3" }},
+		{name: "duplicate ref", mutate: func(program *Program) {
+			program.OutputMappings[1].Ref = "mapping-v1"
+		}},
+		{name: "duplicate compatible source", mutate: func(program *Program) {
+			program.OutputMappings[0].CompatibleSourceMappingRef = "mapping-broken"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := base
+			program := config.Programs[0]
+			program.OutputMappings = append([]OutputMapping(nil), program.OutputMappings...)
+			test.mutate(&program)
+			config.Programs = []Program{program}
+			if _, err := newProvisioner(config, &fakeFactory{}); err == nil {
+				t.Fatal("invalid output mapping registration was accepted")
+			}
+		})
+	}
+}
+
 func TestSingleProgramSupportsCreateUpdateAndDelete(t *testing.T) {
 	config := testConfig(t)
 	provider, err := newProvisioner(config, &fakeFactory{})

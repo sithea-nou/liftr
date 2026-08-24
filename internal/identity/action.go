@@ -9,8 +9,8 @@ import (
 )
 
 // Action is one authorization decision Liftr can be asked to make. The set is
-// deliberately small; future actions (secret:resolve, resource:retry,
-// admin:*) join without breaking the port.
+// deliberately small; future actions (secret:resolve, admin:*) join without
+// breaking the port.
 type Action string
 
 const (
@@ -18,6 +18,7 @@ const (
 	ActionResourceRead     Action = "resource:read"
 	ActionResourceUpdate   Action = "resource:update"
 	ActionResourceDelete   Action = "resource:delete"
+	ActionResourceRetry    Action = "resource:retry"
 	ActionResourceTypeRead Action = "resourceType:read"
 )
 

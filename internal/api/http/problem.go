@@ -24,6 +24,7 @@ const (
 	CodeIdempotencyConflict     = "IDEMPOTENCY_CONFLICT"
 	CodeGenerationConflict      = "GENERATION_CONFLICT"
 	CodeOperationActive         = "OPERATION_ACTIVE"
+	CodeOperationNotRetryable   = "OPERATION_NOT_RETRYABLE"
 	CodeResourceStateConflict   = "RESOURCE_STATE_CONFLICT"
 	CodeUnsupportedCapability   = "UNSUPPORTED_CAPABILITY"
 	CodePreconditionRequired    = "PRECONDITION_REQUIRED"
@@ -50,6 +51,7 @@ var problemTitles = map[string]string{
 	CodeIdempotencyConflict:     "Idempotency key conflict",
 	CodeGenerationConflict:      "Generation conflict",
 	CodeOperationActive:         "Operation already active",
+	CodeOperationNotRetryable:   "Operation not retryable",
 	CodeResourceStateConflict:   "Resource state conflict",
 	CodeUnsupportedCapability:   "Unsupported capability",
 	CodePreconditionRequired:    "Precondition required",
@@ -87,7 +89,7 @@ func problemStatus(code string) int {
 	case CodeResourceNotFound, CodeOperationNotFound, CodeResourceTypeNotFound:
 		return http.StatusNotFound
 	case CodeResourceAlreadyExists, CodeIdempotencyConflict, CodeGenerationConflict,
-		CodeOperationActive, CodeResourceStateConflict, CodeUnsupportedCapability:
+		CodeOperationActive, CodeOperationNotRetryable, CodeResourceStateConflict, CodeUnsupportedCapability:
 		return http.StatusConflict
 	case CodePreconditionRequired:
 		return http.StatusPreconditionRequired

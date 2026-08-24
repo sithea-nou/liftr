@@ -372,7 +372,7 @@ func parseGenerationPrecondition(r *http.Request) (uint64, *requestError) {
 		return 0, &requestError{code: CodePreconditionRequired, detail: "the If-Liftr-Generation header carrying a concrete generation is required"}
 	}
 	generation, err := strconv.ParseUint(value, 10, 64)
-	if err != nil {
+	if err != nil || generation == 0 {
 		return 0, &requestError{code: CodeInvalidArgument, detail: "If-Liftr-Generation must be a concrete unsigned 64-bit integer generation; wildcards are not supported"}
 	}
 	return generation, nil

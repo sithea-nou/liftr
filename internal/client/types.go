@@ -85,6 +85,7 @@ type Operation struct {
 	Raw              json.RawMessage   `json:"-"`
 	ID               string            `json:"id"`
 	ResourceID       string            `json:"resourceId"`
+	RetryOf          string            `json:"retryOf,omitempty"`
 	Capability       string            `json:"capability"`
 	State            string            `json:"state"`
 	TargetGeneration uint64            `json:"targetGeneration"`
@@ -92,6 +93,12 @@ type Operation struct {
 	StartedAt        *time.Time        `json:"startedAt,omitempty"`
 	CompletedAt      *time.Time        `json:"completedAt,omitempty"`
 	Failure          *OperationFailure `json:"failure,omitempty"`
+}
+
+type OperationList struct {
+	Raw        json.RawMessage `json:"-"`
+	Items      []Operation     `json:"items"`
+	NextCursor string          `json:"nextCursor,omitempty"`
 }
 
 const (
@@ -128,11 +135,12 @@ type ResourceTypeList struct {
 	Items []ResourceTypeSummary `json:"items"`
 }
 
-// MutationResult is an admitted mutation: the current Resource snapshot plus
-// the untrusted server-supplied monitor references, which are resolved and
-// origin-checked only by MonitorOperationID.
+// MutationResult is an admitted mutation: its Resource or Operation response
+// plus the untrusted server-supplied monitor references, which are resolved
+// and origin-checked only by MonitorOperationID.
 type MutationResult struct {
 	Resource        *Resource
+	Operation       *Operation
 	Status          int
 	Replay          bool
 	MonitorRef      string

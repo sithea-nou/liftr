@@ -99,19 +99,22 @@ type Submission struct {
 
 // ObservationRequest identifies what the provisioner should observe. Handle
 // is optional for declarative backends that observe by resource identity.
-// OutputMappingRef is the durable mapping identity persisted for this
-// execution; recovery must resolve it to an exact compatible decoder or fail
-// loudly rather than silently substituting the newest registration.
+// OutputMappingRef is the durable mapping identity selected for this
+// execution. Ordinary observations decode envelopes against that mapping's
+// own identity. OutputSourceMappingRef is set only for output recovery and
+// names the source execution's persisted envelope identity; the selected
+// mapping must explicitly declare exact compatibility with it.
 type ObservationRequest struct {
-	OperationID      domain.OperationID
-	AttemptNumber    uint64
-	ResourceID       domain.ResourceID
-	ResourceType     domain.ResourceTypeRef
-	Spec             domain.ResourceSpec
-	Capability       domain.Capability
-	TargetGeneration uint64
-	Handle           *ExecutionHandle
-	OutputMappingRef string
+	OperationID            domain.OperationID
+	AttemptNumber          uint64
+	ResourceID             domain.ResourceID
+	ResourceType           domain.ResourceTypeRef
+	Spec                   domain.ResourceSpec
+	Capability             domain.Capability
+	TargetGeneration       uint64
+	Handle                 *ExecutionHandle
+	OutputMappingRef       string
+	OutputSourceMappingRef string
 }
 
 func (r ObservationRequest) Validate() error {
@@ -129,6 +132,9 @@ func (r ObservationRequest) Validate() error {
 	hasCapability := strings.TrimSpace(string(r.Capability)) != ""
 	if hasOperation != hasAttempt || hasOperation != hasCapability {
 		return fmt.Errorf("operation ID, attempt number, and capability must be provided together")
+	}
+	if strings.TrimSpace(r.OutputSourceMappingRef) != "" && (!hasOperation || strings.TrimSpace(r.OutputMappingRef) == "") {
+		return fmt.Errorf("output source mapping requires an operation and selected output mapping")
 	}
 	return nil
 }
@@ -244,6 +250,10 @@ func (s OutputEvidenceState) valid() bool {
 type OutputEvidence struct {
 	State  OutputEvidenceState
 	Values map[string]any
+	// OutputMappingRef is the private mapping implementation that produced the
+	// candidate values. It identifies the selected execution mapping, never a
+	// source envelope identity supplied for recovery.
+	OutputMappingRef string
 	// Reason is a curated, client-safe classification for Invalid evidence.
 	Reason string
 }

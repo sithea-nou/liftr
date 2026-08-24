@@ -24,15 +24,16 @@ import (
 var ErrNotFound = errors.New("fake record not found")
 
 type Store struct {
-	mu          sync.Mutex
-	resources   map[domain.ResourceID]application.ResourceRecord
-	operations  map[domain.OperationID]application.OperationRecord
-	events      map[domain.EventID]domain.Event
-	executions  map[domain.OperationID]application.ProvisioningExecutionRecord
-	idempotency map[string]application.IdempotencyRecord
-	attempts    map[string]application.SubmissionAttemptRecord
-	outbox      map[string]application.OutboxMessage
-	outputs     map[domain.ResourceID]map[uint64]application.ResourceOutputRecord
+	mu                    sync.Mutex
+	resources             map[domain.ResourceID]application.ResourceRecord
+	operations            map[domain.OperationID]application.OperationRecord
+	nextOperationSequence uint64
+	events                map[domain.EventID]domain.Event
+	executions            map[domain.OperationID]application.ProvisioningExecutionRecord
+	idempotency           map[string]application.IdempotencyRecord
+	attempts              map[string]application.SubmissionAttemptRecord
+	outbox                map[string]application.OutboxMessage
+	outputs               map[domain.ResourceID]map[uint64]application.ResourceOutputRecord
 }
 
 func NewStore() *Store {
@@ -52,20 +53,25 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx := &Store{
-		resources:   cloneMap(s.resources),
-		operations:  cloneMap(s.operations),
-		events:      cloneEvents(s.events),
-		executions:  cloneExecutions(s.executions),
-		idempotency: cloneMap(s.idempotency),
-		attempts:    cloneMap(s.attempts),
-		outbox:      cloneMap(s.outbox),
-		outputs:     cloneOutputs(s.outputs),
+		resources:             cloneMap(s.resources),
+		operations:            cloneMap(s.operations),
+		nextOperationSequence: s.nextOperationSequence,
+		events:                cloneEvents(s.events),
+		executions:            cloneExecutions(s.executions),
+		idempotency:           cloneMap(s.idempotency),
+		attempts:              cloneMap(s.attempts),
+		outbox:                cloneMap(s.outbox),
+		outputs:               cloneOutputs(s.outputs),
 	}
 	if err := fn(tx); err != nil {
+		// PostgreSQL identity sequences are non-transactional: allocated values
+		// remain consumed when the surrounding transaction rolls back.
+		s.nextOperationSequence = tx.nextOperationSequence
 		return err
 	}
 	s.resources = tx.resources
 	s.operations = tx.operations
+	s.nextOperationSequence = tx.nextOperationSequence
 	s.events = tx.events
 	s.executions = tx.executions
 	s.idempotency = tx.idempotency
@@ -277,6 +283,10 @@ func (s *Store) GetOperation(_ context.Context, id domain.OperationID) (applicat
 	return record, nil
 }
 
+func (s *Store) LookupOperation(ctx context.Context, id domain.OperationID) (application.OperationRecord, error) {
+	return s.GetOperation(ctx, id)
+}
+
 func (s *Store) ActiveForResource(_ context.Context, id domain.ResourceID) (application.OperationRecord, bool, error) {
 	for _, record := range s.operations {
 		if record.Operation.ResourceID() == id && !record.Operation.IsTerminal() {
@@ -286,9 +296,6 @@ func (s *Store) ActiveForResource(_ context.Context, id domain.ResourceID) (appl
 	return application.OperationRecord{}, false, nil
 }
 
-// LatestForResource mirrors the PostgreSQL ordering exactly: newest
-// requested_at_ns first and, for equal timestamps, the descending Operation ID
-// compared byte-wise. Repeated calls always select the same Operation.
 func (s *Store) LatestForResource(_ context.Context, id domain.ResourceID) (application.OperationRecord, bool, error) {
 	var latest application.OperationRecord
 	found := false
@@ -296,7 +303,7 @@ func (s *Store) LatestForResource(_ context.Context, id domain.ResourceID) (appl
 		if record.Operation.ResourceID() != id {
 			continue
 		}
-		if !found || operationPrecedes(latest.Operation, record.Operation) {
+		if !found || record.Sequence > latest.Sequence {
 			latest = record
 			found = true
 		}
@@ -304,24 +311,44 @@ func (s *Store) LatestForResource(_ context.Context, id domain.ResourceID) (appl
 	return latest, found, nil
 }
 
-// operationPrecedes reports whether left is older than right under the shared
-// deterministic ordering. Timestamps compare as Unix nanoseconds to match the
-// bigint requested_at_ns column; Operation IDs compare byte-wise to match a
-// "C"-collated text column.
-func operationPrecedes(left, right domain.Operation) bool {
-	leftNS, rightNS := left.RequestedAt().UnixNano(), right.RequestedAt().UnixNano()
-	if leftNS != rightNS {
-		return leftNS < rightNS
+func (s *Store) PageForResource(_ context.Context, id domain.ResourceID, beforeSequence uint64, limit int) (application.OperationPage, error) {
+	if limit <= 0 {
+		return application.OperationPage{}, fmt.Errorf("%w: operation page limit must be greater than zero", application.ErrInvalidApplicationCall)
 	}
-	return left.ID() < right.ID()
+	records := make([]application.OperationRecord, 0)
+	for _, record := range s.operations {
+		if record.Operation.ResourceID() == id && (beforeSequence == 0 || record.Sequence < beforeSequence) {
+			records = append(records, record)
+		}
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Sequence > records[j].Sequence })
+	page := application.OperationPage{}
+	if len(records) > limit {
+		page.Records = records[:limit]
+		page.NextSequence = page.Records[len(page.Records)-1].Sequence
+	} else {
+		page.Records = records
+	}
+	return page, nil
 }
 
 func (s *Store) CreateOperation(_ context.Context, record application.OperationRecord) error {
+	s.nextOperationSequence++
+	record.Sequence = s.nextOperationSequence
 	if _, exists := s.operations[record.Operation.ID()]; exists {
 		return fmt.Errorf("operation already exists")
 	}
 	if record.Version == 0 {
 		record.Version = 1
+	}
+	if retryOf := record.Operation.RetryOfOperationID(); retryOf != "" {
+		source, exists := s.operations[retryOf]
+		if !exists || source.Operation.State() != domain.OperationStateFailed ||
+			source.Operation.ResourceID() != record.Operation.ResourceID() ||
+			source.Operation.Capability() != record.Operation.Capability() ||
+			source.Operation.TargetGeneration() != record.Operation.TargetGeneration() {
+			return fmt.Errorf("%w: retry source must be a failed operation with matching intent", application.ErrInvalidApplicationCall)
+		}
 	}
 	s.operations[record.Operation.ID()] = record
 	return nil
@@ -335,6 +362,17 @@ func (s *Store) SaveOperation(_ context.Context, record application.OperationRec
 	if current.Version != expectedVersion {
 		return application.ErrConcurrencyConflict
 	}
+	if current.Operation.IsTerminal() {
+		return fmt.Errorf("%w: terminal operation is immutable", application.ErrInvalidApplicationCall)
+	}
+	if current.Operation.ResourceID() != record.Operation.ResourceID() ||
+		current.Operation.Capability() != record.Operation.Capability() ||
+		current.Operation.TargetGeneration() != record.Operation.TargetGeneration() ||
+		current.Operation.RequestedAt().UnixNano() != record.Operation.RequestedAt().UnixNano() ||
+		current.Operation.RetryOfOperationID() != record.Operation.RetryOfOperationID() {
+		return fmt.Errorf("%w: operation intent is immutable", application.ErrInvalidApplicationCall)
+	}
+	record.Sequence = current.Sequence
 	record.Version = expectedVersion + 1
 	s.operations[record.Operation.ID()] = record
 	return nil
@@ -364,12 +402,24 @@ func (s *Store) GetExecution(_ context.Context, id domain.OperationID) (applicat
 	return cloneExecution(record), nil
 }
 
+func (s *Store) LookupExecution(ctx context.Context, id domain.OperationID) (application.ProvisioningExecutionRecord, error) {
+	return s.GetExecution(ctx, id)
+}
+
 func (s *Store) CreateExecution(_ context.Context, record application.ProvisioningExecutionRecord) error {
 	if _, exists := s.executions[record.OperationID]; exists {
 		return fmt.Errorf("execution already exists")
 	}
 	if record.Version == 0 {
 		record.Version = 1
+	}
+	if (record.RecoverySourceOperationID == "") != (record.RecoverySourceAttempt == 0) || record.RecoverySourceOperationID == record.OperationID {
+		return fmt.Errorf("%w: invalid output recovery provenance", application.ErrInvalidApplicationCall)
+	}
+	if record.IsOutputRecovery() {
+		if _, exists := s.attempts[attemptKey(record.RecoverySourceOperationID, record.RecoverySourceAttempt)]; !exists {
+			return fmt.Errorf("%w: output recovery source attempt does not exist", application.ErrInvalidApplicationCall)
+		}
 	}
 	s.executions[record.OperationID] = cloneExecution(record)
 	return nil
@@ -382,6 +432,20 @@ func (s *Store) SaveExecution(_ context.Context, record application.Provisioning
 	}
 	if current.Version != expectedVersion {
 		return application.ErrConcurrencyConflict
+	}
+	for _, child := range s.executions {
+		if child.RecoverySourceOperationID == record.OperationID {
+			return fmt.Errorf("%w: referenced recovery source execution is immutable", application.ErrInvalidApplicationCall)
+		}
+	}
+	if current.RecoverySourceOperationID != record.RecoverySourceOperationID || current.RecoverySourceAttempt != record.RecoverySourceAttempt {
+		return fmt.Errorf("%w: output recovery provenance is immutable", application.ErrInvalidApplicationCall)
+	}
+	if current.OutputMappingRef != "" && current.OutputMappingRef != record.OutputMappingRef {
+		return application.ErrConcurrencyConflict
+	}
+	if current.OutputMappingRef != "" {
+		record.OutputMappingRef = current.OutputMappingRef
 	}
 	record.Version = expectedVersion + 1
 	s.executions[record.OperationID] = cloneExecution(record)
@@ -445,6 +509,11 @@ func (s *Store) SaveSubmissionAttempt(_ context.Context, record application.Subm
 	}
 	if current.State != expected {
 		return application.ErrConcurrencyConflict
+	}
+	for _, child := range s.executions {
+		if child.RecoverySourceOperationID == record.OperationID && child.RecoverySourceAttempt == record.AttemptNumber {
+			return fmt.Errorf("%w: referenced recovery source submission attempt is immutable", application.ErrInvalidApplicationCall)
+		}
 	}
 	s.attempts[key] = record
 	return nil

@@ -112,11 +112,12 @@ func TestSelectedOutputCommandNeverRequestsSecrets(t *testing.T) {
 // TestAttachOutputsMatrix drives extraction classification through a fake
 // stack without invoking any CLI.
 func TestAttachOutputsMatrix(t *testing.T) {
-	mapping := &OutputMapping{Ref: testMappingRef, ExportName: outputsExport}
+	mapping := OutputMapping{Ref: testMappingRef, ExportName: outputsExport}
 	program := Program{
-		ResourceType: domain.ResourceTypeRef{Name: "Widget", Version: "v2"},
-		Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
-		Outputs:      mapping,
+		ResourceType:            domain.ResourceTypeRef{Name: "Widget", Version: "v2"},
+		Capabilities:            []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
+		OutputMappings:          []OutputMapping{mapping},
+		CurrentOutputMappingRef: testMappingRef,
 	}
 	provider := &Provisioner{programs: map[domain.ResourceTypeRef]Program{program.ResourceType: program}}
 	request := ObservationRequest{
@@ -214,9 +215,10 @@ func TestAttachOutputsMatrix(t *testing.T) {
 }
 
 func TestProvisionerDeclaresMappingIdentityPerCapability(t *testing.T) {
-	mapping := &OutputMapping{Ref: testMappingRef, ExportName: outputsExport}
+	mapping := OutputMapping{Ref: testMappingRef, ExportName: outputsExport}
 	ref := domain.ResourceTypeRef{Name: "Widget", Version: "v2"}
-	program := Program{ResourceType: ref, Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete}, Outputs: mapping}
+	program := Program{ResourceType: ref, Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
+		OutputMappings: []OutputMapping{mapping}, CurrentOutputMappingRef: testMappingRef}
 	provider := &Provisioner{programs: map[domain.ResourceTypeRef]Program{ref: program}}
 	if got := provider.OutputMappingRef(ref, domain.CapabilityCreate); got != testMappingRef {
 		t.Fatalf("create mapping ref = %q", got)
@@ -226,6 +228,101 @@ func TestProvisionerDeclaresMappingIdentityPerCapability(t *testing.T) {
 	}
 	if got := provider.OutputMappingRef(ref, domain.CapabilityDelete); got != "" {
 		t.Fatalf("delete mapping ref = %q", got)
+	}
+}
+
+func TestSelectOutputRecoveryMappingUsesExplicitCurrentAndExactCompatibility(t *testing.T) {
+	ref := domain.ResourceTypeRef{Name: "Widget", Version: "v2"}
+	program := Program{
+		ResourceType: ref,
+		Capabilities: []domain.Capability{domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete},
+		OutputMappings: []OutputMapping{
+			{Ref: "mapping-v9", ExportName: "outputsV9"},
+			{Ref: "mapping-v2-repair", ExportName: "outputsRepair", CompatibleSourceMappingRef: "mapping-v1"},
+			{Ref: "mapping-v2", ExportName: "outputsV2"},
+		},
+		CurrentOutputMappingRef: "mapping-v2",
+	}
+	provider := &Provisioner{programs: map[domain.ResourceTypeRef]Program{ref: program}}
+
+	if got := provider.OutputMappingRef(ref, domain.CapabilityCreate); got != "mapping-v2" {
+		t.Fatalf("fresh mapping = %q, want explicit current mapping-v2", got)
+	}
+	if got, ok := provider.SelectOutputRecoveryMapping(ref, domain.CapabilityCreate, "mapping-v1"); !ok || got != "mapping-v2-repair" {
+		t.Fatalf("repair selection = %q, %t", got, ok)
+	}
+	if got, ok := provider.SelectOutputRecoveryMapping(ref, domain.CapabilityUpdate, "mapping-v9"); ok || got != "" {
+		t.Fatalf("original mapping selected as recovery = %q, %t", got, ok)
+	}
+	if got, ok := provider.SelectOutputRecoveryMapping(ref, domain.CapabilityCreate, "mapping-v8"); ok || got != "" {
+		t.Fatalf("unknown source selected as %q", got)
+	}
+	if got, ok := provider.SelectOutputRecoveryMapping(ref, domain.CapabilityDelete, "mapping-v1"); ok || got != "" {
+		t.Fatalf("delete selected mapping %q", got)
+	}
+}
+
+func TestObserveWithRepairMappingAcceptsSourceEnvelopeAndReportsSelectedProvenance(t *testing.T) {
+	config := testConfig(t)
+	config.Programs[0].OutputMappings = []OutputMapping{
+		{Ref: "mapping-v1", ExportName: "outputsV1"},
+		{Ref: "mapping-v2-repair", ExportName: "outputsRepair", CompatibleSourceMappingRef: "mapping-v1"},
+	}
+	config.Programs[0].CurrentOutputMappingRef = "mapping-v2-repair"
+	request := observationRequest(t)
+	request.OutputMappingRef = "mapping-v2-repair"
+	request.OutputSourceMappingRef = "mapping-v1"
+	message := correlationMessage(request.OperationID, request.AttemptNumber)
+	selectedName := ""
+	stack := &fakeStack{
+		pages: map[int][]updateSummary{1: {{kind: "update", result: "succeeded", message: message}}},
+		selectedOutput: func(name string) []byte {
+			selectedName = name
+			return []byte(envelopePayload("mapping-v1", string(request.ResourceID), request.TargetGeneration, `{"hostname":"db.example","port":5432}`))
+		},
+	}
+	provider, err := newProvisioner(config, &fakeFactory{workspace: &fakeWorkspace{stack: stack}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observation, err := provider.Observe(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selectedName != "outputsRepair" {
+		t.Fatalf("selected export = %q, want repaired mapping export", selectedName)
+	}
+	if observation.Outputs == nil || observation.Outputs.State != provisioning.OutputsAvailable {
+		t.Fatalf("outputs = %+v", observation.Outputs)
+	}
+	if observation.Outputs.OutputMappingRef != "mapping-v2-repair" {
+		t.Fatalf("output provenance = %q", observation.Outputs.OutputMappingRef)
+	}
+	request.OutputSourceMappingRef = "mapping-v0"
+	if _, err := provider.Observe(context.Background(), request); err == nil {
+		t.Fatal("repair mapping accepted a different source mapping identity")
+	}
+}
+
+func TestOrdinaryObservationUsesSelectedMappingIdentityEvenWhenItDeclaresRepairCompatibility(t *testing.T) {
+	ref := domain.ResourceTypeRef{Name: "Widget", Version: "v2"}
+	program := Program{ResourceType: ref, Capabilities: []domain.Capability{domain.CapabilityCreate},
+		OutputMappings:          []OutputMapping{{Ref: "mapping-v2", ExportName: "outputsV2", CompatibleSourceMappingRef: "mapping-v1"}},
+		CurrentOutputMappingRef: "mapping-v2"}
+	provider := &Provisioner{programs: map[domain.ResourceTypeRef]Program{ref: program}}
+	request := ObservationRequest{ResourceID: "r", ResourceType: ref, Capability: domain.CapabilityCreate,
+		TargetGeneration: 2, OutputMappingRef: "mapping-v2"}
+	stack := &fakeStack{selectedOutput: func(string) []byte {
+		return []byte(envelopePayload("mapping-v2", "r", 2, `{"hostname":"db.example","port":5432}`))
+	}}
+	handle, _ := provisioning.NewExecutionHandle("h")
+	observation, err := provider.attachOutputs(context.Background(), stack, provisioning.ExecutionObservation{
+		Correlation: provisioning.RequestCorrelationFound,
+		Execution:   &provisioning.Execution{State: provisioning.ExecutionStateSucceeded, Handle: &handle},
+	}, request)
+	if err != nil || observation.Outputs == nil || observation.Outputs.State != provisioning.OutputsAvailable {
+		t.Fatalf("ordinary compatible mapping observation = %+v, %v", observation.Outputs, err)
 	}
 }
 

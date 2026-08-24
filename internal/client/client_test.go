@@ -444,3 +444,104 @@ func TestResponseSizeLimitIsEnforced(t *testing.T) {
 		t.Fatalf("expected size-limit error, got %v", err)
 	}
 }
+
+func TestListResourceOperationsEncodesQueryAndPreservesRawPage(t *testing.T) {
+	page := "  {\n" +
+		`"items":[{"id":"op-2","resourceId":"orders/db","retryOf":"op-1","capability":"update","state":"Succeeded","targetGeneration":7,"requestedAt":"2026-08-23T09:00:00Z"}],` +
+		`"nextCursor":"c1_a+b/c=="}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/v1/resources/orders%2Fdb/operations" {
+			t.Errorf("escaped path = %q", r.URL.EscapedPath())
+		}
+		if r.URL.RawQuery != "cursor=before%2B%2F%3D&limit=37" {
+			t.Errorf("raw query = %q", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, page)
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	list, err := c.ListResourceOperations(context.Background(), "orders/db", 37, "before+/=")
+	if err != nil {
+		t.Fatalf("ListResourceOperations: %v", err)
+	}
+	if string(list.Raw) != page {
+		t.Fatalf("raw page changed:\n got %q\nwant %q", list.Raw, page)
+	}
+	if len(list.Items) != 1 || list.Items[0].RetryOf != "op-1" || list.Items[0].TargetGeneration != 7 {
+		t.Fatalf("typed items = %+v", list.Items)
+	}
+	if list.NextCursor != "c1_a+b/c==" {
+		t.Fatalf("next cursor = %q", list.NextCursor)
+	}
+	if !strings.Contains(string(list.Items[0].Raw), `"retryOf":"op-1"`) {
+		t.Fatalf("raw item missing retryOf: %s", list.Items[0].Raw)
+	}
+}
+
+func TestRetryOperationHasNoBodyAndRetainsAdmissionMetadata(t *testing.T) {
+	operationBody := `{"id":"op-child","resourceId":"orders-db","retryOf":"op-source","capability":"update",` +
+		`"state":"Pending","targetGeneration":7,"requestedAt":"2026-08-23T09:00:00Z"}`
+	var attempts atomic.Int32
+	type requestShape struct {
+		key, generation, contentType, body string
+		contentLength                      int64
+	}
+	seen := make(chan requestShape, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		seen <- requestShape{
+			key:           r.Header.Get("Idempotency-Key"),
+			generation:    r.Header.Get("If-Liftr-Generation"),
+			contentType:   r.Header.Get("Content-Type"),
+			body:          string(raw),
+			contentLength: r.ContentLength,
+		}
+		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/v1/operations/source%2Fid/retry" {
+			t.Errorf("request = %s %s", r.Method, r.URL.EscapedPath())
+		}
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Link", `</v1/operations/op-child>; rel="monitor"`)
+		w.Header().Set("Location", "/v1/operations/op-location")
+		w.Header().Set("Idempotency-Replayed", "true")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, operationBody)
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL)
+	result, err := c.RetryOperation(context.Background(), "source/id", "retry-key", 7)
+	if err != nil {
+		t.Fatalf("RetryOperation: %v", err)
+	}
+	close(seen)
+	for request := range seen {
+		if request.key != "retry-key" || request.generation != "7" || request.body != "" || request.contentLength != 0 || request.contentType != "" {
+			t.Fatalf("retry request changed: %+v", request)
+		}
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d", attempts.Load())
+	}
+	if result.Status != http.StatusAccepted || !result.Replay || result.Resource != nil || result.Operation == nil {
+		t.Fatalf("result metadata = %+v", result)
+	}
+	if string(result.Operation.Raw) != operationBody || result.Operation.RetryOf != "op-source" {
+		t.Fatalf("operation = %+v raw=%q", result.Operation, result.Operation.Raw)
+	}
+	if result.MonitorRef != "/v1/operations/op-child" || !result.HasMonitorEntry || result.LocationRef != "/v1/operations/op-location" {
+		t.Fatalf("monitor metadata = %+v", result)
+	}
+	monitorID, err := c.MonitorOperationID(result)
+	if err != nil || monitorID != "op-child" {
+		t.Fatalf("authoritative monitor = %q, %v", monitorID, err)
+	}
+}

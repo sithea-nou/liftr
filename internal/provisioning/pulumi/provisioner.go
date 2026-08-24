@@ -70,10 +70,26 @@ func (p *Provisioner) Capabilities() []provisioning.ProvisionerCapability {
 // executions never carry outputs.
 func (p *Provisioner) OutputMappingRef(resourceType domain.ResourceTypeRef, capability domain.Capability) string {
 	program, ok := p.programs[resourceType]
-	if !ok || program.Outputs == nil || capability == domain.CapabilityDelete {
+	if !ok || capability == domain.CapabilityDelete || !supportsCapability(program.Capabilities, capability) {
 		return ""
 	}
-	return program.Outputs.Ref
+	return program.CurrentOutputMappingRef
+}
+
+// SelectOutputRecoveryMapping returns only an explicitly compatible repair.
+// Ordinary observations resolve their requested mapping exactly; recovery is
+// the only path allowed to select a different implementation.
+func (p *Provisioner) SelectOutputRecoveryMapping(resourceType domain.ResourceTypeRef, capability domain.Capability, sourceMappingRef string) (string, bool) {
+	program, ok := p.programs[resourceType]
+	if !ok || sourceMappingRef == "" || capability == domain.CapabilityDelete || !supportsCapability(program.Capabilities, capability) {
+		return "", false
+	}
+	for _, mapping := range program.OutputMappings {
+		if mapping.Ref != sourceMappingRef && mapping.CompatibleSourceMappingRef == sourceMappingRef {
+			return mapping.Ref, true
+		}
+	}
+	return "", false
 }
 
 // attachOutputs resolves the output dimension for one concluded observation.
@@ -90,37 +106,52 @@ func (p *Provisioner) attachOutputs(ctx context.Context, stack automationStack, 
 	if !success {
 		return observation, nil
 	}
-	mappingRef := request.OutputMappingRef
-	var mapping *OutputMapping
-	if program, ok := p.programs[request.ResourceType]; ok && program.Outputs != nil {
-		mapping = program.Outputs
-	}
+	selectedMappingRef := request.OutputMappingRef
+	program, programRegistered := p.programs[request.ResourceType]
 	switch {
-	case mapping == nil && mappingRef == "":
+	case len(program.OutputMappings) == 0 && selectedMappingRef == "" && request.OutputSourceMappingRef == "":
 		return observation, nil
-	case mapping == nil:
-		return observation, fmt.Errorf("%w: execution references output mapping %q but no such mapping is registered", provisioning.ErrObservationFailure, mappingRef)
-	case mappingRef == "":
-		return observation, fmt.Errorf("%w: registered output mapping %q has no durable identity on the execution", provisioning.ErrObservationFailure, mapping.Ref)
-	case mapping.Ref != mappingRef:
-		return observation, fmt.Errorf("%w: registered output mapping %q does not match the persisted identity %q", provisioning.ErrObservationFailure, mapping.Ref, mappingRef)
+	case !programRegistered || len(program.OutputMappings) == 0:
+		return observation, fmt.Errorf("%w: execution references output mapping %q but no such mapping is registered", provisioning.ErrObservationFailure, selectedMappingRef)
+	case selectedMappingRef == "":
+		return observation, fmt.Errorf("%w: registered output mapping %q has no durable identity on the execution", provisioning.ErrObservationFailure, program.CurrentOutputMappingRef)
+	}
+	mapping, ok := outputMapping(program, selectedMappingRef)
+	if !ok {
+		return observation, fmt.Errorf("%w: requested output mapping %q is not registered", provisioning.ErrObservationFailure, selectedMappingRef)
+	}
+	decodeMappingRef := mapping.Ref
+	if request.OutputSourceMappingRef != "" {
+		if mapping.CompatibleSourceMappingRef != request.OutputSourceMappingRef {
+			return observation, fmt.Errorf("%w: selected output mapping %q is not compatible with source mapping %q", provisioning.ErrObservationFailure, mapping.Ref, request.OutputSourceMappingRef)
+		}
+		decodeMappingRef = request.OutputSourceMappingRef
 	}
 	raw, err := stack.SelectedOutput(ctx, mapping.ExportName)
 	if err != nil {
-		observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsUnavailable, Reason: "OutputsUnavailable"}
+		observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsUnavailable, OutputMappingRef: mapping.Ref, Reason: "OutputsUnavailable"}
 		return observation, nil
 	}
-	values, decodeErr := decodeSelectedOutputEnvelope(raw, mapping.Ref, request.ResourceID, request.TargetGeneration)
+	values, decodeErr := decodeSelectedOutputEnvelope(raw, decodeMappingRef, request.ResourceID, request.TargetGeneration)
 	if decodeErr != nil {
 		reason := "OutputContractViolation"
 		if errors.Is(decodeErr, errOutputUnavailable) {
 			reason = "OutputsUnavailable"
 		}
-		observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsInvalid, Reason: reason}
+		observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsInvalid, OutputMappingRef: mapping.Ref, Reason: reason}
 		return observation, nil
 	}
-	observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsAvailable, Values: values}
+	observation.Outputs = &provisioning.OutputEvidence{State: provisioning.OutputsAvailable, Values: values, OutputMappingRef: mapping.Ref}
 	return observation, nil
+}
+
+func outputMapping(program Program, ref string) (OutputMapping, bool) {
+	for _, mapping := range program.OutputMappings {
+		if mapping.Ref == ref {
+			return mapping, true
+		}
+	}
+	return OutputMapping{}, false
 }
 
 func (p *Provisioner) Submit(ctx context.Context, request provisioning.ExecutionRequest) (provisioning.Submission, error) {

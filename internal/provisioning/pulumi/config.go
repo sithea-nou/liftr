@@ -49,14 +49,14 @@ type Input struct {
 
 type InputEncoder func(Input) ([]byte, error)
 
-// OutputMapping declares the private, immutable output-mapping identity for
-// one program's create/update executions. Ref is persisted on every execution
-// at dispatch time; recovery resolves decoding through exactly that identity.
-// ExportName is the single allowlisted stack export holding the private
-// output envelope — selected retrieval only, never a full output dump.
+// OutputMapping declares one private, immutable output-mapping implementation.
+// ExportName is the single allowlisted stack export holding the private output
+// envelope. CompatibleSourceMappingRef optionally declares the one exact
+// persisted envelope identity this mapping can safely repair during recovery.
 type OutputMapping struct {
-	Ref        string
-	ExportName string
+	Ref                        string
+	ExportName                 string
+	CompatibleSourceMappingRef string
 }
 
 type Program struct {
@@ -73,10 +73,13 @@ type Program struct {
 	// does not supply cause a conclusive preflight rejection.
 	RequiredEnvironment     []string
 	SecretInputsUnsupported bool
-	// Outputs declares the realized-value mapping for create/update runs.
-	// Nil means the program publishes no developer-consumable outputs and no
-	// extraction is ever attempted.
-	Outputs *OutputMapping
+	// OutputMappings registers every mapping implementation available for
+	// recovery. CurrentOutputMappingRef explicitly selects the mapping persisted
+	// for fresh create/update work; neither slice order nor ref ordering has
+	// selection semantics. Both fields may be empty when the program publishes
+	// no developer-consumable outputs.
+	OutputMappings          []OutputMapping
+	CurrentOutputMappingRef string
 }
 
 type Config struct {
@@ -162,10 +165,8 @@ func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 		if err := validateRequiredEnvironment(program.RequiredEnvironment); err != nil {
 			return nil, err
 		}
-		if program.Outputs != nil {
-			if strings.TrimSpace(program.Outputs.Ref) == "" || strings.TrimSpace(program.Outputs.ExportName) == "" {
-				return nil, fmt.Errorf("Pulumi output mapping identity and export name are required")
-			}
+		if err := validateOutputMappings(program); err != nil {
+			return nil, err
 		}
 		seen := make(map[domain.Capability]struct{}, len(program.Capabilities))
 		for _, capability := range program.Capabilities {
@@ -183,6 +184,44 @@ func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 		programs[program.ResourceType] = program
 	}
 	return programs, nil
+}
+
+func validateOutputMappings(program Program) error {
+	current := strings.TrimSpace(program.CurrentOutputMappingRef)
+	if len(program.OutputMappings) == 0 {
+		if current != "" {
+			return fmt.Errorf("current Pulumi output mapping is not registered")
+		}
+		return nil
+	}
+	if current == "" {
+		return fmt.Errorf("current Pulumi output mapping identity is required")
+	}
+	refs := make(map[string]struct{}, len(program.OutputMappings))
+	compatibleSources := make(map[string]struct{}, len(program.OutputMappings))
+	for _, mapping := range program.OutputMappings {
+		if strings.TrimSpace(mapping.Ref) == "" || strings.TrimSpace(mapping.ExportName) == "" {
+			return fmt.Errorf("Pulumi output mapping identity and export name are required")
+		}
+		if _, exists := refs[mapping.Ref]; exists {
+			return fmt.Errorf("Pulumi output mapping identity is duplicated")
+		}
+		refs[mapping.Ref] = struct{}{}
+		if mapping.CompatibleSourceMappingRef == "" {
+			continue
+		}
+		if strings.TrimSpace(mapping.CompatibleSourceMappingRef) == "" || mapping.CompatibleSourceMappingRef == mapping.Ref {
+			return fmt.Errorf("compatible Pulumi output source mapping identity is invalid")
+		}
+		if _, exists := compatibleSources[mapping.CompatibleSourceMappingRef]; exists {
+			return fmt.Errorf("compatible Pulumi output source mapping identity is duplicated")
+		}
+		compatibleSources[mapping.CompatibleSourceMappingRef] = struct{}{}
+	}
+	if _, exists := refs[program.CurrentOutputMappingRef]; !exists {
+		return fmt.Errorf("current Pulumi output mapping is not registered")
+	}
+	return nil
 }
 
 func isExecutable(mode os.FileMode) bool {

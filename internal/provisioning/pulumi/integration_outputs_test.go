@@ -82,7 +82,8 @@ func TestRecordingProgramOutputsThroughRealCLI(t *testing.T) {
 			}},
 		},
 	}
-	config.Programs[0].Outputs = &OutputMapping{Ref: "liftr-recording-outputs-v1", ExportName: "liftrOutputs"}
+	config.Programs[0].OutputMappings = []OutputMapping{{Ref: "liftr-recording-outputs-v1", ExportName: "liftrOutputs"}}
+	config.Programs[0].CurrentOutputMappingRef = "liftr-recording-outputs-v1"
 
 	provider, err := New(config)
 	if err != nil {
@@ -126,7 +127,8 @@ func TestRecordingProgramOutputsThroughRealCLI(t *testing.T) {
 		Capability: domain.CapabilityCreate, TargetGeneration: 1, OutputMappingRef: "liftr-wrong-registration-ref"}
 	mismatchProvider := *provider
 	badProgram := config.Programs[0]
-	badProgram.Outputs = &OutputMapping{Ref: "liftr-wrong-registration-ref", ExportName: "liftrOutputs"}
+	badProgram.OutputMappings = []OutputMapping{{Ref: "liftr-wrong-registration-ref", ExportName: "liftrOutputs"}}
+	badProgram.CurrentOutputMappingRef = "liftr-wrong-registration-ref"
 	mismatchProvider.programs = map[domain.ResourceTypeRef]Program{resourceType: badProgram}
 	submission, err := mismatchProvider.Submit(context.Background(), mismatched)
 	if err != nil && submission.Observation.Execution == nil {

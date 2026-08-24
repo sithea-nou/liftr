@@ -4,10 +4,13 @@ package application
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/identity"
 )
+
+const MaxResourceOperationPageSize = 100
 
 // ResourceView is the read model for one Resource together with its latest
 // Operation and, when published, its realized outputs. Latest is nil when the
@@ -48,13 +51,20 @@ func (s *Service) GetResource(ctx context.Context, principal identity.Principal,
 func (s *Service) GetOperation(ctx context.Context, principal identity.Principal, id domain.OperationID) (OperationRecord, error) {
 	var record OperationRecord
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
+		preflight, err := tx.Operations().LookupOperation(ctx, id)
+		if err != nil {
+			return err
+		}
+		resource, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+		if err != nil {
+			return err
+		}
 		stored, err := tx.Operations().GetOperation(ctx, id)
 		if err != nil {
 			return err
 		}
-		resource, err := tx.Resources().GetResource(ctx, stored.Operation.ResourceID())
-		if err != nil {
-			return err
+		if stored.Operation.ResourceID() != resource.Resource.ID() {
+			return ErrConcurrencyConflict
 		}
 		if err := s.authorize(ctx, principal, identity.ActionResourceRead, resourceTargetOf(resource)); err != nil {
 			return err
@@ -66,6 +76,35 @@ func (s *Service) GetOperation(ctx context.Context, principal identity.Principal
 		return OperationRecord{}, err
 	}
 	return record, nil
+}
+
+// ListResourceOperations returns one insertion-ordered page of Operation
+// history after authorizing resource:read against the Resource's stored owner.
+// beforeSequence is private pagination state supplied by a trusted transport;
+// it is never part of an Operation representation.
+func (s *Service) ListResourceOperations(ctx context.Context, principal identity.Principal, id domain.ResourceID, beforeSequence uint64, limit int) (OperationPage, error) {
+	var page OperationPage
+	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
+		resource, err := tx.Resources().GetResource(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := s.authorize(ctx, principal, identity.ActionResourceRead, resourceTargetOf(resource)); err != nil {
+			return err
+		}
+		if limit < 1 || limit > MaxResourceOperationPageSize {
+			return fmt.Errorf("%w: operation page limit must be between 1 and %d", ErrInvalidApplicationCall, MaxResourceOperationPageSize)
+		}
+		page, err = tx.Operations().PageForResource(ctx, id, beforeSequence, limit)
+		return err
+	})
+	if err != nil {
+		return OperationPage{}, err
+	}
+	if page.Records == nil {
+		page.Records = []OperationRecord{}
+	}
+	return page, nil
 }
 
 // GetResourceOperation reads a consistent view of one Resource, its latest

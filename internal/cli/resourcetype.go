@@ -56,35 +56,6 @@ func newResourceTypeCommand(a *App) *cobra.Command {
 	return command
 }
 
-func newOperationCommand(a *App) *cobra.Command {
-	command := &cobra.Command{
-		Use:   "operation",
-		Short: "Inspect lifecycle Operations",
-	}
-	command.AddCommand(
-		&cobra.Command{
-			Use:   "get OPERATION_ID",
-			Short: "Read one lifecycle Operation",
-			Args:  cobra.ExactArgs(1),
-			RunE: func(cmd *cobra.Command, args []string) error {
-				if err := a.prepare(); err != nil {
-					return err
-				}
-				operation, err := a.api.GetOperation(cmd.Context(), args[0])
-				if err != nil {
-					return exit(classifyInterrupted(cmd.Context(), a.reportReadFailure(err)))
-				}
-				if a.output == outputJSON {
-					return finishJSON(cmd, emitJSON(a.stdout, operation.Raw))
-				}
-				a.renderOperationText(a.stdout, operation)
-				return nil
-			},
-		},
-	)
-	return command
-}
-
 // classifyInterrupted lets cancellation take precedence over any other
 // classification so Ctrl-C always maps to the interrupted exit code.
 func classifyInterrupted(ctx context.Context, fallback int) int {

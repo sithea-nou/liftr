@@ -43,37 +43,39 @@ func (f OperationFailure) Message() string { return f.message }
 
 // Operation represents one asynchronous action against a specific desired-state generation.
 type Operation struct {
-	id               OperationID
-	resourceID       ResourceID
-	capability       Capability
-	targetGeneration uint64
-	state            OperationState
-	phase            OperationPhase
-	requestedAt      time.Time
-	startedAt        time.Time
-	phaseChangedAt   time.Time
-	completedAt      time.Time
-	failure          *OperationFailure
+	id                 OperationID
+	resourceID         ResourceID
+	capability         Capability
+	targetGeneration   uint64
+	retryOfOperationID OperationID
+	state              OperationState
+	phase              OperationPhase
+	requestedAt        time.Time
+	startedAt          time.Time
+	phaseChangedAt     time.Time
+	completedAt        time.Time
+	failure            *OperationFailure
 }
 
 // OperationSnapshot is the persistence representation of an Operation.
 type OperationSnapshot struct {
-	ID               OperationID
-	ResourceID       ResourceID
-	Capability       Capability
-	TargetGeneration uint64
-	State            OperationState
-	Phase            OperationPhase
-	RequestedAt      time.Time
-	StartedAt        time.Time
-	PhaseChangedAt   time.Time
-	CompletedAt      time.Time
-	FailureReason    string
-	FailureMessage   string
+	ID                 OperationID
+	ResourceID         ResourceID
+	Capability         Capability
+	TargetGeneration   uint64
+	RetryOfOperationID OperationID
+	State              OperationState
+	Phase              OperationPhase
+	RequestedAt        time.Time
+	StartedAt          time.Time
+	PhaseChangedAt     time.Time
+	CompletedAt        time.Time
+	FailureReason      string
+	FailureMessage     string
 }
 
 func RestoreOperation(snapshot OperationSnapshot) (Operation, error) {
-	operation, err := NewOperation(snapshot.ID, snapshot.ResourceID, snapshot.Capability, snapshot.TargetGeneration, snapshot.RequestedAt)
+	operation, err := NewOperation(snapshot.ID, snapshot.ResourceID, snapshot.Capability, snapshot.TargetGeneration, snapshot.RequestedAt, snapshot.RetryOfOperationID)
 	if err != nil {
 		return Operation{}, err
 	}
@@ -135,7 +137,7 @@ func validOperationPhase(phase OperationPhase) bool {
 	}
 }
 
-func NewOperation(id OperationID, resourceID ResourceID, capability Capability, targetGeneration uint64, requestedAt time.Time) (Operation, error) {
+func NewOperation(id OperationID, resourceID ResourceID, capability Capability, targetGeneration uint64, requestedAt time.Time, retryOf ...OperationID) (Operation, error) {
 	if strings.TrimSpace(string(id)) == "" {
 		return Operation{}, fmt.Errorf("operation ID is required")
 	}
@@ -151,29 +153,44 @@ func NewOperation(id OperationID, resourceID ResourceID, capability Capability, 
 	if requestedAt.IsZero() {
 		return Operation{}, fmt.Errorf("operation request time is required")
 	}
+	if len(retryOf) > 1 {
+		return Operation{}, fmt.Errorf("operation may retry at most one operation")
+	}
+	var retryOfOperationID OperationID
+	if len(retryOf) == 1 {
+		retryOfOperationID = retryOf[0]
+		if strings.TrimSpace(string(retryOfOperationID)) == "" && retryOfOperationID != "" {
+			return Operation{}, fmt.Errorf("retry operation ID cannot be blank")
+		}
+		if retryOfOperationID == id {
+			return Operation{}, fmt.Errorf("operation cannot retry itself")
+		}
+	}
 
 	return Operation{
-		id:               id,
-		resourceID:       resourceID,
-		capability:       capability,
-		targetGeneration: targetGeneration,
-		state:            OperationStatePending,
-		phase:            OperationPhaseRequested,
-		requestedAt:      requestedAt,
-		phaseChangedAt:   requestedAt,
+		id:                 id,
+		resourceID:         resourceID,
+		capability:         capability,
+		targetGeneration:   targetGeneration,
+		retryOfOperationID: retryOfOperationID,
+		state:              OperationStatePending,
+		phase:              OperationPhaseRequested,
+		requestedAt:        requestedAt,
+		phaseChangedAt:     requestedAt,
 	}, nil
 }
 
-func (o Operation) ID() OperationID           { return o.id }
-func (o Operation) ResourceID() ResourceID    { return o.resourceID }
-func (o Operation) Capability() Capability    { return o.capability }
-func (o Operation) TargetGeneration() uint64  { return o.targetGeneration }
-func (o Operation) State() OperationState     { return o.state }
-func (o Operation) Phase() OperationPhase     { return o.phase }
-func (o Operation) RequestedAt() time.Time    { return o.requestedAt }
-func (o Operation) StartedAt() time.Time      { return o.startedAt }
-func (o Operation) PhaseChangedAt() time.Time { return o.phaseChangedAt }
-func (o Operation) CompletedAt() time.Time    { return o.completedAt }
+func (o Operation) ID() OperationID                 { return o.id }
+func (o Operation) ResourceID() ResourceID          { return o.resourceID }
+func (o Operation) Capability() Capability          { return o.capability }
+func (o Operation) TargetGeneration() uint64        { return o.targetGeneration }
+func (o Operation) RetryOfOperationID() OperationID { return o.retryOfOperationID }
+func (o Operation) State() OperationState           { return o.state }
+func (o Operation) Phase() OperationPhase           { return o.phase }
+func (o Operation) RequestedAt() time.Time          { return o.requestedAt }
+func (o Operation) StartedAt() time.Time            { return o.startedAt }
+func (o Operation) PhaseChangedAt() time.Time       { return o.phaseChangedAt }
+func (o Operation) CompletedAt() time.Time          { return o.completedAt }
 
 func (o Operation) IsTerminal() bool {
 	switch o.state {

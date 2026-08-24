@@ -173,14 +173,109 @@ func TestUpdateFailurePreservesReadyAndRetryCreatesNewOperation(t *testing.T) {
 	}
 
 	resolver.Providers[ref] = provisioningfake.New(provisioningfake.ModeSynchronous)
-	retry, err := service.RetryOperation(context.Background(), application.RetryOperationCommand{Actor: fake.Principal("tester"),
-		OperationID: "operation-failed-update", NewOperationID: "operation-retry", EventID: "event-retry", RequestedAt: applicationTime.Add(2 * time.Minute),
-	})
+	retryCommand := application.RetryOperationCommand{Actor: fake.Principal("tester"),
+		OperationID: "operation-failed-update", ExpectedGeneration: failed.Resource.Resource.Generation(), NewOperationID: "operation-retry", EventID: "event-retry", RequestedAt: applicationTime.Add(2 * time.Minute),
+		IdempotencyKey: "retry-update-key"}
+	retry, err := service.RetryOperation(context.Background(), retryCommand)
 	if err != nil {
 		t.Fatalf("RetryOperation() error = %v", err)
 	}
 	if retry.Operation.ID() != "operation-retry" || retry.Operation.State() != domain.OperationStateSucceeded {
 		t.Fatalf("retry operation=%q state=%s, want operation-retry/Succeeded", retry.Operation.ID(), retry.Operation.State())
+	}
+	if retry.Operation.RetryOfOperationID() != failed.Operation.ID() {
+		t.Fatalf("retry source=%q, want %q", retry.Operation.RetryOfOperationID(), failed.Operation.ID())
+	}
+	replayed, err := service.RetryOperation(context.Background(), retryCommand)
+	if err != nil || !replayed.Replay || replayed.Operation.ID() != retry.Operation.ID() {
+		t.Fatalf("retry replay = (%q, %t, %v)", replayed.Operation.ID(), replayed.Replay, err)
+	}
+	stale := retryCommand
+	stale.NewOperationID = "operation-stale-source"
+	stale.EventID = "event-stale-source"
+	stale.IdempotencyKey = "stale-source-key"
+	if _, err := service.RetryOperation(context.Background(), stale); !errors.Is(err, application.ErrOperationNotRetryable) {
+		t.Fatalf("non-latest source error = %v", err)
+	}
+}
+
+func TestRetryAdmissionGenerationActiveAndProvenanceGuards(t *testing.T) {
+	ref := mustProvisionerRef(t, "provider-retry-guards")
+	service, store, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
+		ID: "resource-retry-guards", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
+		Spec: testSpec(t), OperationID: "operation-guard-create", EventID: "event-guard-create", RequestedAt: applicationTime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RetryOperation(context.Background(), application.RetryOperationCommand{Actor: fake.Principal("tester"),
+		OperationID: created.Operation.ID(), ExpectedGeneration: created.Resource.Resource.Generation(), NewOperationID: "operation-retry-succeeded",
+		EventID: "event-retry-succeeded", RequestedAt: applicationTime.Add(time.Minute)}); !errors.Is(err, application.ErrOperationNotRetryable) {
+		t.Fatalf("succeeded source error = %v", err)
+	}
+
+	resolver.Providers[ref] = provisioningfake.New(provisioningfake.ModeFailure)
+	failed, err := service.UpdateResource(context.Background(), application.UpdateResourceCommand{Actor: fake.Principal("tester"),
+		ID: created.Resource.Resource.ID(), ExpectedGeneration: created.Resource.Resource.Generation(), Spec: testSpec(t),
+		OperationID: "operation-guard-failed", EventID: "event-guard-failed", RequestedAt: applicationTime.Add(2 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := application.RetryOperationCommand{Actor: fake.Principal("tester"), OperationID: failed.Operation.ID(),
+		ExpectedGeneration: failed.Resource.Resource.Generation(), NewOperationID: "operation-guard-retry", EventID: "event-guard-retry",
+		RequestedAt: applicationTime.Add(3 * time.Minute), IdempotencyKey: "guard-key"}
+	stale := base
+	stale.ExpectedGeneration--
+	if _, err := service.AdmitRetryOperation(context.Background(), stale); !errors.Is(err, application.ErrConcurrencyConflict) {
+		t.Fatalf("stale generation error = %v", err)
+	}
+
+	async, err := application.NewService(service.Types, service.Selector, service.Resolver, store, fake.AllowAll{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.Providers[ref] = provisioningfake.New(provisioningfake.ModeSynchronous)
+	admitted, err := async.AdmitRetryOperation(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted.Operation.State() != domain.OperationStatePending {
+		t.Fatalf("admitted retry state = %s", admitted.Operation.State())
+	}
+	second := base
+	second.NewOperationID = "operation-guard-second"
+	second.EventID = "event-guard-second"
+	second.IdempotencyKey = "guard-key-second"
+	if _, err := async.AdmitRetryOperation(context.Background(), second); !errors.Is(err, lifecycle.ErrOperationActive) {
+		t.Fatalf("active retry error = %v", err)
+	}
+}
+
+func TestFailedDeleteUsesNormalRetryExecution(t *testing.T) {
+	ref := mustProvisionerRef(t, "provider-delete-retry")
+	service, _, _, resolver := newService(t, ref, provisioningfake.New(provisioningfake.ModeSynchronous))
+	created, err := service.CreateResource(context.Background(), application.CreateResourceCommand{Actor: fake.Principal("tester"),
+		ID: "resource-delete-retry", Type: provisioningfake.ResourceType(), Owner: domain.OwnerRef{Kind: "team", ID: "platform"},
+		Spec: testSpec(t), OperationID: "operation-delete-create", EventID: "event-delete-create", RequestedAt: applicationTime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.Providers[ref] = provisioningfake.New(provisioningfake.ModeFailure)
+	failed, err := service.DeleteResource(context.Background(), application.DeleteResourceCommand{Actor: fake.Principal("tester"),
+		ID: created.Resource.Resource.ID(), ExpectedGeneration: created.Resource.Resource.Generation(), OperationID: "operation-delete-failed",
+		EventID: "event-delete-failed", RequestedAt: applicationTime.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.Providers[ref] = provisioningfake.New(provisioningfake.ModeSynchronous)
+	retried, err := service.RetryOperation(context.Background(), application.RetryOperationCommand{Actor: fake.Principal("tester"),
+		OperationID: failed.Operation.ID(), ExpectedGeneration: failed.Resource.Resource.Generation(), NewOperationID: "operation-delete-retry",
+		EventID: "event-delete-retry", RequestedAt: applicationTime.Add(2 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Execution == nil || retried.Execution.IsOutputRecovery() || retried.Operation.State() != domain.OperationStateSucceeded {
+		t.Fatalf("delete retry operation=%s execution=%+v", retried.Operation.State(), retried.Execution)
 	}
 }
 

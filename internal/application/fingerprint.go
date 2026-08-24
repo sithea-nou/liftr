@@ -59,10 +59,10 @@ func deleteCommandFingerprint(cmd DeleteResourceCommand) string {
 	return fingerprintHash("delete", string(cmd.ID), strconv.FormatUint(cmd.ExpectedGeneration, 10))
 }
 
-// retryCommandFingerprint identifies the failed operation being retried so a
-// reused key cannot silently replay a retry of a different operation.
-func retryCommandFingerprint(failed domain.Operation) string {
-	return fingerprintHash("retry", string(failed.ResourceID()), string(failed.Capability()), strconv.FormatUint(failed.TargetGeneration(), 10))
+// retryCommandFingerprint is versioned independently from the lifecycle shape.
+// Only submitted command identity participates in the v1 retry fingerprint.
+func retryCommandFingerprint(cmd RetryOperationCommand) string {
+	return fingerprintHash("retry-operation-v1", string(cmd.OperationID), strconv.FormatUint(cmd.ExpectedGeneration, 10))
 }
 
 // fingerprintHash digests request identity parts with fixed-width hex length

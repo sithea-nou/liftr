@@ -535,6 +535,33 @@ func TestStaleWorkIsSettledNotQuarantined(t *testing.T) {
 	}
 }
 
+func TestRetryablePersistenceErrorReschedulesOutbox(t *testing.T) {
+	store := applicationfake.NewStore()
+	message := application.DriveMessage("operation-retryable-persistence", 1)
+	if err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
+		return tx.Outbox().Enqueue(context.Background(), message)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &failTransactionRunner{inner: store, failAt: 3, err: application.ErrRetryablePersistence}
+	instance, err := worker.New(runner, &applicationfake.Resolver{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.RetryBase = 0
+	worked, err := instance.RunOnce(context.Background())
+	if !worked || !errors.Is(err, application.ErrRetryablePersistence) {
+		t.Fatalf("RunOnce worked=%t error=%v", worked, err)
+	}
+	stored, err := store.GetOutbox(context.Background(), message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != application.OutboxPending || stored.TerminalReason != "" || stored.LastError == "" {
+		t.Fatalf("retryable persistence outbox state=%s terminal=%q lastError=%q", stored.State, stored.TerminalReason, stored.LastError)
+	}
+}
+
 func TestAmbiguousDispatchKeepsLeaseForExpiryRecovery(t *testing.T) {
 	provider := newBlockingProvider()
 	service, store, instance := newHarness(t, provider)
@@ -886,6 +913,21 @@ type delayedTransactionRunner struct {
 	calls      int
 	delayAfter int
 	delay      time.Duration
+}
+
+type failTransactionRunner struct {
+	inner  application.TransactionRunner
+	calls  int
+	failAt int
+	err    error
+}
+
+func (r *failTransactionRunner) Within(ctx context.Context, fn func(application.UnitOfWork) error) error {
+	r.calls++
+	if r.calls == r.failAt {
+		return r.err
+	}
+	return r.inner.Within(ctx, fn)
 }
 
 func (r *delayedTransactionRunner) Within(ctx context.Context, fn func(application.UnitOfWork) error) error {

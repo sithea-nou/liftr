@@ -39,9 +39,11 @@ func apiRoutes(h *handler) []route {
 		{Method: http.MethodGet, Pattern: "/v1/resources/{id}", Handle: h.getResource},
 		{Method: http.MethodPut, Pattern: "/v1/resources/{id}", Handle: h.updateResource},
 		{Method: http.MethodDelete, Pattern: "/v1/resources/{id}", Handle: h.deleteResource},
+		{Method: http.MethodGet, Pattern: "/v1/resources/{id}/operations", Handle: h.listResourceOperations},
 		{Method: http.MethodGet, Pattern: "/v1/resource-types", Handle: h.listResourceTypes},
 		{Method: http.MethodGet, Pattern: "/v1/resource-types/{name}/{version}", Handle: h.getResourceType},
 		{Method: http.MethodGet, Pattern: "/v1/operations/{id}", Handle: h.getOperation},
+		{Method: http.MethodPost, Pattern: "/v1/operations/{id}/retry", Handle: h.retryOperation},
 		{Method: http.MethodGet, Pattern: "/healthz", Handle: h.healthz},
 		{Method: http.MethodGet, Pattern: "/readyz", Handle: h.readyz},
 	}

@@ -84,7 +84,15 @@ func decodeSubmission(encoded []byte) (*provisioning.Submission, error) {
 	return &provisioning.Submission{Observation: *observation}, nil
 }
 
+func (r *repositories) LookupExecution(ctx context.Context, id domain.OperationID) (application.ProvisioningExecutionRecord, error) {
+	return r.loadExecution(ctx, id, false)
+}
+
 func (r *repositories) GetExecution(ctx context.Context, id domain.OperationID) (application.ProvisioningExecutionRecord, error) {
+	return r.loadExecution(ctx, id, true)
+}
+
+func (r *repositories) loadExecution(ctx context.Context, id domain.OperationID, lock bool) (application.ProvisioningExecutionRecord, error) {
 	var record application.ProvisioningExecutionRecord
 	var typeName, typeVersion, targetText, state, correlation, currentAttemptText, nextObservationText, versionText string
 	var specVersion int
@@ -93,14 +101,21 @@ func (r *repositories) GetExecution(ctx context.Context, id domain.OperationID) 
 	var outputFailureReason, outputFailureMessage *string
 	var outputMappingRef, outputResolution string
 	var observedNS, providerObservedNS *int64
-	err := r.tx.QueryRow(ctx, `SELECT operation_id,resource_id,provisioner_ref,resource_type_name,resource_type_version,capability,
+	var recoverySourceOperationID, recoverySourceAttemptText *string
+	query := `SELECT operation_id,resource_id,provisioner_ref,resource_type_name,resource_type_version,capability,
 		target_generation::text,spec_codec_version,submitted_spec,state,handle,acceptance_confirmed,correlation_status,
 		submission,latest_observation,last_observed_at_ns,last_failure_kind,last_failure_reason,last_failure_message,
-		current_attempt_number::text,next_observation_sequence::text,record_version::text,output_mapping_ref,output_resolution,output_failure_reason,output_failure_message,last_provider_observed_at_ns
-		FROM provisioning_executions WHERE operation_id=$1 FOR UPDATE`, id).Scan(&record.OperationID, &record.ResourceID, &record.ProvisionerRef,
+		current_attempt_number::text,next_observation_sequence::text,record_version::text,output_mapping_ref,output_resolution,output_failure_reason,output_failure_message,last_provider_observed_at_ns,
+		recovery_source_operation_id,recovery_source_attempt::text
+		FROM provisioning_executions WHERE operation_id=$1`
+	if lock {
+		query += " FOR UPDATE"
+	}
+	err := r.tx.QueryRow(ctx, query, id).Scan(&record.OperationID, &record.ResourceID, &record.ProvisionerRef,
 		&typeName, &typeVersion, &record.Capability, &targetText, &specVersion, &specBytes, &state, &handle, &record.AcceptanceConfirmed,
 		&correlation, &submissionBytes, &observationBytes, &observedNS, &failureKind, &failureReason, &failureMessage,
-		&currentAttemptText, &nextObservationText, &versionText, &outputMappingRef, &outputResolution, &outputFailureReason, &outputFailureMessage, &providerObservedNS)
+		&currentAttemptText, &nextObservationText, &versionText, &outputMappingRef, &outputResolution, &outputFailureReason, &outputFailureMessage, &providerObservedNS,
+		&recoverySourceOperationID, &recoverySourceAttemptText)
 	if err != nil {
 		return application.ProvisioningExecutionRecord{}, translateError(err)
 	}
@@ -164,6 +179,14 @@ func (r *repositories) GetExecution(ctx context.Context, id domain.OperationID) 
 	if outputFailureMessage != nil {
 		record.OutputFailureMessage = *outputFailureMessage
 	}
+	if recoverySourceOperationID != nil {
+		record.RecoverySourceOperationID = domain.OperationID(*recoverySourceOperationID)
+	}
+	if recoverySourceAttemptText != nil {
+		if record.RecoverySourceAttempt, err = parseUint64(*recoverySourceAttemptText); err != nil {
+			return application.ProvisioningExecutionRecord{}, err
+		}
+	}
 	return record, nil
 }
 
@@ -206,16 +229,24 @@ func (r *repositories) CreateExecution(ctx context.Context, record application.P
 		(operation_id,resource_id,provisioner_ref,resource_type_name,resource_type_version,capability,target_generation,
 		spec_codec_version,submitted_spec,state,handle,acceptance_confirmed,correlation_status,submission,latest_observation,
 		last_observed_at_ns,last_provider_observed_at_ns,last_failure_kind,last_failure_reason,last_failure_message,current_attempt_number,next_observation_sequence,record_version,
-		output_mapping_ref,output_resolution,output_failure_reason,output_failure_message)
-		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,$13,$14,$15,$16,$27,$17,$18,$19,$20::numeric,$21::numeric,$22::numeric,$23,$24,$25,$26)`,
+		output_mapping_ref,output_resolution,output_failure_reason,output_failure_message,recovery_source_operation_id,recovery_source_attempt)
+		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,$13,$14,$15,$16,$27,$17,$18,$19,$20::numeric,$21::numeric,$22::numeric,$23,$24,$25,$26,$28,$29::numeric)`,
 		record.OperationID, record.ResourceID, record.ProvisionerRef, typeRef.Name, typeRef.Version, record.Capability, uintText(record.TargetGeneration),
 		codecVersion, spec, record.State, handleValue(record.Handle), record.AcceptanceConfirmed, correlation, submission, observation,
 		nullableUnixNano(record.LastObservedAt), failureValue(record.LastFailure, "kind"), failureValue(record.LastFailure, "reason"), failureValue(record.LastFailure, "message"),
 		uintText(record.CurrentAttempt), uintText(nextObservation), uintText(version),
 		record.OutputMappingRef, resolution, outputFailureReason, outputFailureMessage,
-		nullableUnixNano(record.LastProviderObservedAt))
+		nullableUnixNano(record.LastProviderObservedAt), nullableOperationID(record.RecoverySourceOperationID), nullableUint64(record.RecoverySourceAttempt))
 	return translateError(err)
 }
+
+const saveExecutionQuery = `UPDATE provisioning_executions SET state=$2,handle=$3,acceptance_confirmed=$4,
+	correlation_status=$5,submission=$6,latest_observation=$7,last_observed_at_ns=$8,last_provider_observed_at_ns=$18,last_failure_kind=$9,last_failure_reason=$10,
+	last_failure_message=$11,current_attempt_number=$12::numeric,next_observation_sequence=$13::numeric,
+	record_version=record_version+1,updated_at=clock_timestamp(),
+	output_resolution=$15,output_failure_reason=$16,output_failure_message=$17,
+	output_mapping_ref=CASE WHEN output_mapping_ref='' THEN $19 ELSE output_mapping_ref END
+	WHERE operation_id=$1 AND record_version=$14::numeric AND (output_mapping_ref='' OR output_mapping_ref=$19)`
 
 func (r *repositories) SaveExecution(ctx context.Context, record application.ProvisioningExecutionRecord, expectedVersion uint64) error {
 	submission, err := encodeSubmission(record.Submission)
@@ -226,16 +257,11 @@ func (r *repositories) SaveExecution(ctx context.Context, record application.Pro
 	if err != nil {
 		return err
 	}
-	command, err := r.tx.Exec(ctx, `UPDATE provisioning_executions SET state=$2,handle=$3,acceptance_confirmed=$4,
-		correlation_status=$5,submission=$6,latest_observation=$7,last_observed_at_ns=$8,last_provider_observed_at_ns=$18,last_failure_kind=$9,last_failure_reason=$10,
-		last_failure_message=$11,current_attempt_number=$12::numeric,next_observation_sequence=$13::numeric,
-		record_version=record_version+1,updated_at=clock_timestamp(),
-		output_resolution=$15,output_failure_reason=$16,output_failure_message=$17
-		WHERE operation_id=$1 AND record_version=$14::numeric`, record.OperationID, record.State, handleValue(record.Handle), record.AcceptanceConfirmed,
+	command, err := r.tx.Exec(ctx, saveExecutionQuery, record.OperationID, record.State, handleValue(record.Handle), record.AcceptanceConfirmed,
 		record.Correlation, submission, observation, nullableUnixNano(record.LastObservedAt), failureValue(record.LastFailure, "kind"),
 		failureValue(record.LastFailure, "reason"), failureValue(record.LastFailure, "message"), uintText(record.CurrentAttempt), uintText(record.NextObservation), uintText(expectedVersion),
 		string(record.OutputResolution), nullableText(record.OutputFailureReason), nullableText(record.OutputFailureMessage),
-		nullableUnixNano(record.LastProviderObservedAt))
+		nullableUnixNano(record.LastProviderObservedAt), record.OutputMappingRef)
 	if err != nil {
 		return translateError(err)
 	}
@@ -257,6 +283,20 @@ func nullableText(value string) any {
 		return nil
 	}
 	return value
+}
+
+func nullableOperationID(value domain.OperationID) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableUint64(value uint64) any {
+	if value == 0 {
+		return nil
+	}
+	return uintText(value)
 }
 
 func failureValue(failure *provisioning.ExecutionFailure, field string) any {

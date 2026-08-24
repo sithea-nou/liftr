@@ -27,6 +27,8 @@ var (
 	ErrIdempotencyConflict    = errors.New("idempotency key conflict")
 	ErrIdempotencyNotFound    = errors.New("idempotency record not found")
 	ErrConcurrencyConflict    = errors.New("concurrency conflict")
+	ErrRetryablePersistence   = errors.New("retryable persistence error")
+	ErrOperationNotRetryable  = errors.New("operation not retryable")
 	ErrInvalidApplicationCall = errors.New("invalid application call")
 )
 
@@ -60,23 +62,25 @@ const (
 )
 
 type ProvisioningExecutionRecord struct {
-	OperationID          domain.OperationID
-	ProvisionerRef       ProvisionerRef
-	ResourceID           domain.ResourceID
-	ResourceType         domain.ResourceTypeRef
-	Capability           domain.Capability
-	TargetGeneration     uint64
-	Spec                 domain.ResourceSpec
-	OutputMappingRef     string
-	OutputResolution     OutputResolution
-	OutputFailureReason  string
-	OutputFailureMessage string
-	Handle               *provisioning.ExecutionHandle
-	State                ProvisioningAttemptState
-	Submission           *provisioning.Submission
-	AcceptanceConfirmed  bool
-	LastObservation      *provisioning.ExecutionObservation
-	LastObservedAt       time.Time
+	OperationID               domain.OperationID
+	ProvisionerRef            ProvisionerRef
+	ResourceID                domain.ResourceID
+	ResourceType              domain.ResourceTypeRef
+	Capability                domain.Capability
+	TargetGeneration          uint64
+	Spec                      domain.ResourceSpec
+	OutputMappingRef          string
+	OutputResolution          OutputResolution
+	OutputFailureReason       string
+	OutputFailureMessage      string
+	RecoverySourceOperationID domain.OperationID
+	RecoverySourceAttempt     uint64
+	Handle                    *provisioning.ExecutionHandle
+	State                     ProvisioningAttemptState
+	Submission                *provisioning.Submission
+	AcceptanceConfirmed       bool
+	LastObservation           *provisioning.ExecutionObservation
+	LastObservedAt            time.Time
 	// LastProviderObservedAt is the newest backend-supplied evidence
 	// timestamp accepted for this execution. Provider clocks and Liftr
 	// receipt clocks are separate dimensions: backend evidence freshness is
@@ -95,6 +99,10 @@ type ProvisioningExecutionRecord struct {
 // dispatch claim, before any provider work; it never changes afterwards.
 func (r ProvisioningExecutionRecord) OutputMappingIsBound() bool {
 	return r.OutputMappingRef != ""
+}
+
+func (r ProvisioningExecutionRecord) IsOutputRecovery() bool {
+	return r.RecoverySourceOperationID != "" && r.RecoverySourceAttempt != 0
 }
 
 type IdempotencyRecord struct {
@@ -128,17 +136,29 @@ type ResourceRepository interface {
 
 type OperationRecord struct {
 	Operation domain.Operation
+	Sequence  uint64
 	Version   uint64
 }
 
+type OperationPage struct {
+	Records      []OperationRecord
+	NextSequence uint64
+}
+
 type OperationRepository interface {
+	// LookupOperation returns an Operation without taking a row lock. Mutation
+	// paths use it only to discover the Resource ID before locking Resource then
+	// Operation in the canonical order.
+	LookupOperation(context.Context, domain.OperationID) (OperationRecord, error)
 	GetOperation(context.Context, domain.OperationID) (OperationRecord, error)
 	ActiveForResource(context.Context, domain.ResourceID) (OperationRecord, bool, error)
-	// LatestForResource returns the most recent Operation for a Resource.
-	// Ordering is deterministic: newest requested_at first, and Operations
-	// with equal requested_at values are ordered by descending Operation ID
-	// so repeated calls always select the same Operation.
+	// LatestForResource returns the Operation with the greatest insertion
+	// sequence for a Resource.
 	LatestForResource(context.Context, domain.ResourceID) (OperationRecord, bool, error)
+	// PageForResource returns at most limit Operations in descending insertion
+	// sequence. beforeSequence is an exclusive keyset cursor; zero starts at the
+	// newest Operation. NextSequence is zero when no further page exists.
+	PageForResource(context.Context, domain.ResourceID, uint64, int) (OperationPage, error)
 	CreateOperation(context.Context, OperationRecord) error
 	SaveOperation(context.Context, OperationRecord, uint64) error
 }
@@ -148,6 +168,10 @@ type EventRepository interface {
 }
 
 type ExecutionRepository interface {
+	// LookupExecution returns an execution without taking a row lock. Mutation
+	// paths use it only to discover the Resource and recovery source IDs before
+	// acquiring locks in the canonical order.
+	LookupExecution(context.Context, domain.OperationID) (ProvisioningExecutionRecord, error)
 	GetExecution(context.Context, domain.OperationID) (ProvisioningExecutionRecord, error)
 	CreateExecution(context.Context, ProvisioningExecutionRecord) error
 	SaveExecution(context.Context, ProvisioningExecutionRecord, uint64) error
@@ -257,14 +281,15 @@ type ObserveResourceCommand struct {
 
 type RetryOperationCommand struct {
 	// Actor is the authenticated principal admitting this retry. It is
-	// authorized against the Resource's stored owner with the action matching
-	// the retried capability (ADR-0012).
-	Actor          identity.Principal
-	OperationID    domain.OperationID
-	NewOperationID domain.OperationID
-	EventID        domain.EventID
-	RequestedAt    time.Time
-	IdempotencyKey string
+	// authorized against the Resource's stored owner with resource:retry
+	// (ADR-0012).
+	Actor              identity.Principal
+	OperationID        domain.OperationID
+	ExpectedGeneration uint64
+	NewOperationID     domain.OperationID
+	EventID            domain.EventID
+	RequestedAt        time.Time
+	IdempotencyKey     string
 }
 
 type Result struct {
@@ -382,13 +407,17 @@ func (s *Service) AdvanceOperation(ctx context.Context, cmd AdvanceOperationComm
 func (s *Service) advanceOperation(ctx context.Context, cmd AdvanceOperationCommand) (Result, error) {
 	var result Result
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
-		opRecord, err := tx.Operations().GetOperation(ctx, cmd.OperationID)
+		preflight, err := tx.Operations().LookupOperation(ctx, cmd.OperationID)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
-		resourceRecord, err := tx.Resources().GetResource(ctx, opRecord.Operation.ResourceID())
+		resourceRecord, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
+		}
+		opRecord, err := tx.Operations().GetOperation(ctx, cmd.OperationID)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
 		transition, err := s.Lifecycle.Advance(resourceRecord.Resource, resourceRecord.Status, opRecord.Operation, cmd.Phase, cmd.EventID, cmd.ChangedAt)
 		if err != nil {
@@ -494,6 +523,9 @@ func (s *Service) ObserveOperation(ctx context.Context, cmd ObserveOperationComm
 			execution.Version++
 		}
 		return Result{Resource: record, Operation: opRecord.Operation, Execution: &execution}, nil
+	}
+	if execution.IsOutputRecovery() && execution.State == AttemptSucceeded && execution.OutputResolution == OutputResolutionPending {
+		return s.resolvePendingOutputs(ctx, record, opRecord, execution)
 	}
 	if execution.State == AttemptSucceeded || execution.State == AttemptFailed {
 		if err := validatePersistedTerminalEvidence(execution, record.Resource, record.Status, opRecord.Operation); err != nil {
@@ -604,13 +636,17 @@ func (s *Service) ObserveOperation(ctx context.Context, cmd ObserveOperationComm
 func (s *Service) scheduleOperationObservation(ctx context.Context, operationID domain.OperationID) (Result, error) {
 	var result Result
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
-		operation, err := tx.Operations().GetOperation(ctx, operationID)
+		preflight, err := tx.Operations().LookupOperation(ctx, operationID)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
-		resource, err := tx.Resources().GetResource(ctx, operation.Operation.ResourceID())
+		resource, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
+		}
+		operation, err := tx.Operations().GetOperation(ctx, operationID)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
 		execution, err := tx.Executions().GetExecution(ctx, operationID)
 		if err != nil {
@@ -719,39 +755,115 @@ func (s *Service) AdmitRetryOperation(ctx context.Context, cmd RetryOperationCom
 
 // persistRetryRequest admits a retry of one failed Operation. Authorization
 // against the stored owner precedes replay and every lifecycle evaluation;
-// the retried capability determines the required action (ADR-0012).
+// retries require their own action independently of the failed capability
+// (ADR-0012).
 func (s *Service) persistRetryRequest(ctx context.Context, cmd RetryOperationCommand) (Result, error) {
 	var result Result
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
+		preflight, err := tx.Operations().LookupOperation(ctx, cmd.OperationID)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
+		}
+		record, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
+		}
+		if err := s.authorize(ctx, cmd.Actor, identity.ActionResourceRetry, resourceTargetOf(record)); err != nil {
+			return err
+		}
+		if cmd.ExpectedGeneration == 0 {
+			return fmt.Errorf("%w: expected generation is required", ErrInvalidApplicationCall)
+		}
 		failed, err := tx.Operations().GetOperation(ctx, cmd.OperationID)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
-		record, err := tx.Resources().GetResource(ctx, failed.Operation.ResourceID())
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
+		if failed.Operation.ResourceID() != record.Resource.ID() {
+			return ErrConcurrencyConflict
 		}
-		if err := s.authorize(ctx, cmd.Actor, retryAction(failed.Operation.Capability()), resourceTargetOf(record)); err != nil {
-			return err
-		}
-		fingerprint := retryCommandFingerprint(failed.Operation)
+		fingerprint := retryCommandFingerprint(cmd)
 		if replay, found, err := replayWithin(ctx, tx, idempotencyScope(cmd.Actor), cmd.IdempotencyKey, fingerprint, "retry"); err != nil {
 			return err
 		} else if found {
 			result = replay
 			return nil
 		}
+		if record.Resource.Generation() != cmd.ExpectedGeneration {
+			return fmt.Errorf("%w: expected generation %d, got %d", ErrConcurrencyConflict, cmd.ExpectedGeneration, record.Resource.Generation())
+		}
 		if failed.Operation.State() != domain.OperationStateFailed {
-			return fmt.Errorf("%w: operation is not failed", lifecycle.ErrInvalidTransition)
+			return fmt.Errorf("%w: source operation is not failed", ErrOperationNotRetryable)
 		}
 		if active, found, err := tx.Operations().ActiveForResource(ctx, record.Resource.ID()); err != nil {
 			return err
 		} else if found {
 			return fmt.Errorf("%w: resource %q has operation %q", lifecycle.ErrOperationActive, record.Resource.ID(), active.Operation.ID())
 		}
+		latest, found, err := tx.Operations().LatestForResource(ctx, record.Resource.ID())
+		if err != nil {
+			return err
+		}
+		if !found || latest.Sequence != failed.Sequence || latest.Operation.ID() != failed.Operation.ID() {
+			return fmt.Errorf("%w: source operation is not latest", ErrOperationNotRetryable)
+		}
+		if failed.Operation.TargetGeneration() != record.Resource.Generation() {
+			return fmt.Errorf("%w: source operation does not target the current generation", ErrOperationNotRetryable)
+		}
+		if !retryStateCompatible(failed.Operation.Capability(), record.Status.State()) {
+			return fmt.Errorf("%w: %s cannot be retried from resource state %s", ErrOperationNotRetryable, failed.Operation.Capability(), record.Status.State())
+		}
 		resourceType, err := s.Types.Get(ctx, record.Resource.Type())
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceTypeNotFound, err)
+		}
+		if !resourceType.Domain().Supports(failed.Operation.Capability()) {
+			return fmt.Errorf("%w: resource type no longer supports source capability", ErrOperationNotRetryable)
+		}
+		sourceExecution, err := tx.Executions().GetExecution(ctx, failed.Operation.ID())
+		if err != nil {
+			return fmt.Errorf("%w: source execution is unavailable", ErrOperationNotRetryable)
+		}
+		if err := validateRetryProvenance(record, failed.Operation, sourceExecution); err != nil {
+			return err
+		}
+
+		childExecution := ProvisioningExecutionRecord{
+			ProvisionerRef: sourceExecution.ProvisionerRef, ResourceID: sourceExecution.ResourceID,
+			ResourceType: sourceExecution.ResourceType, Capability: sourceExecution.Capability,
+			TargetGeneration: sourceExecution.TargetGeneration, Spec: sourceExecution.Spec,
+			State: AttemptPending, Correlation: provisioning.RequestCorrelationUnknown,
+			NextObservation: 1, Version: 1,
+		}
+		if outputRecoveryFailure(failed.Operation) {
+			if evidenceErr := validatePersistedTerminalEvidence(sourceExecution, record.Resource, record.Status, failed.Operation); evidenceErr != nil {
+				return fmt.Errorf("%w: malformed source terminal evidence: %v", ErrOperationNotRetryable, evidenceErr)
+			}
+			sourceAttempt, attemptErr := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, sourceExecution.OperationID, sourceExecution.CurrentAttempt)
+			if attemptErr != nil {
+				return fmt.Errorf("%w: source submission attempt is unavailable", ErrOperationNotRetryable)
+			}
+			if evidenceErr := validateOutputRecoveryAdmission(failed.Operation, sourceExecution, sourceAttempt); evidenceErr != nil {
+				return evidenceErr
+			}
+			provider, resolveErr := s.Resolver.Resolve(ctx, sourceExecution.ProvisionerRef)
+			if resolveErr != nil || isNilInterface(provider) {
+				return fmt.Errorf("%w: %v", ErrProvisionerNotFound, resolveErr)
+			}
+			selector, ok := provider.(interface {
+				SelectOutputRecoveryMapping(domain.ResourceTypeRef, domain.Capability, string) (string, bool)
+			})
+			if !ok {
+				return fmt.Errorf("%w: provisioner does not support output recovery", ErrProvisionerNotFound)
+			}
+			mapping, selected := selector.SelectOutputRecoveryMapping(sourceExecution.ResourceType, sourceExecution.Capability, sourceExecution.OutputMappingRef)
+			if !selected || strings.TrimSpace(mapping) == "" || mapping == sourceExecution.OutputMappingRef {
+				return fmt.Errorf("%w: no compatible output recovery mapping", ErrProvisionerNotFound)
+			}
+			childExecution.OutputMappingRef = mapping
+			childExecution.OutputResolution = OutputResolutionPending
+			childExecution.State = AttemptSucceeded
+			childExecution.RecoverySourceOperationID = sourceExecution.OperationID
+			childExecution.RecoverySourceAttempt = sourceExecution.CurrentAttempt
 		}
 		transition, err := s.Lifecycle.Request(record.Resource, resourceType.Domain(), record.Status, &failed.Operation, failed.Operation.Capability(), cmd.NewOperationID, cmd.EventID, cmd.RequestedAt)
 		if err != nil {
@@ -766,10 +878,61 @@ func (s *Service) persistRetryRequest(ctx context.Context, cmd RetryOperationCom
 			return err
 		}
 		record.Version++
-		result, err = persistExistingTransition(ctx, tx, record, transition, idempotencyScope(cmd.Actor), cmd.IdempotencyKey, fingerprint, "retry")
+		childExecution.OperationID = transition.Operation.ID()
+		result, err = persistExistingTransitionWithExecution(ctx, tx, record, transition, childExecution, idempotencyScope(cmd.Actor), cmd.IdempotencyKey, fingerprint, "retry")
 		return err
 	})
 	return result, err
+}
+
+func retryStateCompatible(capability domain.Capability, state domain.ResourceState) bool {
+	switch capability {
+	case domain.CapabilityCreate:
+		return state == domain.ResourceStateFailed
+	case domain.CapabilityUpdate:
+		return state == domain.ResourceStateReady
+	case domain.CapabilityDelete:
+		return state == domain.ResourceStateReady || state == domain.ResourceStateFailed
+	default:
+		return false
+	}
+}
+
+func validateRetryProvenance(resource ResourceRecord, operation domain.Operation, execution ProvisioningExecutionRecord) error {
+	if execution.OperationID != operation.ID() || execution.ResourceID != resource.Resource.ID() ||
+		execution.ResourceType != resource.Resource.Type() || execution.Capability != operation.Capability() ||
+		execution.TargetGeneration != operation.TargetGeneration() || execution.ProvisionerRef != resource.ProvisionerRef ||
+		!reflect.DeepEqual(execution.Spec.Values(), resource.Resource.Spec().Values()) {
+		return fmt.Errorf("%w: source execution provenance does not match current resource intent", ErrOperationNotRetryable)
+	}
+	return nil
+}
+
+func outputRecoveryFailure(operation domain.Operation) bool {
+	failure, failed := operation.Failure()
+	return failed && failure.Reason() == ReasonOutputPostconditionRejected
+}
+
+func validateOutputRecoveryAdmission(operation domain.Operation, execution ProvisioningExecutionRecord, attempt SubmissionAttemptRecord) error {
+	failure, _ := operation.Failure()
+	if execution.State != AttemptSucceeded || execution.OutputResolution != OutputResolutionRejected ||
+		execution.OutputFailureReason != failure.Reason() || execution.OutputFailureMessage != failure.Message() ||
+		(operation.Capability() != domain.CapabilityCreate && operation.Capability() != domain.CapabilityUpdate) ||
+		execution.CurrentAttempt == 0 || execution.ProvisionerRef == "" || strings.TrimSpace(execution.OutputMappingRef) == "" ||
+		attempt.OperationID != execution.OperationID || attempt.AttemptNumber != execution.CurrentAttempt {
+		return fmt.Errorf("%w: source output-recovery provenance is inconsistent", ErrOperationNotRetryable)
+	}
+	switch attempt.State {
+	case SubmissionAttemptAccepted:
+		return nil
+	case SubmissionAttemptUnknown:
+		evidence := persistedTerminalExecution(execution)
+		if execution.AcceptanceConfirmed && execution.Correlation == provisioning.RequestCorrelationFound &&
+			evidence != nil && evidence.State == provisioning.ExecutionStateSucceeded {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: source submission attempt has unsafe terminal correlation state %s", ErrOperationNotRetryable, attempt.State)
 }
 
 func (s *Service) drive(ctx context.Context, operationID domain.OperationID) (Result, error) {
@@ -792,6 +955,17 @@ func (s *Service) drive(ctx context.Context, operationID domain.OperationID) (Re
 				return Result{}, err
 			}
 		case domain.OperationPhaseApplying, domain.OperationPhaseDestroying:
+			execution, err := s.loadExecution(ctx, operationID)
+			if err != nil {
+				return Result{}, err
+			}
+			if execution.IsOutputRecovery() {
+				opRecord, record, _, loadErr := s.loadOperationContext(ctx, operationID)
+				if loadErr != nil {
+					return Result{}, loadErr
+				}
+				return s.resolvePendingOutputs(ctx, record, opRecord, execution)
+			}
 			return s.DispatchOperation(ctx, operationID)
 		default:
 			return Result{}, fmt.Errorf("%w: unsupported operation phase %s", lifecycle.ErrInvalidTransition, opRecord.Operation.Phase())
@@ -835,6 +1009,13 @@ func (s *Service) DispatchOperation(ctx context.Context, operationID domain.Oper
 	provider, err := s.Resolver.Resolve(ctx, execution.ProvisionerRef)
 	if err != nil || isNilInterface(provider) {
 		return Result{}, fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
+	}
+	if execution.OutputMappingRef == "" {
+		if source, ok := provider.(interface {
+			OutputMappingRef(domain.ResourceTypeRef, domain.Capability) string
+		}); ok {
+			execution.OutputMappingRef = source.OutputMappingRef(execution.ResourceType, execution.Capability)
+		}
 	}
 	execution, claimed, err := s.claimPendingDispatch(ctx, operationID, execution)
 	if err != nil {
@@ -989,7 +1170,7 @@ func (s *Service) planTerminalSuccess(ctx context.Context, execution Provisionin
 // deferOutputPublication durably records backend success with Pending output
 // resolution. The operation stays active so extraction can be retried without
 // re-executing the backend.
-func (s *Service) deferOutputPublication(ctx context.Context, record ResourceRecord, execution ProvisioningExecutionRecord) (Result, error) {
+func (s *Service) deferOutputPublication(ctx context.Context, record ResourceRecord, opRecord OperationRecord, execution ProvisioningExecutionRecord) (Result, error) {
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
 		currentOperation, err := tx.Operations().GetOperation(ctx, execution.OperationID)
 		if err != nil {
@@ -1021,7 +1202,7 @@ func (s *Service) deferOutputPublication(ctx context.Context, record ResourceRec
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Resource: record, Operation: domain.Operation{}, Execution: &execution, OutputsPending: true}, nil
+	return Result{Resource: record, Operation: opRecord.Operation, Execution: &execution, OutputsPending: true}, nil
 }
 
 // resolvePendingOutputs re-drives output extraction for an execution whose
@@ -1036,22 +1217,61 @@ func (s *Service) resolvePendingOutputs(ctx context.Context, record ResourceReco
 	request := provisioning.ObservationRequest{OperationID: execution.OperationID, AttemptNumber: execution.CurrentAttempt, ResourceID: execution.ResourceID,
 		ResourceType: execution.ResourceType, Spec: execution.Spec, Capability: execution.Capability, TargetGeneration: execution.TargetGeneration,
 		Handle: execution.Handle, OutputMappingRef: execution.OutputMappingRef}
+	if execution.IsOutputRecovery() {
+		var source ProvisioningExecutionRecord
+		err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
+			var loadErr error
+			source, loadErr = tx.Executions().GetExecution(ctx, execution.RecoverySourceOperationID)
+			if loadErr != nil {
+				return loadErr
+			}
+			sourceOperation, loadErr := tx.Operations().GetOperation(ctx, execution.RecoverySourceOperationID)
+			if loadErr != nil {
+				return loadErr
+			}
+			sourceAttempt, loadErr := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, execution.RecoverySourceOperationID, execution.RecoverySourceAttempt)
+			if loadErr != nil {
+				return loadErr
+			}
+			return ValidateOutputRecoverySource(execution, source, sourceOperation.Operation, sourceAttempt)
+		})
+		if err != nil {
+			return Result{}, err
+		}
+		request = provisioning.ObservationRequest{OperationID: source.OperationID, AttemptNumber: execution.RecoverySourceAttempt,
+			ResourceID: source.ResourceID, ResourceType: source.ResourceType, Spec: source.Spec, Capability: source.Capability,
+			TargetGeneration: source.TargetGeneration, Handle: source.Handle, OutputMappingRef: execution.OutputMappingRef,
+			OutputSourceMappingRef: source.OutputMappingRef}
+	}
 	observation, observeErr := provider.Observe(ctx, request)
 	if observeErr != nil {
 		return Result{}, observeErr
 	}
 	if observation.Correlation != provisioning.RequestCorrelationFound || observation.Execution == nil || observation.Execution.State != provisioning.ExecutionStateSucceeded {
+		if execution.IsOutputRecovery() {
+			return Result{Resource: record, Operation: opRecord.Operation, Execution: &execution, OutputsPending: true}, nil
+		}
 		return Result{}, fmt.Errorf("%w: pending-output observation is not positively correlated terminal success", lifecycle.ErrInvalidTransition)
 	}
 	// Evidence timestamps stay pinned to the persisted terminal instant:
 	// repeated observations of the same backend success may carry the same
 	// provider time, and completion must continue to match that instant.
-	return s.finishSubmitted(ctx, record, opRecord, execution, true, "ObservationSucceeded", "", execution.LastObservedAt, observation.Resource, observation.Outputs)
+	finishAt := execution.LastObservedAt
+	if execution.IsOutputRecovery() {
+		finishAt = observedAt(observation.ObservedAt, record.Status.UpdatedAt())
+		execution.LastObservation = &observation
+		execution.LastObservedAt = finishAt
+		execution.Correlation = observation.Correlation
+	}
+	return s.finishSubmitted(ctx, record, opRecord, execution, true, "ObservationSucceeded", "", finishAt, observation.Resource, observation.Outputs)
 }
 
 func (s *Service) finishSubmitted(ctx context.Context, record ResourceRecord, opRecord OperationRecord, execution ProvisioningExecutionRecord, succeeded bool, reason, message string, at time.Time, facts domain.ObservedFacts, outputs *provisioning.OutputEvidence) (Result, error) {
 	var publish *domain.ResourceOutputs
 	if succeeded {
+		if err := ValidateOutputEvidenceMapping(execution.OutputMappingRef, outputs); err != nil {
+			return Result{}, err
+		}
 		switch execution.Capability {
 		case domain.CapabilityCreate, domain.CapabilityUpdate:
 			plan, err := s.planTerminalSuccess(ctx, execution, outputs, at)
@@ -1070,7 +1290,7 @@ func (s *Service) finishSubmitted(ctx context.Context, record ResourceRecord, op
 			}
 			switch plan.Action {
 			case OutputPlanDefer:
-				return s.deferOutputPublication(ctx, record, execution)
+				return s.deferOutputPublication(ctx, record, opRecord, execution)
 			case OutputPlanReject:
 				succeeded = false
 				reason = plan.Failure.Reason
@@ -1431,17 +1651,21 @@ func persistNewRequest(ctx context.Context, tx UnitOfWork, record ResourceRecord
 }
 
 func persistExistingTransition(ctx context.Context, tx UnitOfWork, record ResourceRecord, transition lifecycle.Result, scope, key, fingerprint, commandKind string) (Result, error) {
-	if err := tx.Operations().CreateOperation(ctx, OperationRecord{Operation: transition.Operation, Version: 1}); err != nil {
-		return Result{}, err
-	}
-	if err := tx.Events().Append(ctx, transition.Event); err != nil {
-		return Result{}, err
-	}
 	execution := ProvisioningExecutionRecord{
 		OperationID: transition.Operation.ID(), ProvisionerRef: record.ProvisionerRef,
 		ResourceID: record.Resource.ID(), ResourceType: record.Resource.Type(), Spec: record.Resource.Spec(),
 		Capability: transition.Operation.Capability(), TargetGeneration: transition.Operation.TargetGeneration(),
 		State: AttemptPending, Correlation: provisioning.RequestCorrelationUnknown, NextObservation: 1, Version: 1,
+	}
+	return persistExistingTransitionWithExecution(ctx, tx, record, transition, execution, scope, key, fingerprint, commandKind)
+}
+
+func persistExistingTransitionWithExecution(ctx context.Context, tx UnitOfWork, record ResourceRecord, transition lifecycle.Result, execution ProvisioningExecutionRecord, scope, key, fingerprint, commandKind string) (Result, error) {
+	if err := tx.Operations().CreateOperation(ctx, OperationRecord{Operation: transition.Operation, Version: 1}); err != nil {
+		return Result{}, err
+	}
+	if err := tx.Events().Append(ctx, transition.Event); err != nil {
+		return Result{}, err
 	}
 	if err := tx.Executions().CreateExecution(ctx, execution); err != nil {
 		return Result{}, err
@@ -1476,11 +1700,11 @@ func replayWithin(ctx context.Context, tx UnitOfWork, scope, key, fingerprint, c
 	if existing.Fingerprint != fingerprint || existing.CommandKind != commandKind {
 		return Result{}, false, ErrIdempotencyConflict
 	}
-	op, err := tx.Operations().GetOperation(ctx, existing.OperationID)
+	resource, err := tx.Resources().GetResource(ctx, existing.ResourceID)
 	if err != nil {
 		return Result{}, false, err
 	}
-	resource, err := tx.Resources().GetResource(ctx, existing.ResourceID)
+	op, err := tx.Operations().GetOperation(ctx, existing.OperationID)
 	if err != nil {
 		return Result{}, false, err
 	}
@@ -1494,7 +1718,7 @@ func replayWithin(ctx context.Context, tx UnitOfWork, scope, key, fingerprint, c
 	if err := validateExecutionContext(resource, op.Operation, execution); err != nil {
 		return Result{}, false, err
 	}
-	if op.Operation.IsTerminal() || execution.State == AttemptSucceeded || execution.State == AttemptFailed {
+	if op.Operation.IsTerminal() || !execution.IsOutputRecovery() && (execution.State == AttemptSucceeded || execution.State == AttemptFailed) {
 		if err := validatePersistedTerminalEvidence(execution, resource.Resource, resource.Status, op.Operation); err != nil {
 			return Result{}, false, err
 		}
@@ -1543,14 +1767,17 @@ func (s *Service) loadOperationContext(ctx context.Context, id domain.OperationI
 	var resource ResourceRecord
 	var execution ProvisioningExecutionRecord
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
-		var err error
-		operation, err = tx.Operations().GetOperation(ctx, id)
+		preflight, err := tx.Operations().LookupOperation(ctx, id)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
-		resource, err = tx.Resources().GetResource(ctx, operation.Operation.ResourceID())
+		resource, err = tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
+		}
+		operation, err = tx.Operations().GetOperation(ctx, id)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
 		execution, err = tx.Executions().GetExecution(ctx, id)
 		return err
@@ -1603,19 +1830,26 @@ func (s *Service) claimPendingDispatch(ctx context.Context, operationID domain.O
 	var execution ProvisioningExecutionRecord
 	claimed := false
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
+		preflight, operationErr := tx.Operations().LookupOperation(ctx, operationID)
+		if operationErr != nil {
+			return operationErr
+		}
+		resource, resourceErr := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+		if resourceErr != nil {
+			return resourceErr
+		}
 		operation, operationErr := tx.Operations().GetOperation(ctx, operationID)
 		if operationErr != nil {
 			return operationErr
+		}
+		if operation.Operation.ResourceID() != resource.Resource.ID() {
+			return ErrConcurrencyConflict
 		}
 		if operation.Operation.IsTerminal() {
 			return fmt.Errorf("%w: cannot dispatch a terminal operation", lifecycle.ErrInvalidTransition)
 		}
 		if operation.Operation.Phase() != domain.OperationPhaseApplying && operation.Operation.Phase() != domain.OperationPhaseDestroying {
 			return fmt.Errorf("%w: operation is not in a dispatchable phase", lifecycle.ErrInvalidTransition)
-		}
-		resource, resourceErr := tx.Resources().GetResource(ctx, operation.Operation.ResourceID())
-		if resourceErr != nil {
-			return resourceErr
 		}
 		var err error
 		execution, err = tx.Executions().GetExecution(ctx, operationID)
@@ -1625,8 +1859,12 @@ func (s *Service) claimPendingDispatch(ctx context.Context, operationID domain.O
 		if err := validateExecutionContext(resource, operation.Operation, execution); err != nil {
 			return err
 		}
-		if execution.Version != expected.Version || execution.ProvisionerRef != expected.ProvisionerRef {
+		if execution.Version != expected.Version || execution.ProvisionerRef != expected.ProvisionerRef ||
+			execution.OutputMappingRef != "" && execution.OutputMappingRef != expected.OutputMappingRef {
 			return ErrConcurrencyConflict
+		}
+		if execution.OutputMappingRef == "" {
+			execution.OutputMappingRef = expected.OutputMappingRef
 		}
 		if execution.State != AttemptPending {
 			return nil
@@ -1659,6 +1897,41 @@ func (s *Service) claimPendingDispatch(ctx context.Context, operationID domain.O
 		return nil
 	})
 	return execution, claimed, err
+}
+
+// ValidateOutputRecoverySource verifies that the child still identifies the
+// exact successful, output-rejected source evidence selected at admission.
+func ValidateOutputRecoverySource(child, source ProvisioningExecutionRecord, operation domain.Operation, attempt SubmissionAttemptRecord) error {
+	failure, failed := operation.Failure()
+	if !child.IsOutputRecovery() || source.OperationID != child.RecoverySourceOperationID ||
+		source.CurrentAttempt != child.RecoverySourceAttempt || source.ProvisionerRef != child.ProvisionerRef ||
+		source.ResourceID != child.ResourceID || source.ResourceType != child.ResourceType ||
+		source.Capability != child.Capability || source.TargetGeneration != child.TargetGeneration ||
+		!reflect.DeepEqual(source.Spec.Values(), child.Spec.Values()) || source.State != AttemptSucceeded ||
+		source.OutputResolution != OutputResolutionRejected || strings.TrimSpace(source.OutputMappingRef) == "" ||
+		strings.TrimSpace(child.OutputMappingRef) == "" || child.OutputMappingRef == source.OutputMappingRef ||
+		operation.ID() != source.OperationID || operation.ResourceID() != source.ResourceID ||
+		operation.Capability() != source.Capability || operation.TargetGeneration() != source.TargetGeneration ||
+		operation.State() != domain.OperationStateFailed || !failed || failure.Reason() != ReasonOutputPostconditionRejected ||
+		source.OutputFailureReason != failure.Reason() || source.OutputFailureMessage != failure.Message() ||
+		attempt.OperationID != source.OperationID || attempt.AttemptNumber != child.RecoverySourceAttempt ||
+		!safeOutputRecoveryAttempt(source, attempt) {
+		return fmt.Errorf("%w: output recovery source provenance changed", ErrInvalidApplicationCall)
+	}
+	return nil
+}
+
+func safeOutputRecoveryAttempt(execution ProvisioningExecutionRecord, attempt SubmissionAttemptRecord) bool {
+	switch attempt.State {
+	case SubmissionAttemptAccepted:
+		return true
+	case SubmissionAttemptUnknown:
+		evidence := persistedTerminalExecution(execution)
+		return execution.AcceptanceConfirmed && execution.Correlation == provisioning.RequestCorrelationFound &&
+			evidence != nil && evidence.State == provisioning.ExecutionStateSucceeded
+	default:
+		return false
+	}
 }
 
 func executionRequest(execution ProvisioningExecutionRecord) provisioning.ExecutionRequest {

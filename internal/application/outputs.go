@@ -49,6 +49,15 @@ func ValidOutputResolution(value OutputResolution) bool {
 // classification; neither ever contains offending keys or values.
 const ReasonOutputPostconditionRejected = "OutputPostconditionRejected"
 
+// ValidateOutputEvidenceMapping rejects provider output provenance that
+// contradicts the immutable mapping frozen on the execution.
+func ValidateOutputEvidenceMapping(mappingRef string, evidence *provisioning.OutputEvidence) error {
+	if evidence != nil && evidence.OutputMappingRef != "" && evidence.OutputMappingRef != mappingRef {
+		return fmt.Errorf("%w: output evidence mapping contradicts execution provenance", ErrInvalidApplicationCall)
+	}
+	return nil
+}
+
 // ManagedTargetAbsentReason is the fixed success reason recorded when a
 // cleanup delete proves conclusively — before any launch and without prior
 // acceptance — that the managed target is already absent. Destruction is

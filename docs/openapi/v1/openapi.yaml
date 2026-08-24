@@ -31,12 +31,13 @@ info:
     Mutations are asynchronous admissions. POST creates a Resource and
     returns 201 immediately; PUT and DELETE return 202 while infrastructure
     work proceeds out of band. Clients monitor lifecycle progress through
-    Operations.
+    Operations. Operation history is scoped to one Resource; v1 has no global
+    Operation list.
 
-    Concurrency: PUT and DELETE require a concrete unsigned 64-bit
-    If-Liftr-Generation precondition. Wildcard semantics do not exist in v1;
-    a missing header is answered with 428 PRECONDITION_REQUIRED and any
-    non-uint64 value is invalid.
+    Concurrency: PUT, DELETE, and explicit Operation retry require a concrete
+    unsigned 64-bit If-Liftr-Generation precondition. Wildcard semantics do
+    not exist in v1; a missing header is answered with 428
+    PRECONDITION_REQUIRED and any non-uint64 value is invalid.
 
     Tombstones: a retained Deleted Resource is returned with status.state
     "Deleted". A 404 means Liftr holds no readable record for the ID.
@@ -407,26 +408,126 @@ paths:
               schema:
                 $ref: "#/components/schemas/Operation"
         "404":
-          description: OPERATION_NOT_FOUND.
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/Problem"
-              examples:
-                operationNotFound:
-                  value:
-                    type: https://liftr.dev/problems/operation-not-found
-                    title: Operation not found
-                    status: 404
-                    instance: /v1/operations/op-example
-                    code: OPERATION_NOT_FOUND
-                    requestId: 6f2c7a4c8e5b41d0
+          $ref: "#/components/responses/OperationNotFound"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/Internal"
         "503":
           $ref: "#/components/responses/PersistenceUnavailable"
+  /v1/resources/{id}/operations:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      operationId: listResourceOperations
+      summary: List one Resource's lifecycle Operation history
+      description: |
+        Returns newest-first retained Operations for exactly the addressed
+        Resource. Authorization uses resource:read against the stored owner;
+        absence and denial return the same RESOURCE_NOT_FOUND response.
+        Resource existence and authorization are evaluated before limit or
+        cursor validation, so malformed pagination input cannot be used as an
+        existence oracle. This is the only Operation list in v1; no global
+        list exists.
+
+        Pagination is insertion-stable. The cursor is opaque, versioned,
+        unsigned, bounded to 64 characters, and bound to this Resource; it is
+        neither an authorization token nor a representation of public
+        Operation data. Clients must pass it back unchanged. The response
+        always contains items, omits nextCursor on the final page, never
+        reports a total, and carries no Liftr-Generation header.
+      parameters:
+        - $ref: "#/components/parameters/OperationPageLimit"
+        - $ref: "#/components/parameters/OperationCursor"
+        - $ref: "#/components/parameters/XCorrelationId"
+      responses:
+        "200":
+          description: One insertion-stable page of Resource Operation history.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
+  /v1/operations/{id}/retry:
+    parameters:
+      - $ref: "#/components/parameters/OperationId"
+    post:
+      operationId: retryOperation
+      summary: Admit a new Operation retrying one failed Operation
+      description: |
+        Authorizes ActionResourceRetry (resource:retry) through the source
+        Operation's owning Resource. Missing Operations, missing owning
+        Resources, and denials return the same OPERATION_NOT_FOUND response.
+        This authorization happens before headers or body are validated.
+
+        A successful admission creates a new Operation at the Resource's exact
+        current generation and immediately records retryOf provenance. Only a
+        latest Failed Operation targeting that same generation is retryable;
+        Canceled retry is not supported in v1. The Resource generation does
+        not change.
+
+        This operation defines no request body. The runtime accepts an absent
+        or whitespace-only body for transport tolerance and rejects any
+        non-whitespace content with INVALID_ARGUMENT. The 202 body is the new
+        Operation. Replay returns the original child Operation and adds
+        Idempotency-Replayed: true. Operation responses carry no
+        Liftr-Generation header.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfLiftrGeneration"
+        - $ref: "#/components/parameters/XCorrelationId"
+      responses:
+        "202":
+          description: Retry admitted, or the original admission replayed.
+          headers:
+            Location:
+              $ref: "#/components/headers/LocationOperation"
+            Link:
+              $ref: "#/components/headers/LinkMonitor"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/OperationNotFound"
+        "409":
+          description: |
+            GENERATION_CONFLICT (with currentGeneration), IDEMPOTENCY_CONFLICT,
+            OPERATION_ACTIVE, or OPERATION_NOT_RETRYABLE.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /healthz:
     get:
       operationId: healthz
@@ -519,8 +620,30 @@ components:
         or non-uint64 value yields 400 INVALID_ARGUMENT.
       schema:
         type: integer
-        format: int64
+        format: uint64
         minimum: 1
+        maximum: 18446744073709551615
+    OperationPageLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of Operations to return.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    OperationCursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque, versioned, unsigned continuation cursor returned by this
+        Resource's preceding history page. It is Resource-bound, at most 64
+        characters, not an authorization token, and must be passed unchanged.
+      schema:
+        type: string
+        maxLength: 64
     XCorrelationId:
       name: X-Correlation-ID
       in: header
@@ -538,8 +661,8 @@ components:
         responses.
       schema:
         type: integer
-        format: int64
         minimum: 1
+        maximum: 18446744073709551615
     LocationResource:
       description: URL of the created Resource (create requests).
       schema:
@@ -724,8 +847,8 @@ components:
       properties:
         observedGeneration:
           type: integer
-          format: int64
           minimum: 1
+          maximum: 18446744073709551615
         values:
           type: object
           description: |
@@ -754,7 +877,8 @@ components:
           type: string
         observedGeneration:
           type: integer
-          format: int64
+          minimum: 0
+          maximum: 18446744073709551615
         lastTransitionAt:
           type: string
           format: date-time
@@ -771,8 +895,8 @@ components:
           enum: [Unknown, Pending, Ready, Deleting, Deleted, Failed]
         observedGeneration:
           type: integer
-          format: int64
           minimum: 0
+          maximum: 18446744073709551615
         conditions:
           type: array
           items:
@@ -794,7 +918,8 @@ components:
           enum: [Pending, Running, Succeeded, Failed, Canceled]
         targetGeneration:
           type: integer
-          format: int64
+          minimum: 1
+          maximum: 18446744073709551615
         href:
           type: string
     Resource:
@@ -817,8 +942,8 @@ components:
           $ref: "#/components/schemas/OwnerRef"
         generation:
           type: integer
-          format: int64
           minimum: 1
+          maximum: 18446744073709551615
         spec:
           $ref: "#/components/schemas/ResourceSpec"
         status:
@@ -879,6 +1004,9 @@ components:
           type: string
         resourceId:
           type: string
+        retryOf:
+          type: string
+          description: Source Operation ID when this Operation is an explicit retry.
         capability:
           type: string
           enum: [create, update, delete]
@@ -887,7 +1015,8 @@ components:
           enum: [Pending, Running, Succeeded, Failed, Canceled]
         targetGeneration:
           type: integer
-          format: int64
+          minimum: 1
+          maximum: 18446744073709551615
         requestedAt:
           type: string
           format: date-time
@@ -899,6 +1028,22 @@ components:
           format: date-time
         failure:
           $ref: "#/components/schemas/OperationFailure"
+    OperationList:
+      type: object
+      description: |
+        One page of newest-first Operations for a single Resource. Internal
+        insertion sequence, execution mappings, attempts, and phases have no
+        public representation.
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Operation"
+        nextCursor:
+          type: string
+          description: Opaque continuation cursor; absent on the final page.
+          maxLength: 64
     Problem:
       type: object
       description: RFC 9457 Problem Details with Liftr extensions.
@@ -927,6 +1072,7 @@ components:
             - RESOURCE_SPEC_INVALID
             - RESOURCE_NOT_FOUND
             - OPERATION_NOT_FOUND
+            - OPERATION_NOT_RETRYABLE
             - RESOURCE_ALREADY_EXISTS
             - IDEMPOTENCY_CONFLICT
             - GENERATION_CONFLICT
@@ -941,7 +1087,8 @@ components:
           type: string
         currentGeneration:
           type: integer
-          format: int64
+          minimum: 1
+          maximum: 18446744073709551615
           description: Narrow extension present on GENERATION_CONFLICT problems.
         violations:
           type: array
@@ -995,11 +1142,29 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
     ResourceNotFound:
-      description: RESOURCE_NOT_FOUND; no retained record exists for this ID.
+      description: |
+        RESOURCE_NOT_FOUND; no retained record exists for this ID or access is
+        denied. These cases are intentionally indistinguishable.
       content:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Problem"
+    OperationNotFound:
+      description: |
+        OPERATION_NOT_FOUND; no retained Operation exists for this ID, its
+        owning Resource is unavailable, or access is denied. These cases are
+        intentionally indistinguishable.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://liftr.dev/problems/operation-not-found
+            title: Operation not found
+            status: 404
+            instance: /v1/operations/op-example
+            code: OPERATION_NOT_FOUND
+            requestId: 6f2c7a4c8e5b41d0
     ResourceTypeNotFound:
       description: RESOURCE_TYPE_NOT_FOUND; no contract is registered with this name and version.
       content:

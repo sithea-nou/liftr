@@ -51,6 +51,32 @@ func TestNewOperation(t *testing.T) {
 	}
 }
 
+func TestOperationRetryProvenance(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	operation, err := domain.NewOperation("operation-retry", "resource-1", domain.CapabilityUpdate, 3, now, "operation-failed")
+	if err != nil {
+		t.Fatalf("NewOperation() error = %v", err)
+	}
+	if operation.RetryOfOperationID() != "operation-failed" {
+		t.Fatalf("RetryOfOperationID() = %q, want operation-failed", operation.RetryOfOperationID())
+	}
+
+	restored, err := domain.RestoreOperation(domain.OperationSnapshot{
+		ID: "operation-restored", ResourceID: "resource-1", Capability: domain.CapabilityUpdate,
+		TargetGeneration: 3, RetryOfOperationID: operation.ID(), State: domain.OperationStatePending,
+		Phase: domain.OperationPhaseRequested, RequestedAt: now.Add(time.Minute), PhaseChangedAt: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("RestoreOperation() error = %v", err)
+	}
+	if restored.RetryOfOperationID() != operation.ID() {
+		t.Fatalf("restored RetryOfOperationID() = %q, want %q", restored.RetryOfOperationID(), operation.ID())
+	}
+	if _, err := domain.NewOperation("operation-self", "resource-1", domain.CapabilityUpdate, 3, now, "operation-self"); err == nil {
+		t.Fatal("NewOperation() accepted a self retry")
+	}
+}
+
 func TestOperationTransitions(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	tests := []struct {

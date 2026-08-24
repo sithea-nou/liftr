@@ -40,6 +40,11 @@ func securityCatalog(t *testing.T) application.ResourceTypeCatalog {
 }
 
 func securityService(t *testing.T, authorizer application.Authorizer) (*application.Service, *appfake.Store, *appfake.RecordingAuthorizer) {
+	service, store, recorder, _ := securityServiceWithProvider(t, authorizer, provisioningfake.New(provisioningfake.ModeSynchronous))
+	return service, store, recorder
+}
+
+func securityServiceWithProvider(t *testing.T, authorizer application.Authorizer, provider provisioning.Provisioner) (*application.Service, *appfake.Store, *appfake.RecordingAuthorizer, *appfake.Resolver) {
 	t.Helper()
 	ref, err := application.NewProvisionerRef("security-provider")
 	if err != nil {
@@ -51,14 +56,13 @@ func securityService(t *testing.T, authorizer application.Authorizer) (*applicat
 	if selected == nil {
 		selected = recorder
 	}
+	resolver := &appfake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{ref: provider}}
 	service, err := application.NewService(securityCatalog(t), &appfake.Selector{Ref: ref},
-		&appfake.Resolver{Providers: map[application.ProvisionerRef]provisioning.Provisioner{
-			ref: provisioningfake.New(provisioningfake.ModeSynchronous),
-		}}, store, selected)
+		resolver, store, selected)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service, store, recorder
+	return service, store, recorder, resolver
 }
 
 func memberOf(team string) identity.Principal {
@@ -173,6 +177,48 @@ func TestUpdateDenialHidesGenerationConflict(t *testing.T) {
 	}
 }
 
+func TestRetryUsesDedicatedAuthorizationAction(t *testing.T) {
+	recorder := &appfake.RecordingAuthorizer{AllowAll: appfake.AllowAll{}}
+	service, _, _, resolver := securityServiceWithProvider(t, recorder, provisioningfake.New(provisioningfake.ModeSynchronous))
+	service.EnableEagerExecutionForTesting()
+	ctx := context.Background()
+	actor := memberOf("platform")
+
+	created, err := service.CreateResource(ctx, application.CreateResourceCommand{
+		Actor: actor, ID: "resource-retry-authz", Type: provisioningfake.ResourceType(),
+		Owner: domain.OwnerRef{Kind: "team", ID: "platform"}, Spec: securitySpec(t, 5),
+		OperationID: "op-retry-authz-create", EventID: "evt-retry-authz-create", RequestedAt: securityTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.Providers[created.Resource.ProvisionerRef] = provisioningfake.New(provisioningfake.ModeFailure)
+	failed, err := service.UpdateResource(ctx, application.UpdateResourceCommand{
+		Actor: actor, ID: created.Resource.Resource.ID(), ExpectedGeneration: created.Resource.Resource.Generation(),
+		Spec: securitySpec(t, 6), OperationID: "op-retry-authz-update", EventID: "evt-retry-authz-update",
+		RequestedAt: securityTime.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Operation.State() != domain.OperationStateFailed {
+		t.Fatalf("update state = %s, want Failed", failed.Operation.State())
+	}
+
+	// Update remains allowed; only the independent retry permission is denied.
+	recorder.Denied = map[identity.Action]error{identity.ActionResourceRetry: errors.New("retry revoked")}
+	_, err = service.RetryOperation(ctx, application.RetryOperationCommand{
+		Actor: actor, OperationID: failed.Operation.ID(), NewOperationID: "op-retry-authz-denied",
+		EventID: "evt-retry-authz-denied", RequestedAt: securityTime.Add(2 * time.Minute),
+	})
+	if !errors.Is(err, application.ErrNotAuthorized) {
+		t.Fatalf("retry error = %v, want ErrNotAuthorized", err)
+	}
+	if recorder.LastAction != identity.ActionResourceRetry {
+		t.Fatalf("retry authorization action = %q, want %q", recorder.LastAction, identity.ActionResourceRetry)
+	}
+}
+
 func TestReadAuthorizationFollowsStoredOwner(t *testing.T) {
 	// This pin uses the real owner-membership policy so structural
 	// membership decides, not a permissive test fake.
@@ -262,6 +308,7 @@ func TestAdmittedWorkContinuesWithoutReauthorization(t *testing.T) {
 		identity.ActionResourceRead:     errors.New("revoked"),
 		identity.ActionResourceUpdate:   errors.New("revoked"),
 		identity.ActionResourceDelete:   errors.New("revoked"),
+		identity.ActionResourceRetry:    errors.New("revoked"),
 		identity.ActionResourceTypeRead: errors.New("revoked"),
 	}
 	if _, err := service.GetResource(ctx, memberOf("payments"), command.ID); !errors.Is(err, application.ErrNotAuthorized) {

@@ -36,20 +36,6 @@ type Authorizer interface {
 	Authorize(ctx context.Context, principal identity.Principal, action identity.Action, target identity.ResourceTarget) error
 }
 
-// retryAction maps a retried capability onto its admission action. Retrying a
-// failed Operation re-executes the same lifecycle intent, so it requires the
-// same permission as the original submission.
-func retryAction(capability domain.Capability) identity.Action {
-	switch capability {
-	case domain.CapabilityCreate:
-		return identity.ActionResourceCreate
-	case domain.CapabilityDelete:
-		return identity.ActionResourceDelete
-	default:
-		return identity.ActionResourceUpdate
-	}
-}
-
 // authorize enforces the authentication precondition and delegates the
 // decision to the configured authorizer. It fails closed: a missing principal
 // or a missing authorizer denies every action.
@@ -88,6 +74,41 @@ func (s *Service) CheckResourceAccess(ctx context.Context, principal identity.Pr
 	}
 	target := resourceTargetOf(record)
 	return s.authorize(ctx, principal, action, target)
+}
+
+// CheckRetryAccess resolves an Operation through its owning Resource and
+// authorizes resource:retry against the stored owner. Missing Operations,
+// missing owning Resources, and denials intentionally collapse to
+// ErrOperationNotFound so transports cannot disclose operation activity.
+func (s *Service) CheckRetryAccess(ctx context.Context, principal identity.Principal, id domain.OperationID) (ResourceRecord, error) {
+	var resource ResourceRecord
+	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
+		operation, err := tx.Operations().LookupOperation(ctx, id)
+		if err != nil {
+			return err
+		}
+		resource, err = tx.Resources().GetResource(ctx, operation.Operation.ResourceID())
+		if err != nil {
+			if errors.Is(err, ErrResourceNotFound) {
+				return ErrOperationNotFound
+			}
+			return err
+		}
+		if err := s.authorize(ctx, principal, identity.ActionResourceRetry, resourceTargetOf(resource)); err != nil {
+			if errors.Is(err, ErrNotAuthorized) {
+				return ErrOperationNotFound
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrOperationNotFound) {
+			return ResourceRecord{}, ErrOperationNotFound
+		}
+		return ResourceRecord{}, err
+	}
+	return resource, nil
 }
 
 // resourceTargetOf builds the authorization context of a stored Resource.
