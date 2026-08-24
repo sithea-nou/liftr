@@ -84,8 +84,11 @@ func TestNotFoundCreatesExactlyOneNewAttempt(t *testing.T) {
 
 func TestLongDispatchRenewsLease(t *testing.T) {
 	provider := newBlockingProvider()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(provider.release) }) }
+	t.Cleanup(release)
 	service, store, instance := newHarness(t, provider)
-	instance.Lease = 5 * time.Millisecond
+	instance.Lease = 250 * time.Millisecond
 	instance.RetryBase = 0
 	command := createCommand(t, "resource-expired", "operation-expired")
 	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
@@ -102,20 +105,39 @@ func TestLongDispatchRenewsLease(t *testing.T) {
 		result <- err
 	}()
 	<-provider.started
-	time.Sleep(20 * time.Millisecond)
-	var message application.OutboxMessage
-	err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
-		var err error
-		message, err = tx.Outbox().GetOutbox(context.Background(), application.DispatchMessage(command.OperationID, 1, 0).ID)
-		return err
-	})
-	if err != nil || message.State != application.OutboxLeased || !message.LeasedUntil.After(time.Now()) {
-		t.Fatalf("dispatch message error=%v state=%s leasedUntil=%v", err, message.State, message.LeasedUntil)
+	dispatchID := application.DispatchMessage(command.OperationID, 1, 0).ID
+	loadMessage := func() (application.OutboxMessage, error) {
+		var message application.OutboxMessage
+		err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
+			var err error
+			message, err = tx.Outbox().GetOutbox(context.Background(), dispatchID)
+			return err
+		})
+		return message, err
+	}
+	initial, err := loadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	message := initial
+	for !message.LeasedUntil.After(initial.LeasedUntil) {
+		if time.Now().After(deadline) {
+			t.Fatalf("dispatch lease was not renewed beyond %v", initial.LeasedUntil)
+		}
+		time.Sleep(5 * time.Millisecond)
+		message, err = loadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if message.State != application.OutboxLeased || !message.LeasedUntil.After(time.Now()) {
+		t.Fatalf("dispatch message state=%s leasedUntil=%v", message.State, message.LeasedUntil)
 	}
 	if worked, err := instance.RunOnce(context.Background()); err != nil || worked {
 		t.Fatalf("renewed dispatch was reclaimed worked=%t error=%v", worked, err)
 	}
-	close(provider.release)
+	release()
 	if err := <-result; err != nil {
 		t.Fatalf("dispatch error=%v", err)
 	}
