@@ -9,12 +9,14 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	apihttp "github.com/sithea-nou/liftr/internal/api/http"
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/auth"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/observability"
 	"github.com/sithea-nou/liftr/internal/provisioning"
 	"github.com/sithea-nou/liftr/internal/worker"
 )
@@ -28,9 +30,31 @@ type Runtime struct {
 	worker         *worker.Worker
 	logger         *slog.Logger
 	workerInterval time.Duration
+	telemetry      *observability.Telemetry
+	sampler        OperationalReader
+	sampleInterval time.Duration
+	thresholds     DiagnosticThresholds
+
+	draining atomic.Bool
 
 	stopOnce sync.Once
 	done     chan struct{}
+}
+
+// DiagnosticThresholds carries the configurable stuck-candidate thresholds.
+// They drive diagnostic gauges only and never influence lifecycle state.
+type DiagnosticThresholds struct {
+	LongRunningWarnAfter time.Duration
+	LongRunningCritAfter time.Duration
+	SilentAfter          time.Duration
+}
+
+// OperationalReader supplies one bounded cluster-global sample of durable
+// truth. It is defined here as a consumer port; the PostgreSQL adapter in the
+// server binary satisfies it through a small composition wrapper. The sampler
+// never runs inside a request or a scrape.
+type OperationalReader interface {
+	SnapshotOperationalState(ctx context.Context, thresholds DiagnosticThresholds) (observability.ClusterSample, error)
 }
 
 // AuthConfig carries the secured-runtime authentication configuration: one
@@ -70,6 +94,21 @@ type Config struct {
 	// affect in-flight work; long provider calls run under renewed leases.
 	WorkerInterval time.Duration
 	Logger         *slog.Logger
+	// Telemetry optionally instruments transactions, provisioners, worker,
+	// and transport. Nil keeps behavior identical without telemetry.
+	Telemetry *observability.Telemetry
+	// ProvisionerKinds maps each registered provisioner reference onto its
+	// bounded software-defined kind used as a metric dimension. Required when
+	// Telemetry is set; arbitrary refs never become metric labels.
+	ProvisionerKinds map[application.ProvisionerRef]observability.ProvisionerKind
+	// Sampler supplies cluster-global operational snapshots. Nil disables the
+	// operational sampler.
+	Sampler OperationalReader
+	// SampleInterval spaces operational samples; zero means 15s.
+	SampleInterval time.Duration
+	// Thresholds configures long-running and reconciliation-silence
+	// diagnostics.
+	Thresholds DiagnosticThresholds
 
 	// Auth configures secured JWT access-token authentication. Exactly one
 	// of Auth and InsecureAuth must be provided.
@@ -108,17 +147,68 @@ func Compose(config Config) (*Runtime, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	service, err := application.NewService(config.Catalog, staticSelector{ref: defaultRef}, staticResolver{providers: config.Provisioners}, config.Transactions, authorizer)
+	sampleInterval := config.SampleInterval
+	if sampleInterval <= 0 {
+		sampleInterval = observability.DefaultSampleInterval
+	}
+	if config.Telemetry != nil {
+		if len(config.ProvisionerKinds) != len(config.Provisioners) {
+			return nil, fmt.Errorf("%w: every registered provisioner needs a code-defined kind for metrics", application.ErrInvalidApplicationCall)
+		}
+		for ref := range config.Provisioners {
+			if !config.ProvisionerKinds[ref].Valid() {
+				return nil, fmt.Errorf("%w: provisioner %q has no valid metric kind", application.ErrInvalidApplicationCall, string(ref))
+			}
+		}
+	}
+	transactions := config.Transactions
+	if config.Telemetry != nil {
+		wrapped, wrapErr := observability.InstrumentTransactions(config.Transactions, config.Telemetry)
+		if wrapErr != nil {
+			return nil, wrapErr
+		}
+		transactions = wrapped
+	}
+	instrumented := make(map[application.ProvisionerRef]provisioning.Provisioner, len(config.Provisioners))
+	for ref, provider := range config.Provisioners {
+		if config.Telemetry != nil {
+			wrapped, wrapErr := observability.InstrumentProvisioner(provider, config.ProvisionerKinds[ref], config.Telemetry)
+			if wrapErr != nil {
+				return nil, wrapErr
+			}
+			provider = wrapped
+		}
+		instrumented[ref] = provider
+	}
+	service, err := application.NewService(config.Catalog, staticSelector{ref: defaultRef}, staticResolver{providers: instrumented}, transactions, authorizer)
 	if err != nil {
 		return nil, err
 	}
-	instance, err := worker.NewWithCatalog(config.Transactions, staticResolver{providers: config.Provisioners}, config.Catalog)
+	instance, err := worker.NewWithCatalog(transactions, staticResolver{providers: instrumented}, config.Catalog)
 	if err != nil {
 		return nil, err
 	}
 	instance.RetryBase = interval
-	handler := apihttp.NewHandler(apihttp.Deps{Service: service, Auth: authenticator})
-	return &Runtime{handler: handler, service: service, worker: instance, logger: logger, workerInterval: interval, done: make(chan struct{})}, nil
+	instance.Telemetry = workerTelemetry(config.Telemetry)
+	runtime := &Runtime{service: service, worker: instance, logger: logger, workerInterval: interval,
+		telemetry: config.Telemetry, sampler: config.Sampler, sampleInterval: sampleInterval,
+		thresholds: config.Thresholds, done: make(chan struct{})}
+	runtime.handler = apihttp.NewHandler(apihttp.Deps{Service: service, Auth: authenticator, Logger: logger,
+		Telemetry: config.Telemetry, Draining: runtime.IsDraining})
+	return runtime, nil
+}
+
+// IsDraining reports whether graceful shutdown has begun; readiness answers
+// 503 while true (ADR-0018).
+func (r *Runtime) IsDraining() bool { return r.draining.Load() }
+
+// workerTelemetry adapts the observability sink onto the worker port without
+// making the worker package depend on telemetry.
+func workerTelemetry(tel *observability.Telemetry) worker.TelemetrySink {
+	if tel == nil {
+		return nil
+	}
+	return tel
 }
 
 // composeAuth resolves exactly one authentication mode. The full runtime
@@ -157,11 +247,25 @@ func composeAuth(config Config) (apihttp.Authenticator, application.Authorizer, 
 			ClockSkew:        config.Auth.Skew,
 			JWKSRefreshEvery: config.Auth.JWKSRefreshEvery,
 			HTTPClient:       config.Auth.HTTPClient,
+			Observers:        authObservers(config.Telemetry),
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("compose OIDC authenticator: %w", err)
 		}
 		return oidcAuthenticator, auth.OwnerAuthorizer{}, nil
+	}
+}
+
+// authObservers wires the typed authentication-boundary events onto
+// telemetry. Nil telemetry yields silent observers.
+func authObservers(tel *observability.Telemetry) auth.Observers {
+	if tel == nil {
+		return auth.Observers{}
+	}
+	return auth.Observers{
+		Authentication:       tel.AuthenticationObserved,
+		JWKSRefresh:          tel.JWKSRefreshed,
+		ForcedRefreshLimited: tel.ForcedRefreshLimited,
 	}
 }
 
@@ -213,13 +317,72 @@ func (r *Runtime) drainBatch(ctx context.Context) {
 			return
 		}
 		found, err := r.worker.RunOnce(ctx)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			r.logger.Error("outbox work failed", "error", err)
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, worker.ErrRecoveredPanic) {
+			// Recovered panics were already logged with full sanitized
+			// context by the telemetry sink.
+			r.logger.Error("outbox work failed", "error", err, "error_class", "worker")
 		}
 		if !found {
 			return
 		}
 	}
+}
+
+// StartOperationalSampler periodically samples cluster-global durable truth
+// into gauges. Each cycle runs under a strict context budget in its own
+// goroutine — never inside a request or a metrics scrape. Failures retain
+// previous gauge values, count once, and log a bounded warning; they never
+// crash Liftr (ADR-0018).
+func (r *Runtime) StartOperationalSampler(ctx context.Context) {
+	if r.sampler == nil || r.telemetry == nil {
+		return
+	}
+	interval := r.sampleInterval
+	if interval <= 0 {
+		interval = observability.DefaultSampleInterval
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		r.sampleOnce(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.sampleOnce(ctx)
+			}
+		}
+	}()
+}
+
+func (r *Runtime) sampleOnce(ctx context.Context) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if r.telemetry != nil {
+				r.telemetry.SampleFailed()
+			}
+			r.logger.Error("operational sampler panicked", "error_class", "panic",
+				"panic_value", fmt.Sprintf("%v", recovered))
+		}
+	}()
+	budget := r.sampleInterval / 2
+	if budget > 5*time.Second {
+		budget = 5 * time.Second
+	}
+	sampleCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	sample, err := r.sampler.SnapshotOperationalState(sampleCtx, r.thresholds)
+	if err != nil {
+		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+			return // shutting down; not a sampling failure
+		}
+		r.telemetry.SampleFailed()
+		r.logger.Warn("operational sample failed; retaining previous gauge values",
+			"error_class", "sampler", "error", err.Error())
+		return
+	}
+	r.telemetry.RecordClusterSample(sample)
 }
 
 // Wait blocks until the worker loop stops.
@@ -244,3 +407,7 @@ func (s staticResolver) Resolve(_ context.Context, ref application.ProvisionerRe
 	}
 	return provider, nil
 }
+
+// SetDraining flips readiness to not-ready before HTTP draining begins
+// during graceful shutdown (ADR-0018).
+func (r *Runtime) SetDraining() { r.draining.Store(true) }

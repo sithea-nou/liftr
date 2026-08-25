@@ -25,15 +25,38 @@ import (
 // token-profile validation only: it is never persisted, logged, or carried
 // into principals or events (ADR-0012).
 func (a *OIDCAuthenticator) Authenticate(ctx context.Context, credential string) (identity.Principal, error) {
+	principal, err := a.authenticate(ctx, credential)
+	if a.observers.Authentication != nil {
+		if err != nil {
+			a.observers.Authentication(false, failureReasonOf(err))
+		} else {
+			a.observers.Authentication(true, identity.AuthFailureNone)
+		}
+	}
+	return principal, err
+}
+
+// authenticate verifies one bearer credential against the RFC 9068 JWT
+// access-token profile and returns the normalized principal, or
+// ErrInvalidCredentials. Every failure — wrong typing, bad signature,
+// expired, wrong issuer or audience — is indistinguishable to callers.
+//
+// Required profile: typ at+jwt (or application/at+jwt), configured algorithm,
+// exact issuer, Liftr audience present in aud, exp present and valid, iat
+// present (RFC 9068 requires it), nbf honored when present, non-empty sub,
+// and non-empty client_id and jti as required by RFC 9068 section 2.2. jti is
+// token-profile validation only: it is never persisted, logged, or carried
+// into principals or events (ADR-0012).
+func (a *OIDCAuthenticator) authenticate(ctx context.Context, credential string) (identity.Principal, error) {
 	token, err := parseToken(credential)
 	if err != nil {
 		return identity.Principal{}, err
 	}
 	if !validAccessTokenType(token.header.Typ) {
-		return identity.Principal{}, invalid("token type")
+		return identity.Principal{}, invalid(identity.AuthFailureMalformed)
 	}
 	if _, allowed := a.algorithms[token.header.Alg]; !allowed {
-		return identity.Principal{}, invalid("token algorithm")
+		return identity.Principal{}, invalid(identity.AuthFailureUnsupportedAlgorithm)
 	}
 	key, err := a.verificationKeyFor(ctx, token.header.Kid, token.header.Alg)
 	if err != nil {
@@ -55,38 +78,38 @@ func (a *OIDCAuthenticator) Authenticate(ctx context.Context, credential string)
 func (a *OIDCAuthenticator) principalFromClaims(claims map[string]json.RawMessage) (identity.Principal, error) {
 	issuer, err := claimString(claims, "iss")
 	if err != nil || issuer != a.issuer {
-		return identity.Principal{}, invalid("issuer")
+		return identity.Principal{}, invalid(identity.AuthFailureIssuerMismatch)
 	}
 	subject, err := claimString(claims, "sub")
 	if err != nil || subject == "" {
-		return identity.Principal{}, invalid("subject")
+		return identity.Principal{}, invalid(identity.AuthFailureClaimsInvalid)
 	}
 	clientID, err := claimString(claims, "client_id")
 	if err != nil || clientID == "" {
-		return identity.Principal{}, invalid("client_id")
+		return identity.Principal{}, invalid(identity.AuthFailureClaimsInvalid)
 	}
 	// RFC 9068 requires jti. It is validated for profile conformance and
 	// then discarded: no replay cache, no persistence, no principal field.
 	if _, err := claimJTI(claims); err != nil {
-		return identity.Principal{}, invalid("jti")
+		return identity.Principal{}, invalid(identity.AuthFailureClaimsInvalid)
 	}
 	now := a.now()
 	expiry, err := claimTime(claims, "exp")
 	if err != nil || expiry.Add(a.skew).Before(now) {
-		return identity.Principal{}, invalid("expiry")
+		return identity.Principal{}, invalid(identity.AuthFailureExpired)
 	}
 	issuedAt, err := claimTime(claims, "iat")
 	if err != nil || issuedAt.After(now.Add(a.skew)) {
-		return identity.Principal{}, invalid("issued-at")
+		return identity.Principal{}, invalid(identity.AuthFailureClaimsInvalid)
 	}
 	if raw, present := claims["nbf"]; present {
 		notBefore, err := claimNumber(raw)
 		if err != nil || time.Unix(int64(notBefore), 0).After(now.Add(a.skew)) {
-			return identity.Principal{}, invalid("not-before")
+			return identity.Principal{}, invalid(identity.AuthFailureExpired)
 		}
 	}
 	if !audienceContains(claims["aud"], a.audience) {
-		return identity.Principal{}, invalid("audience")
+		return identity.Principal{}, invalid(identity.AuthFailureAudienceMismatch)
 	}
 	memberships := a.mapper.MembershipsOf(claims, subject)
 	kind := identity.KindUser
@@ -94,7 +117,7 @@ func (a *OIDCAuthenticator) principalFromClaims(claims map[string]json.RawMessag
 		if _, present := claims[a.kindClaim]; present {
 			value, err := claimString(claims, a.kindClaim)
 			if err != nil {
-				return identity.Principal{}, invalid("principal kind")
+				return identity.Principal{}, invalid(identity.AuthFailureClaimsInvalid)
 			}
 			switch identity.PrincipalKind(value) {
 			case identity.KindUser:
@@ -102,7 +125,7 @@ func (a *OIDCAuthenticator) principalFromClaims(claims map[string]json.RawMessag
 			case identity.KindServiceAccount:
 				kind = identity.KindServiceAccount
 			default:
-				return identity.Principal{}, invalid("principal kind")
+				return identity.Principal{}, invalid(identity.AuthFailureClaimsInvalid)
 			}
 		}
 	}

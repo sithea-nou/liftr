@@ -1,7 +1,9 @@
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 .PHONY: build fmt fmt-check test test-race test-integration build-programs test-acceptance-azure vet verify verify-backstage
 
 build:
-	go build ./cmd/...
+	go build -ldflags "-X main.version=$(VERSION)" ./cmd/...
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')

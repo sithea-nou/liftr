@@ -5,7 +5,27 @@ package auth
 import (
 	"net/http"
 	"time"
+
+	"github.com/sithea-nou/liftr/internal/identity"
 )
+
+// Observers receives typed, bounded operational events from the
+// authentication boundary. Every field is optional; nil fields are silent.
+// The hooks carry structural vocabulary only — never tokens, claims, or
+// provider text — so composition-layer telemetry can render them as bounded
+// metric labels and log fields without this package importing any telemetry
+// library.
+type Observers struct {
+	// Authentication is invoked exactly once per Authenticate call with the
+	// outcome and, on failure, the typed reason.
+	Authentication func(success bool, reason identity.AuthFailureReason)
+	// JWKSRefresh is invoked after each background key-set fetch attempt
+	// triggered by cache aging or an unknown key ID.
+	JWKSRefresh func(success bool, duration time.Duration)
+	// ForcedRefreshLimited is invoked when the unknown-kid forced-refetch
+	// rate window suppresses a refresh.
+	ForcedRefreshLimited func()
+}
 
 // Config configures the OIDC access-token authenticator. Exactly one issuer
 // is trusted; federation is explicitly out of scope in M11 (ADR-0012).
@@ -36,4 +56,7 @@ type Config struct {
 	// HTTPClient lets tests inject a deterministic client. Production
 	// composition leaves it nil to receive the bounded default client.
 	HTTPClient *http.Client
+	// Observers optionally receives typed operational events. Production
+	// composition wires the telemetry recorder here; tests leave it zero.
+	Observers Observers
 }

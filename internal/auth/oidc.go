@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sithea-nou/liftr/internal/identity"
 )
 
 // httpClient is the bounded transport behavior for discovery and JWKS
@@ -36,26 +38,26 @@ func newHTTPClient() *httpClient {
 func (c *httpClient) getJSON(ctx context.Context, rawURL string, maxBytes int64) ([]byte, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, invalid("metadata URL")
+		return nil, invalid(identity.AuthFailureJWKSUnavailable)
 	}
 	if parsed.Scheme != "https" {
-		return nil, invalid("metadata URL scheme")
+		return nil, invalid(identity.AuthFailureJWKSUnavailable)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
-		return nil, invalid("metadata request")
+		return nil, invalid(identity.AuthFailureJWKSUnavailable)
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
-		return nil, invalid("metadata fetch failed")
+		return nil, invalid(identity.AuthFailureJWKSUnavailable)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, invalid("metadata fetch status")
+		return nil, invalid(identity.AuthFailureJWKSUnavailable)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
 	if err != nil || int64(len(body)) > maxBytes {
-		return nil, invalid("metadata size")
+		return nil, invalid(identity.AuthFailureJWKSUnavailable)
 	}
 	return body, nil
 }
@@ -107,6 +109,7 @@ type OIDCAuthenticator struct {
 	skew        time.Duration
 	cacheTTL    time.Duration
 	maxJWKSKeys int
+	observers   Observers
 
 	mu                sync.Mutex
 	http              *httpClient
@@ -135,6 +138,7 @@ func NewOIDCAuthenticator(ctx context.Context, config Config) (*OIDCAuthenticato
 		maxJWKSKeys: defaultMaxJWKSKeys,
 		http:        newHTTPClient(),
 		now:         time.Now,
+		observers:   config.Observers,
 	}
 	if config.ClockSkew > 0 {
 		authenticator.skew = config.ClockSkew
@@ -289,15 +293,22 @@ func (a *OIDCAuthenticator) verificationKeyFor(ctx context.Context, kid, algorit
 	// kid is unknown (refresh once). Both share one rate window.
 	now := a.now()
 	if !a.lastForcedRefresh.IsZero() && now.Sub(a.lastForcedRefresh) < minForcedRefreshInterval {
+		if a.observers.ForcedRefreshLimited != nil {
+			a.observers.ForcedRefreshLimited()
+		}
 		if set != nil {
 			if resolved, ok := selectKey(set, kid, algorithm); ok {
 				return resolved, nil
 			}
 		}
-		return verificationKey{}, invalid("unknown signing key")
+		return verificationKey{}, invalid(identity.AuthFailureRefreshRateLimited)
 	}
 	a.lastForcedRefresh = now
+	started := a.now()
 	fetched, err := a.fetchKeySet(ctx, a.jwksURI)
+	if a.observers.JWKSRefresh != nil {
+		a.observers.JWKSRefresh(err == nil, a.now().Sub(started))
+	}
 	if err != nil {
 		// Availability first: an aged-but-valid cache keeps verifying while
 		// the IdP recovers; the next attempt retries after the window.
@@ -306,13 +317,13 @@ func (a *OIDCAuthenticator) verificationKeyFor(ctx context.Context, kid, algorit
 				return resolved, nil
 			}
 		}
-		return verificationKey{}, invalid("signing key refresh failed")
+		return verificationKey{}, invalid(identity.AuthFailureJWKSUnavailable)
 	}
 	a.current = fetched
 	if resolved, ok := selectKey(fetched, kid, algorithm); ok {
 		return resolved, nil
 	}
-	return verificationKey{}, invalid("unknown signing key")
+	return verificationKey{}, invalid(identity.AuthFailureUnknownKey)
 }
 
 // stale reports whether a key set has aged past its refresh preference. It

@@ -223,6 +223,7 @@ func (h *handler) retryOperation(w http.ResponseWriter, r *http.Request) {
 		h.mapRetryError(w, r, principal, operationID, err)
 		return
 	}
+	h.recordAdmission(r, principal, result, true)
 	h.writeRetryResponse(w, result)
 }
 

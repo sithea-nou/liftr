@@ -13,9 +13,10 @@ package auth
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sithea-nou/liftr/internal/identity"
 )
 
 // accessTokenTypes are the access-token media types accepted by the RFC 9068
@@ -50,8 +51,33 @@ const (
 // for every credential failure (ADR-0012).
 var ErrInvalidCredentials = errors.New("invalid credentials")
 
-func invalid(reason string) error {
-	return fmt.Errorf("%w (%s)", ErrInvalidCredentials, reason)
+// authError is the internal verifier error. It always unwraps to
+// ErrInvalidCredentials so every caller-facing failure stays indistinguishable,
+// while carrying the typed structural reason for the authentication-boundary
+// observer hook. The reason is bounded vocabulary, never claim or provider
+// text.
+type authError struct {
+	reason identity.AuthFailureReason
+}
+
+func invalid(reason identity.AuthFailureReason) error {
+	return authError{reason: reason}
+}
+
+func (e authError) Error() string {
+	return ErrInvalidCredentials.Error() + " (" + e.reason.String() + ")"
+}
+
+func (e authError) Unwrap() error { return ErrInvalidCredentials }
+
+// failureReasonOf extracts the typed reason from a verifier error, falling
+// back to the bounded Other classification.
+func failureReasonOf(err error) identity.AuthFailureReason {
+	var typed authError
+	if errors.As(err, &typed) && typed.reason.Valid() && typed.reason != identity.AuthFailureNone {
+		return typed.reason
+	}
+	return identity.AuthFailureOther
 }
 
 func validAccessTokenType(typ string) bool {

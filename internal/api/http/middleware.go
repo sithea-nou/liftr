@@ -8,13 +8,35 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/identity"
 )
 
 type requestIDContextKey struct{}
 
 type principalContextKey struct{}
+
+type correlationIDContextKey struct{}
+
+// MaxCorrelationIDBytes bounds a client-supplied X-Correlation-ID. It is a
+// diagnostic identifier, never an authority; oversized or non-printable
+// values are dropped rather than echoed.
+const MaxCorrelationIDBytes = 128
+
+// Telemetry is the transport-owned observability port. Composition injects
+// one implementation; this package never imports a telemetry library.
+// Every method must be safe on a nil receiver path via the guarded helpers
+// below.
+type Telemetry interface {
+	HTTPRequestStarted()
+	HTTPRequestFinished(route string, method string, status int, duration time.Duration)
+	HTTPPanicRecovered(beforeCommit bool)
+	CorrelationIDDropped()
+	AuthenticationObserved(success bool, reason identity.AuthFailureReason)
+	OperationAdmitted(capability domain.Capability, retry bool)
+}
 
 // Authenticator turns one presented bearer credential into an authenticated
 // principal. It is a transport-owned consumer port: concrete implementations
@@ -43,17 +65,46 @@ var healthPaths = map[string]struct{}{
 
 // withRequestIdentity assigns an authoritative server-generated X-Request-ID
 // to every response. A client-supplied X-Correlation-ID is optional and stays
-// strictly separate: it is echoed verbatim and never used as or merged into
-// the request identifier.
-func withRequestIdentity(next http.Handler) http.Handler {
+// strictly separate from the request identifier: it is echoed only after
+// sanitization (bounded, printable ASCII), so hostile header content can
+// never reach response headers or operator logs (ADR-0018).
+func withRequestIdentity(telemetry Telemetry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := newRequestID()
 		w.Header().Set("X-Request-ID", requestID)
 		if correlation := r.Header.Get("X-Correlation-ID"); correlation != "" {
-			w.Header().Set("X-Correlation-ID", correlation)
+			sanitized, ok := sanitizeCorrelationID(correlation)
+			if ok {
+				w.Header().Set("X-Correlation-ID", sanitized)
+				r = r.WithContext(context.WithValue(r.Context(), correlationIDContextKey{}, sanitized))
+			} else if telemetry != nil {
+				telemetry.CorrelationIDDropped()
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, requestID)))
 	})
+}
+
+// sanitizeCorrelationID accepts trimmed printable ASCII identifiers up to
+// MaxCorrelationIDBytes and rejects everything else.
+func sanitizeCorrelationID(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > MaxCorrelationIDBytes {
+		return "", false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x21 || value[i] > 0x7e {
+			return "", false
+		}
+	}
+	return value, true
+}
+
+// CorrelationIDFromContext returns the sanitized caller-supplied correlation
+// ID for this request, if one was accepted.
+func CorrelationIDFromContext(ctx context.Context) string {
+	value, _ := ctx.Value(correlationIDContextKey{}).(string)
+	return value
 }
 
 func newRequestID() string {
@@ -87,7 +138,7 @@ const MaxBearerCredentialBytes = 8 * 1024
 // body regardless of failure reason, plus WWW-Authenticate per RFC 6750 —
 // error="invalid_token" only when a credential was presented and rejected
 // (ADR-0012).
-func withAuthentication(auth Authenticator, next http.Handler) http.Handler {
+func withAuthentication(auth Authenticator, telemetry Telemetry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, health := healthPaths[r.URL.Path]; health {
 			next.ServeHTTP(w, r)
@@ -101,9 +152,15 @@ func withAuthentication(auth Authenticator, next http.Handler) http.Handler {
 					writeUnauthenticated(w, r, false)
 					return
 				}
+				if state := telemetryStateFrom(r.Context()); state != nil {
+					state.setPrincipal(principal)
+				}
 				ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
+			}
+			if telemetry != nil {
+				telemetry.AuthenticationObserved(false, identity.AuthFailureMissingCredential)
 			}
 			writeUnauthenticated(w, r, false)
 			return
@@ -112,13 +169,25 @@ func withAuthentication(auth Authenticator, next http.Handler) http.Handler {
 			// Refuse before any token processing: no parsing, no key lookup,
 			// no refetch. The challenge says only that a presented credential
 			// was rejected.
+			if telemetry != nil {
+				telemetry.AuthenticationObserved(false, identity.AuthFailureMalformed)
+			}
 			writeUnauthenticated(w, r, true)
 			return
 		}
 		principal, err := auth.Authenticate(r.Context(), credential)
 		if err != nil || principal.ID == "" {
+			// The concrete verifier reports its own typed outcome through the
+			// observer hook; this fallback covers nil-auth and empty-principal
+			// paths only.
+			if telemetry != nil && err == nil {
+				telemetry.AuthenticationObserved(false, identity.AuthFailureOther)
+			}
 			writeUnauthenticated(w, r, true)
 			return
+		}
+		if state := telemetryStateFrom(r.Context()); state != nil {
+			state.setPrincipal(principal)
 		}
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
 		next.ServeHTTP(w, r.WithContext(ctx))

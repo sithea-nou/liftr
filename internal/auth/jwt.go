@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+
+	"github.com/sithea-nou/liftr/internal/identity"
 )
 
 // parsedToken is one structurally valid compact JWS serialization with its
@@ -38,30 +40,30 @@ var encoding = base64.RawURLEncoding
 func parseToken(credential string) (*parsedToken, error) {
 	parts := strings.Split(credential, ".")
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return nil, invalid("malformed token")
+		return nil, invalid(identity.AuthFailureMalformed)
 	}
 	headerBytes, err := encoding.DecodeString(parts[0])
 	if err != nil {
-		return nil, invalid("token header")
+		return nil, invalid(identity.AuthFailureMalformed)
 	}
 	var header tokenHeader
 	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return nil, invalid("token header")
+		return nil, invalid(identity.AuthFailureMalformed)
 	}
 	if subtle.ConstantTimeCompare([]byte(header.Alg), []byte("none")) == 1 {
-		return nil, invalid("unsigned tokens are not accepted")
+		return nil, invalid(identity.AuthFailureMalformed)
 	}
 	claimsBytes, err := encoding.DecodeString(parts[1])
 	if err != nil {
-		return nil, invalid("token payload")
+		return nil, invalid(identity.AuthFailureMalformed)
 	}
 	var claims map[string]json.RawMessage
 	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
-		return nil, invalid("token payload")
+		return nil, invalid(identity.AuthFailureMalformed)
 	}
 	signature, err := encoding.DecodeString(parts[2])
 	if err != nil {
-		return nil, invalid("token signature")
+		return nil, invalid(identity.AuthFailureMalformed)
 	}
 	return &parsedToken{
 		signingInput: parts[0] + "." + parts[1],
@@ -74,41 +76,41 @@ func parseToken(credential string) (*parsedToken, error) {
 // verify checks the RFC 9068 profile of the token against the trusted key.
 func (t *parsedToken) verify(key verificationKey) error {
 	if !validAccessTokenType(t.header.Typ) {
-		return invalid("token type")
+		return invalid(identity.AuthFailureMalformed)
 	}
 	if _, ok := supportedAlgorithms[t.header.Alg]; !ok {
-		return invalid("token algorithm")
+		return invalid(identity.AuthFailureUnsupportedAlgorithm)
 	}
 	digest := sha256.Sum256([]byte(t.signingInput))
 	switch t.header.Alg {
 	case "RS256":
 		if key.rsa == nil {
-			return invalid("signing key type")
+			return invalid(identity.AuthFailureUnknownKey)
 		}
 		if err := rsa.VerifyPKCS1v15(key.rsa.public, crypto.SHA256, digest[:], t.signature); err != nil {
-			return invalid("signature")
+			return invalid(identity.AuthFailureInvalidSignature)
 		}
 	case "PS256":
 		if key.rsa == nil {
-			return invalid("signing key type")
+			return invalid(identity.AuthFailureUnknownKey)
 		}
 		if err := rsa.VerifyPSS(key.rsa.public, crypto.SHA256, digest[:], t.signature, nil); err != nil {
-			return invalid("signature")
+			return invalid(identity.AuthFailureInvalidSignature)
 		}
 	case "ES256":
 		if key.ec == nil {
-			return invalid("signing key type")
+			return invalid(identity.AuthFailureUnknownKey)
 		}
 		if len(t.signature) != 64 {
-			return invalid("signature")
+			return invalid(identity.AuthFailureInvalidSignature)
 		}
 		r := new(big.Int).SetBytes(t.signature[:32])
 		s := new(big.Int).SetBytes(t.signature[32:])
 		if !ecdsa.Verify(key.ec.public, digest[:], r, s) {
-			return invalid("signature")
+			return invalid(identity.AuthFailureInvalidSignature)
 		}
 	default:
-		return invalid("token algorithm")
+		return invalid(identity.AuthFailureUnsupportedAlgorithm)
 	}
 	return nil
 }

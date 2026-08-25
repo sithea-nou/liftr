@@ -1,0 +1,169 @@
+# Liftr Operational Runbook
+
+This runbook assumes M17 signals: structured JSON logs, the Prometheus
+endpoint on `LIFTR_METRICS_ADDR`, `/healthz` (liveness) and `/readyz`
+(control-plane core readiness). Metric names follow the pinned OTel SDK
+version; see the metric help strings for cluster-global vs per-process
+semantics.
+
+## Safety rules — read first
+
+1. **Never casually mutate database state.** Durable rows are the only source
+   of lifecycle truth; outbox terminal rows are immutable by trigger.
+2. **Never delete Operation, Event, execution, or outbox rows.** There is no
+   redrive in M17; quarantined (`Dead`) work stays until an approved redrive
+   milestone exists.
+3. **Never force-conclude ambiguous infrastructure work.** A Dispatch whose
+   outcome reached the provider may be genuinely applied even if Liftr never
+   learned so. Recovery always routes through Observe.
+4. Restarts are safe by lease design: abandoned leases expire and recover
+   through the existing Unknown → Observe machinery. Prefer restart over any
+   manual intervention.
+
+## 1. API unhealthy
+
+**Signals:** `healthz` failing (process dead), 5xx share of
+`http_server_request_duration_seconds`, `liftr_http_panics_total`.
+
+- Liveness failing on one replica: check its container logs for
+  `error_class="panic"` or startup errors; replace the instance.
+- Elevated 5xx with `code=INTERNAL`: pull request_id from the access log,
+  follow it into admission/worker logs.
+
+## 2. PostgreSQL unavailable
+
+**Signals:** `/readyz` = 503 `PERSISTENCE_UNAVAILABLE`,
+`liftr_persistence_transactions_total{result="error"|"retryable"}` rising,
+connection-refused errors in logs.
+
+- Transient loss: requests answer existing 503 Problems; workers retry with
+  bounded backoff; nothing needs manual repair once the DB returns.
+- Pool exhaustion: watch per-process `liftr_persistence_pool_acquired/_idle`;
+  long saturation means a slow query or undersized pool — investigate slow
+  queries, do not raise limits blindly.
+- Deadlocks/serialization (`result="retryable"`): occasional counts are
+  normal under contention; sustained growth indicates a pathological
+  workload — capture the period and open an issue.
+
+## 3. Outbox backlog
+
+**Signals:** `liftr_outbox_pending_depth`, `liftr_outbox_pending_oldest_age_seconds`
+(cluster-global; aggregate replicas with max),
+`liftr_worker_work_total{outcome="retry"}` elevated.
+
+- Depth growing while worker success rate is nonzero: capacity problem —
+  scale worker processes (safe by lease design).
+- Oldest age growing but depth flat: a poison loop — look for repeated
+  `outcome="failed"` (quarantined to Dead;
+  `liftr_outbox_dead_total_count`) and the corresponding WARN log with
+  `error_class`.
+- Expired leases rising (`liftr_outbox_expired_leases`): recovery lag or
+  crashed claimants; after a crash this drains automatically.
+
+## 4. Stuck candidates (long-running / reconciliation-silent)
+
+**Signals:** `liftr_operations_long_running{capability,severity}`,
+`liftr_operations_reconciliation_silent{capability}`, sampler freshness
+(`liftr_observability_sampler_last_success_unix_seconds`).
+
+These are DIAGNOSTIC labels, not lifecycle states. A continuously-observed
+never-converging backend raises long-running while reconciliation-silent
+stays zero; silence rising means observations/work stopped.
+
+Runbook actions, in order:
+1. Identify the Operation via sampler WARN logs (operation_id, resource_id,
+   capability, age).
+2. Read its public history (`GET /v1/resources/{id}/operations`) and Events.
+3. Check the relevant provisioner section below.
+4. If the developer wants a clean slate for a FAILED operation, explicit
+   retry (`POST /v1/operations/{id}/retry`) remains the only sanctioned path.
+5. Never mark anything Failed by hand; never delete the Operation.
+
+## 5. Repeated ambiguous submissions
+
+**Signals:** `liftr_provisioner_submissions_total{outcome="ambiguous"}`,
+worker `liftr_worker_work_total{kind="dispatch",outcome="ambiguous"}` versus
+`liftr_worker_work_total{kind="dispatch",outcome="lease_lost"}`.
+
+These are DIFFERENT diagnoses:
+
+- `ambiguous` — the provider submission outcome is uncertain while this
+  worker still owned its fenced lease. Recovery routes the attempt through
+  Unknown → Observe; nothing was double-executed.
+- `lease_lost` — the worker provably lost fencing ownership (heartbeat
+  renewal failed or another claimant moved the durable state). Look for
+  competing worker processes, clock problems, or database stalls during the
+  loss window.
+
+Ambiguity is safe by design (attempt → Unknown → Observe recovery), but a
+rising rate means the provisioner cannot complete a submission round trip.
+For Pulumi check workspace/backend availability; for Crossplane check API
+reachability. The attempt's Unknown state guarantees no double-execution —
+do not "help" by re-submitting anything manually.
+
+## 6. Auth / JWKS errors
+
+**Signals:** `liftr_authentication_total` failure reasons (typed enum),
+`liftr_jwks_refresh_total{result="failure"}`,
+`liftr_jwks_forced_refresh_limited_total`.
+
+- Cached keys keep verifying through IdP outages; readiness is unaffected by
+  design. Sustained `jwks_unavailable` plus `refresh_rate_limited` spikes
+  usually mean either an IdP outage or a forgery flood probing unknown kids —
+  compare against request volume.
+- Reason labels are operator-only diagnostics; the public API still answers
+  one indistinguishable 401. Never expose reason detail to callers.
+
+## 7. Pulumi failures
+
+**Signals:** `liftr_provisioner_submissions_total{liftr_provisioner_kind="pulumi",...}`,
+curated reasons in structured logs (e.g., WorkspaceUnavailable,
+ExecutionEnvironmentUnavailable, HistoryUnavailable).
+
+All Pulumi detail stays in curated logs — never in labels. Check workspace
+root disk space, program binary digests, and credential env forwarding.
+Stack names and backend URLs are diagnostic identifiers in logs only.
+
+## 8. Crossplane reconciliation stalls
+
+**Signals:** long-running Operations with `liftr.provisioner.kind="crossplane"`,
+Observe outcomes stuck at running/unknown.
+
+Crossplane reconciles declaratively; nonterminal loops persist until operator
+intervention by design (ADR-0015). Inspect platform XR conditions on the
+Kubernetes side; raw condition messages intentionally never cross into Liftr.
+Destruction completes only when Observe proves genuine absence — an accepted
+DELETE whose kind disappeared stays alive with a curated failure until fixed.
+
+## 9. Output reconciliation failures
+
+**Signals:** Operations terminal-Failed with output-postcondition reasons,
+`scheduler`-side Observe outcomes cycling, WARN logs with
+`error_class="output_reconciliation"`.
+
+Output recovery retries are observe-only and never re-execute the backend.
+If extraction keeps failing (OutputsInvalid), the contract mapping disagrees
+with the backend reality; fix the binding/mapping via a new versioned
+ResourceType contract — never edit persisted mappings.
+
+## 10. Safe restart / shutdown expectations
+
+Sequence on SIGTERM: readiness flips 503 → HTTP drains (10s) → metrics
+listener stops → worker canceled and awaited (10s) → telemetry flushed → DB
+closed. In-flight Submits that get canceled remain durably ambiguous and
+recover via lease expiry + Observe after restart — expect (and ignore)
+transient `lease_lost`/Unknown entries around the restart window. Telemetry
+flush failures never affect lifecycle outcomes.
+
+## Alerting cookbook (examples, not product)
+
+- 5xx ratio: `sum(rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])) / sum(rate(http_server_request_duration_seconds_count[5m])) > 0.02`
+- Readiness: `max(readyz_probe_failures)` from your probe system.
+- Backlog age: `max(liftr_outbox_pending_oldest_age_seconds) > 3600`
+- Long-running critical: `max(liftr_operations_long_running{liftr_severity="critical"}) > 0`
+- Silence: `max(liftr_operations_reconciliation_silent) > 0`
+- Sampler staleness: `time() - max(liftr_observability_sampler_last_success_unix_seconds) > 120`
+- JWKS refresh failures: `increase(liftr_jwks_refresh_total{result="failure"}[15m]) > 5`
+
+Remember: sampled gauges duplicate across replicas — aggregate with `max`,
+not `sum`.

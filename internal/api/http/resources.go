@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -133,6 +134,7 @@ func (h *handler) createResource(w http.ResponseWriter, r *http.Request) {
 		h.mapMutationError(w, r, principal, err, id)
 		return
 	}
+	h.recordAdmission(r, principal, result, false)
 	h.writeMutationResponse(w, r, principal, result, http.StatusCreated)
 }
 
@@ -219,6 +221,7 @@ func (h *handler) updateResource(w http.ResponseWriter, r *http.Request) {
 		h.mapMutationDenied(w, r, target.actor, err, target.resourceID)
 		return
 	}
+	h.recordAdmission(r, target.actor, result, false)
 	h.writeMutationResponse(w, r, target.actor, result, http.StatusAccepted)
 }
 
@@ -261,6 +264,7 @@ func (h *handler) deleteResource(w http.ResponseWriter, r *http.Request) {
 		h.mapMutationDenied(w, r, target.actor, err, target.resourceID)
 		return
 	}
+	h.recordAdmission(r, target.actor, result, false)
 	h.writeMutationResponse(w, r, target.actor, result, http.StatusAccepted)
 }
 
@@ -318,6 +322,37 @@ func (h *handler) mapMutationDenied(w http.ResponseWriter, r *http.Request, prin
 		return
 	}
 	h.mapMutationError(w, r, principal, err, id)
+}
+
+// recordAdmission reports one admission outcome to telemetry and logs it.
+// Counting is structural: only NEW durable admissions increment the admitted
+// counter; an idempotency replay that returns the original Operation must
+// never count again (ADR-0018). The flag comes from application.Result.Replay,
+// never inferred from HTTP status.
+func (h *handler) recordAdmission(r *http.Request, principal identity.Principal, result application.Result, retry bool) {
+	if h.telemetry != nil && !result.Replay {
+		h.telemetry.OperationAdmitted(result.Operation.Capability(), retry)
+	}
+	if h.logger == nil {
+		return
+	}
+	resourceType := result.Resource.Resource.Type()
+	args := []any{
+		"request_id", RequestIDFromContext(r.Context()),
+		"correlation_id", CorrelationIDFromContext(r.Context()),
+		"operation_id", string(result.Operation.ID()),
+		"resource_id", string(result.Resource.Resource.ID()),
+		"resource_type", string(resourceType.Name) + "@" + string(resourceType.Version),
+		"capability", string(result.Operation.Capability()),
+		"target_generation", result.Resource.Resource.Generation(),
+		"principal_id", string(principal.ID),
+		"replayed", result.Replay,
+	}
+	level := slog.LevelInfo
+	if result.Replay {
+		level = slog.LevelDebug
+	}
+	h.logger.Log(r.Context(), level, "operation admitted", args...)
 }
 
 // writeMutationResponse renders an admitted mutation. Location points at the

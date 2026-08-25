@@ -28,8 +28,11 @@ import (
 	"time"
 
 	pgxpool "github.com/jackc/pgx/v5/pgxpool"
+	prometheus "github.com/prometheus/client_golang/prometheus"
+	promhttp "github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/domain"
+	"github.com/sithea-nou/liftr/internal/observability"
 	"github.com/sithea-nou/liftr/internal/persistence/postgres"
 	"github.com/sithea-nou/liftr/internal/provisioning"
 	"github.com/sithea-nou/liftr/internal/provisioning/bindings"
@@ -40,6 +43,10 @@ import (
 )
 
 const shutdownTimeout = 10 * time.Second
+
+// version is build metadata stamped via -ldflags; it becomes the OTel
+// service.version resource attribute.
+var version = "dev"
 
 // Composition-level proof: the concrete registry satisfies the consumer-owned
 // application catalog port through the neutral resourcecontract vocabulary.
@@ -58,27 +65,44 @@ var azureCredentialVariables = []string{
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	obsConfig, err := observability.LoadConfig()
+	if err != nil {
+		slog.New(slog.NewJSONHandler(os.Stdout, nil)).Error("configuration invalid", "error", err, "error_class", "configuration")
+		os.Exit(1)
+	}
+	logger := newLogger(obsConfig)
+	obsConfig.Logger = logger
+	obsConfig.ServiceVersion = version
+	telemetry, err := observability.NewTelemetry(context.Background(), obsConfig)
+	if err != nil {
+		logger.Error("telemetry configuration invalid", "error", err, "error_class", "configuration")
+		os.Exit(1)
+	}
+
 	addr := os.Getenv("LIFTR_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 
 	var handler http.Handler
+	var composed *server.Runtime
 	stopWorker := func() {}
+	closeStore := func() {}
 	databaseURL := os.Getenv("LIFTR_DATABASE_URL")
 	if databaseURL != "" {
-		composed, closeStore, composeErr := composeFullRuntime(context.Background(), logger)
+		runtime, close, composeErr := composeFullRuntime(context.Background(), logger, obsConfig, telemetry)
 		if composeErr != nil {
-			logger.Error("runtime composition failed", "error", composeErr)
+			logger.Error("runtime composition failed", "error", composeErr, "error_class", "configuration")
 			os.Exit(1)
 		}
-		defer closeStore()
+		composed = runtime
+		closeStore = close
 		handler = composed.Handler()
 
 		workerCtx, cancelWorker := context.WithCancel(context.Background())
 		defer cancelWorker()
 		composed.StartWorker(workerCtx)
+		composed.StartOperationalSampler(workerCtx)
 		stopWorker = func() {
 			cancelWorker()
 			select {
@@ -97,35 +121,102 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	metricsServer := startMetricsListener(logger, telemetry.PrometheusRegistry, obsConfig.MetricsAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("server starting", "address", addr)
+		logger.Info("server starting",
+			"address", addr,
+			"service_version", version,
+			"metrics_addr", obsConfig.MetricsAddr,
+		)
 		errCh <- httpServer.ListenAndServe()
 	}()
 
 	select {
-	case err := <-errCh:
-		if !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server stopped unexpectedly", "error", err)
+	case serveErr := <-errCh:
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			logger.Error("server stopped unexpectedly", "error", serveErr, "error_class", "invariant")
 			os.Exit(1)
 		}
 	case <-ctx.Done():
 		logger.Info("shutdown requested")
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			logger.Error("graceful shutdown failed", "error", err)
-		}
-		stopWorker()
+		shutdownInOrder(httpServer, metricsServer, composed, stopWorker, telemetry, closeStore, logger)
 	}
 
+	if err := telemetry.Shutdown(context.Background()); err != nil {
+		logger.Warn("telemetry flush failed after shutdown window", "error_class", "telemetry_export", "error", err.Error())
+	}
 	logger.Info("server stopped")
+}
+
+// shutdownInOrder implements the approved M17 sequence:
+//  1. readiness flips false (draining) so load balancers drain first;
+//  2. HTTP stops accepting and finishes in-flight requests;
+//  3. the metrics listener (if any) stops;
+//  4. the worker is canceled and waited on boundedly — leases stay intact so
+//     ambiguous Submits recover through existing expiry machinery;
+//  5. telemetry flushes boundedly;
+//  6. PostgreSQL closes.
+//
+// Telemetry flush failure never alters persisted lifecycle outcomes.
+func shutdownInOrder(httpServer *http.Server, metricsServer *http.Server, draining interface{ SetDraining() }, stopWorker func(), telemetry *observability.Telemetry, closeStore func(), logger *slog.Logger) {
+	if draining != nil {
+		draining.SetDraining()
+		logger.Info("readiness flipped to not-ready (draining)")
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("graceful shutdown failed", "error", err, "error_class", "invariant")
+	}
+	if metricsServer != nil {
+		metricsCtx, metricsCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer metricsCancel()
+		if err := metricsServer.Shutdown(metricsCtx); err != nil {
+			logger.Warn("metrics listener did not stop within its window", "error_class", "invariant")
+		}
+	}
+	stopWorker()
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer flushCancel()
+	if err := telemetry.Shutdown(flushCtx); err != nil {
+		logger.Warn("telemetry flush failed", "error_class", "telemetry_export", "error", err.Error())
+	}
+	closeStore()
+}
+
+func newLogger(config observability.Config) *slog.Logger {
+	options := &slog.HandlerOptions{Level: config.SlogLevel()}
+	if config.LogFormat == "text" {
+		return slog.New(slog.NewTextHandler(os.Stdout, options))
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, options))
+}
+
+// startMetricsListener serves /metrics on a dedicated operator listener over
+// the telemetry registry. Disabled unless LIFTR_METRICS_ADDR is explicitly
+// configured; there is no default public exposure (ADR-0018).
+func startMetricsListener(logger *slog.Logger, registry *prometheus.Registry, addr string) *http.Server {
+	if addr == "" {
+		return nil
+	}
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		logger.Info("metrics listener starting", "address", addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics listener stopped unexpectedly", "error", err, "error_class", "invariant")
+			os.Exit(1)
+		}
+	}()
+	return server
 }
 
 // composeAuthConfig reads authentication configuration from the process
@@ -166,10 +257,45 @@ func composeAuthConfig() (server.AuthConfig, bool, error) {
 	return config, false, nil
 }
 
+// samplerReader adapts the PostgreSQL store onto the server's operational
+// reader port, mapping adapter types onto telemetry-neutral sample values.
+type samplerReader struct{ store *postgres.Store }
+
+func (s samplerReader) SnapshotOperationalState(ctx context.Context, thresholds server.DiagnosticThresholds) (observability.ClusterSample, error) {
+	snapshot, err := s.store.SnapshotOperationalState(ctx, postgres.DiagnosticThresholds{
+		LongRunningWarnAfter: thresholds.LongRunningWarnAfter,
+		LongRunningCritAfter: thresholds.LongRunningCritAfter,
+		SilentAfter:          thresholds.SilentAfter,
+	})
+	if err != nil {
+		return observability.ClusterSample{}, err
+	}
+	pool := s.store.PoolStats()
+	return observability.ClusterSample{
+		SampledAt:                        snapshot.SampledAt,
+		OutboxPendingDepth:               snapshot.OutboxPendingDepth,
+		OutboxPendingOldestAgeSeconds:    snapshot.OutboxPendingOldestAgeSeconds,
+		OutboxExpiredLeases:              snapshot.OutboxExpiredLeases,
+		OutboxDead:                       snapshot.OutboxDead,
+		ActiveOperations:                 snapshot.ActiveOperations,
+		ActiveOperationsOldestAgeSeconds: snapshot.ActiveOldestAgeSeconds,
+		LongRunningWarning:               snapshot.LongRunningWarningByCapability,
+		LongRunningCritical:              snapshot.LongRunningCriticalByCapability,
+		ReconciliationSilent:             snapshot.SilentByCapability,
+		Pool: observability.PoolStats{
+			Acquired:   pool.Acquired,
+			Idle:       pool.Idle,
+			Connecting: pool.Connecting,
+			MaxTotal:   pool.MaxTotal,
+		},
+	}, nil
+}
+
 // composeFullRuntime wires durable persistence, the developer contract
 // registry, the private Pulumi binding, and the outbox worker. Authentication
-// configuration is mandatory and validated before anything starts.
-func composeFullRuntime(ctx context.Context, logger *slog.Logger) (*server.Runtime, func(), error) {
+// configuration is mandatory and validated before anything starts; schema
+// compatibility is verified before serving (ADR-0018).
+func composeFullRuntime(ctx context.Context, logger *slog.Logger, obsConfig observability.Config, telemetry *observability.Telemetry) (*server.Runtime, func(), error) {
 	authConfig, insecure, err := composeAuthConfig()
 	if err != nil {
 		return nil, nil, err
@@ -178,6 +304,11 @@ func composeFullRuntime(ctx context.Context, logger *slog.Logger) (*server.Runti
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := postgres.VerifySchema(ctx, store.Pool()); err != nil {
+		closeStore()
+		return nil, nil, fmt.Errorf("schema is not compatible with this build (run liftr-migrate): %w", err)
+	}
+	logger.Info("schema verified")
 	contractV1, err := postgresqldatabase.Contract()
 	if err != nil {
 		closeStore()
@@ -198,14 +329,25 @@ func composeFullRuntime(ctx context.Context, logger *slog.Logger) (*server.Runti
 		closeStore()
 		return nil, nil, err
 	}
+	kinds := map[application.ProvisionerRef]observability.ProvisionerKind{
+		providerRef: observability.ProvisionerKindPulumi,
+	}
 	runtime, err := server.Compose(server.Config{
 		Transactions:          store,
 		Catalog:               catalog,
 		Provisioners:          map[application.ProvisionerRef]provisioning.Provisioner{providerRef: provider},
 		DefaultProvisionerRef: providerRef,
 		Logger:                logger,
-		Auth:                  authConfigOrNil(authConfig, insecure),
-		InsecureAuth:          insecure,
+		Telemetry:             telemetry,
+		ProvisionerKinds:      kinds,
+		Sampler:               samplerReader{store: store},
+		Thresholds: server.DiagnosticThresholds{
+			LongRunningWarnAfter: obsConfig.LongRunningWarnAfter,
+			LongRunningCritAfter: obsConfig.LongRunningCritAfter,
+			SilentAfter:          obsConfig.ReconciliationSilentAfter,
+		},
+		Auth:         authConfigOrNil(authConfig, insecure),
+		InsecureAuth: insecure,
 	})
 	if err != nil {
 		closeStore()

@@ -35,6 +35,14 @@ type Worker struct {
 	Lease        time.Duration
 	RetryBase    time.Duration
 	Clock        func() time.Time
+	// Telemetry optionally receives bounded work events. It is injected by
+	// composition; the worker never imports a telemetry library and telemetry
+	// can never influence durable outcomes.
+	Telemetry TelemetrySink
+
+	// pendingTerminal buffers one terminal transition until its transaction
+	// commits (single-slot; the loop drains items sequentially per process).
+	pendingTerminal *operationSnapshot
 }
 
 func New(transactions application.TransactionRunner, resolver application.ProvisionerResolver) (*Worker, error) {
@@ -53,23 +61,99 @@ func NewWithCatalog(transactions application.TransactionRunner, resolver applica
 
 // RunOnce recovers one ambiguous expired Dispatch or processes one claimable
 // message. The boolean reports whether durable work was found.
-func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
-	if recovered, err := w.recoverExpiredDispatch(ctx); err != nil || recovered {
-		return recovered, err
+//
+// A panic inside one work item is recovered at this per-work boundary: the
+// item's lease stays intact so expiry recovery routes it through the existing
+// Unknown -> Observe machinery, the panic is reported to telemetry, and the
+// loop continues. A panic never marks work successful or failed (ADR-0018).
+func (w *Worker) RunOnce(ctx context.Context) (found bool, err error) {
+	w.clearPendingTerminal()
+	// activeKind tracks the in-progress work kind so a panic inside a handler
+	// reports the true kind instead of whatever the outer variable last held.
+	activeKind := ""
+	operationID := ""
+	func() {
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				return
+			}
+			err = &PanicError{Value: sanitizePanicValue(recovered)}
+			if w.Telemetry != nil {
+				kind := activeKind
+				if kind == "" {
+					kind = "unknown"
+				}
+				w.Telemetry.WorkerPanic(kind, err.(*PanicError).Value)
+				w.Telemetry.WorkCompleted(WorkEvent{Kind: kind, Outcome: OutcomePanic})
+			}
+		}()
+		found, operationID, err = w.runOnce(ctx, &activeKind)
+	}()
+	if err != nil && errors.Is(err, ErrRecoveredPanic) {
+		return true, err
 	}
-	token, err := newToken()
-	if err != nil {
-		return false, err
+	w.reportWork(activeKind, operationID, found, err)
+	if found && err == nil {
+		w.flushTerminal()
+	}
+	return found, err
+}
+
+func (w *Worker) reportWork(kind, operationID string, found bool, err error) {
+	if w.Telemetry == nil || !found || errors.Is(err, ErrRecoveredPanic) {
+		return
+	}
+	event := WorkEvent{Kind: kind, OperationID: operationID}
+	switch {
+	case err == nil:
+		event.Outcome = OutcomeSuccess
+	case isAmbiguousDispatch(err):
+		// Ambiguous and lease-lost are different diagnoses; the error itself
+		// carries which one occurred.
+		var ambiguous ambiguousDispatchError
+		errors.As(err, &ambiguous)
+		if ambiguous.leaseLost {
+			event.Outcome = OutcomeLeaseLos
+			event.ErrorClass = "lease_lost"
+		} else {
+			event.Outcome = OutcomeAmbiguous
+			event.ErrorClass = "provisioner_submission_ambiguous"
+		}
+	case classifyFailure(err) == failureStale:
+		event.Outcome = OutcomeStale
+		event.ErrorClass = "stale"
+	case classifyFailure(err) == failurePoison:
+		event.Outcome = OutcomeFailed
+		event.ErrorClass = "invalid_work"
+	default:
+		event.Outcome = OutcomeRetry
+		event.ErrorClass = "retryable"
+	}
+	w.Telemetry.WorkCompleted(event)
+}
+
+func (w *Worker) runOnce(ctx context.Context, kindPtr *string) (found bool, operationID string, err error) {
+	*kindPtr = WorkKindExpiredRecovery
+	if recovered, recoveryErr := w.recoverExpiredDispatch(ctx); recoveryErr != nil || recovered {
+		return recovered, "", recoveryErr
+	}
+	token, tokenErr := newToken()
+	if tokenErr != nil {
+		return false, "", tokenErr
 	}
 	var message application.OutboxMessage
-	var found bool
-	if err := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
+	found = false
+	if claimErr := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
 		var err error
 		message, found, err = tx.Outbox().ClaimOutbox(ctx, token, w.Lease)
 		return err
-	}); err != nil || !found {
-		return found, err
+	}); claimErr != nil || !found {
+		return found, string(message.OperationID), claimErr
 	}
+	kind := workKindOf(message.Kind)
+	*kindPtr = kind
+	operationID = string(message.OperationID)
 
 	switch message.Kind {
 	case application.OutboxDrive:
@@ -84,13 +168,13 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		err = fmt.Errorf("unsupported outbox kind %q", message.Kind)
 	}
 	if err == nil {
-		return true, nil
+		return true, operationID, nil
 	}
 	var ambiguous ambiguousDispatchError
 	if errors.As(err, &ambiguous) {
 		// Submit may already have reached the provider. Keep the lease intact so
 		// expiry recovery moves the attempt through Unknown and Observe.
-		return true, err
+		return true, operationID, err
 	}
 	switch classifyFailure(err) {
 	case failureStale:
@@ -99,9 +183,9 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		if settleErr := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
 			return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "StaleWork")
 		}); settleErr != nil && !errors.Is(settleErr, application.ErrConcurrencyConflict) {
-			return true, fmt.Errorf("process work: %w; settle stale work: %v", err, settleErr)
+			return true, operationID, fmt.Errorf("process work: %w; settle stale work: %v", err, settleErr)
 		}
-		return true, err
+		return true, operationID, err
 	case failurePoison:
 		// The work is provably invalid and can never succeed by retrying.
 		// Quarantine it for administrative redrive instead of retrying it
@@ -109,17 +193,37 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		if deadErr := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
 			return tx.Outbox().DeadOutbox(ctx, message.ID, message.LeaseToken, err.Error())
 		}); deadErr != nil && !errors.Is(deadErr, application.ErrConcurrencyConflict) {
-			return true, fmt.Errorf("process work: %w; quarantine work: %v", err, deadErr)
+			return true, operationID, fmt.Errorf("process work: %w; quarantine work: %v", err, deadErr)
 		}
-		return true, err
+		return true, operationID, err
 	default:
 		retryErr := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
 			return tx.Outbox().RetryOutbox(ctx, message.ID, message.LeaseToken, w.backoff(message.AttemptCount), err.Error())
 		})
 		if retryErr != nil && !errors.Is(retryErr, application.ErrConcurrencyConflict) {
-			return true, fmt.Errorf("process work: %w; reschedule: %v", err, retryErr)
+			return true, operationID, fmt.Errorf("process work: %w; reschedule: %v", err, retryErr)
 		}
-		return true, err
+		return true, operationID, err
+	}
+}
+
+func isAmbiguousDispatch(err error) bool {
+	var ambiguous ambiguousDispatchError
+	return errors.As(err, &ambiguous)
+}
+
+func workKindOf(kind application.OutboxKind) string {
+	switch kind {
+	case application.OutboxDrive:
+		return WorkKindDrive
+	case application.OutboxDispatch:
+		return WorkKindDispatch
+	case application.OutboxObserve:
+		return WorkKindObserve
+	case application.OutboxPassiveObserve:
+		return WorkKindPassiveObserve
+	default:
+		return "unknown"
 	}
 }
 
@@ -330,17 +434,43 @@ func (w *Worker) dispatch(ctx context.Context, message application.OutboxMessage
 	}
 	submitCtx, cancel := context.WithCancel(ctx)
 	heartbeat := w.startLeaseHeartbeat(submitCtx, cancel, message)
-	submission, submitErr := prepared.provider.Submit(submitCtx, executionRequest(prepared.execution))
-	heartbeatErr := heartbeat.stop()
+	var submission provisioning.Submission
+	var submitErr error
+	var heartbeatErr error
+	submitPanicked := false
+	func() {
+		// A panic during Submit is indistinguishable from an interrupted
+		// submission: infrastructure work may already have launched. It is
+		// converted to ambiguity, never to failure, and the heartbeat is
+		// always stopped so an abandoned lease can expire and recover through
+		// the existing Unknown -> Observe machinery (ADR-0018).
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				submitPanicked = true
+				submitErr = fmt.Errorf("provider submit panicked: %s", sanitizePanicValue(recovered))
+			}
+			heartbeatErr = heartbeat.stop()
+		}()
+		submission, submitErr = prepared.provider.Submit(submitCtx, executionRequest(prepared.execution))
+	}()
 	cancel()
+	if submitPanicked {
+		return ambiguousDispatchError{cause: submitErr}
+	}
 	if heartbeatErr != nil {
-		return ambiguousDispatchError{cause: fmt.Errorf("dispatch lease ownership lost")}
+		// The heartbeat could no longer renew: this worker provably lost
+		// fenced ownership of the lease. That is a different operator
+		// diagnosis from submission ambiguity (ADR-0018).
+		return ambiguousDispatchError{cause: fmt.Errorf("dispatch lease ownership lost"), leaseLost: true}
 	}
 	if err := w.recordDispatch(ctx, message, prepared, submission, submitErr); err != nil {
 		if recoveryErr := w.markDispatchUnknown(ctx, message, prepared, err); recoveryErr == nil {
 			return nil
 		}
-		return ambiguousDispatchError{cause: err}
+		// If the persistence failure was a fencing conflict, another claimant
+		// already owns or settled this work: ownership is lost. Anything else
+		// conservatively preserves ambiguity with the lease intact.
+		return ambiguousDispatchError{cause: err, leaseLost: errors.Is(err, application.ErrConcurrencyConflict)}
 	}
 	return nil
 }
@@ -389,7 +519,17 @@ func (w *Worker) startLeaseHeartbeat(ctx context.Context, cancel context.CancelF
 	return heartbeat
 }
 
-type ambiguousDispatchError struct{ cause error }
+// ambiguousDispatchError reports that the outcome of one provider submission
+// is uncertain. leaseLost distinguishes the two operator diagnoses: a plain
+// ambiguous error means this worker still owns the fenced lease and the
+// external submission outcome is merely unknown; leaseLost means fencing
+// ownership was provably lost (heartbeat renewal failure or another claimant
+// moved the durable state). Both keep the lease machinery intact so expiry
+// recovery decides safely; neither ever invents a definitive failure.
+type ambiguousDispatchError struct {
+	cause     error
+	leaseLost bool
+}
 
 func (e ambiguousDispatchError) Error() string {
 	return "dispatch result is ambiguous: " + e.cause.Error()
@@ -835,6 +975,7 @@ func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork,
 	if err := tx.Operations().SaveOperation(ctx, application.OperationRecord{Operation: result.Operation}, operation.Version); err != nil {
 		return err
 	}
+	w.noteTerminalTransition(operation.Operation, result.Operation, resource.Resource.ID())
 	if err := tx.Events().Append(ctx, result.Event); err != nil {
 		return err
 	}
@@ -921,6 +1062,7 @@ func (w *Worker) finishSuccessInTx(ctx context.Context, tx application.UnitOfWor
 		if err := tx.Operations().SaveOperation(ctx, application.OperationRecord{Operation: result.Operation}, operation.Version); err != nil {
 			return err
 		}
+		w.noteTerminalTransition(operation.Operation, result.Operation, resource.Resource.ID())
 		if err := tx.Events().Append(ctx, result.Event); err != nil {
 			return err
 		}
@@ -976,6 +1118,7 @@ func (w *Worker) finishSuccessInTx(ctx context.Context, tx application.UnitOfWor
 	if err := tx.Operations().SaveOperation(ctx, application.OperationRecord{Operation: result.Operation}, operation.Version); err != nil {
 		return err
 	}
+	w.noteTerminalTransition(operation.Operation, result.Operation, resource.Resource.ID())
 	if err := tx.Events().Append(ctx, result.Event); err != nil {
 		return err
 	}
