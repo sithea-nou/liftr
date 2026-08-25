@@ -41,7 +41,7 @@ func (s *Store) Close()              { s.pool.Close() }
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
 func (s *Store) Within(ctx context.Context, fn func(application.UnitOfWork) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin PostgreSQL transaction: %w", err)
 	}
@@ -68,6 +68,7 @@ func (r *repositories) Idempotency() application.IdempotencyRepository          
 func (r *repositories) SubmissionAttempts() application.SubmissionAttemptRepository { return r }
 func (r *repositories) Outbox() application.OutboxRepository                        { return r }
 func (r *repositories) Outputs() application.ResourceOutputRepository               { return r }
+func (r *repositories) Quotas() application.QuotaRepository                         { return r }
 
 func translateError(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {

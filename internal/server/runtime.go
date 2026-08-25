@@ -86,6 +86,9 @@ type AuthConfig struct {
 type Config struct {
 	Transactions application.TransactionRunner
 	Catalog      application.ResourceTypeCatalog
+	// AdmissionPolicy is one immutable process-lifetime policy revision. Nil
+	// means the built-in no-restrictions policy.
+	AdmissionPolicy application.AdmissionPolicy
 	// Provisioners maps private ProvisionerRef values to provisioners.
 	Provisioners map[application.ProvisionerRef]provisioning.Provisioner
 	// DefaultProvisionerRef is selected for new Resources.
@@ -180,7 +183,18 @@ func Compose(config Config) (*Runtime, error) {
 		}
 		instrumented[ref] = provider
 	}
-	service, err := application.NewService(config.Catalog, staticSelector{ref: defaultRef}, staticResolver{providers: instrumented}, transactions, authorizer)
+	admissionPolicy := config.AdmissionPolicy
+	if admissionPolicy == nil {
+		admissionPolicy = application.NoRestrictionsAdmissionPolicy{}
+	}
+	if config.Telemetry != nil {
+		wrapped, wrapErr := observability.InstrumentAdmissionPolicy(admissionPolicy, config.Telemetry)
+		if wrapErr != nil {
+			return nil, wrapErr
+		}
+		admissionPolicy = wrapped
+	}
+	service, err := application.NewService(config.Catalog, staticSelector{ref: defaultRef}, staticResolver{providers: instrumented}, transactions, authorizer, admissionPolicy)
 	if err != nil {
 		return nil, err
 	}

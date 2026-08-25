@@ -3,6 +3,7 @@
 package domain
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -18,6 +19,13 @@ type EventActor struct {
 	Kind string // principal kind, e.g. "user"
 }
 
+// EventAdmission records private provenance for a successfully admitted
+// desired-state mutation. The lifecycle engine never sets it; application
+// admission stamps it after platform policy succeeds.
+type EventAdmission struct {
+	PolicyRevision string
+}
+
 // Event is an append-only audit/history record, not an event-sourcing primitive.
 type Event struct {
 	id          EventID
@@ -29,6 +37,7 @@ type Event struct {
 	message     string
 	occurredAt  time.Time
 	actor       *EventActor
+	admission   *EventAdmission
 }
 
 func NewEvent(id EventID, resourceID ResourceID, operationID OperationID, generation uint64, typeName, reason, message string, occurredAt time.Time) (Event, error) {
@@ -82,6 +91,13 @@ func (e Event) Actor() (EventActor, bool) {
 	return *e.actor, true
 }
 
+func (e Event) Admission() (EventAdmission, bool) {
+	if e.admission == nil {
+		return EventAdmission{}, false
+	}
+	return *e.admission, true
+}
+
 // WithActor returns a copy of the event stamped with the requesting
 // principal. The lifecycle engine never sets actors; the application layer
 // stamps the admission event with the authenticated caller before it is
@@ -97,5 +113,20 @@ func (e Event) WithActor(actor EventActor) (Event, error) {
 	}
 	copied := e
 	copied.actor = &EventActor{ID: strings.TrimSpace(actor.ID), Kind: strings.TrimSpace(actor.Kind)}
+	return copied, nil
+}
+
+// WithAdmissionPolicyRevision returns a copy carrying the immutable policy
+// revision used for this admission. It is typed metadata, never an arbitrary
+// config-controlled payload.
+func (e Event) WithAdmissionPolicyRevision(revision string) (Event, error) {
+	const prefix = "pol_v1_"
+	digest := strings.TrimPrefix(revision, prefix)
+	_, decodeErr := hex.DecodeString(digest)
+	if revision != strings.TrimSpace(revision) || !strings.HasPrefix(revision, prefix) || len(digest) != 64 || digest != strings.ToLower(digest) || decodeErr != nil {
+		return Event{}, fmt.Errorf("event admission policy revision is invalid")
+	}
+	copied := e
+	copied.admission = &EventAdmission{PolicyRevision: revision}
 	return copied, nil
 }

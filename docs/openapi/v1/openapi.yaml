@@ -288,7 +288,8 @@ paths:
             RESOURCE_ALREADY_EXISTS when a retained record already exists for
             the ID, IDEMPOTENCY_CONFLICT when the key was reused with
             different content, OPERATION_ACTIVE when the Resource has an
-            active Operation.
+            active Operation, or QUOTA_EXCEEDED when an applicable per-owner
+            Resource count quota has been reached.
           content:
             application/problem+json:
               schema:
@@ -394,6 +395,8 @@ paths:
                 $ref: "#/components/schemas/Resource"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/ResourceNotFound"
         "409":
@@ -1326,6 +1329,8 @@ components:
             - UNSUPPORTED_CAPABILITY
             - PRECONDITION_REQUIRED
             - PROVISIONER_UNAVAILABLE
+            - POLICY_DENIED
+            - QUOTA_EXCEEDED
             - PERSISTENCE_UNAVAILABLE
             - INTERNAL
         requestId:
@@ -1372,11 +1377,11 @@ components:
             requestId: 6f2c7a4c8e5b41d0
     Forbidden:
       description: |
-        FORBIDDEN; the authenticated principal is not authorized. Resource
-        reads, updates, and deletes render the same 404 as absent records
-        instead, so this status is reserved for create admissions,
-        discovery policy denials, and inventory listing denials — cases that
-        hide no per-record existence (ADR-0012, ADR-0016).
+        FORBIDDEN when the authenticated principal is not authorized in a
+        context that hides no per-record existence, or POLICY_DENIED when
+        platform policy rejects an otherwise-authorized create or update.
+        Authorization denial for Resource reads, updates, and deletes still
+        renders the same 404 as an absent record (ADR-0012, ADR-0016).
       content:
         application/problem+json:
           schema:

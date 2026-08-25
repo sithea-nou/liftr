@@ -1,6 +1,6 @@
 # Liftr Operational Runbook
 
-This runbook assumes M17 signals: structured JSON logs, the Prometheus
+This runbook assumes M17/M18 signals: structured JSON logs, the Prometheus
 endpoint on `LIFTR_METRICS_ADDR`, `/healthz` (liveness) and `/readyz`
 (control-plane core readiness). Metric names follow the pinned OTel SDK
 version; see the metric help strings for cluster-global vs per-process
@@ -154,6 +154,49 @@ closed. In-flight Submits that get canceled remain durably ambiguous and
 recover via lease expiry + Observe after restart — expect (and ignore)
 transient `lease_lost`/Unknown entries around the restart window. Telemetry
 flush failures never affect lifecycle outcomes.
+
+## 11. Platform policy and quota admission
+
+`LIFTR_POLICY_FILE` is read exactly once at startup. Invalid syntax, unknown
+fields or ResourceTypes, duplicate members/rules, and invalid limits fail boot.
+Every healthy instance logs `platform admission policy loaded` with
+`policy_revision`; compare that field across replicas before considering a
+rollout complete. Never rely on a long mixed-revision window: old instances
+continue enforcing their immutable old snapshot by design.
+
+Safe rollout:
+
+1. Validate the document in staging against the exact registered ResourceType
+   catalog and exercise representative authorized creates/updates.
+2. Roll all replicas with the same file contents and verify one identical
+   revision in startup logs.
+3. Watch `liftr_policy_admissions_total` by bounded mutation/outcome and public
+   `POLICY_DENIED`, `QUOTA_EXCEEDED`, and `PERSISTENCE_UNAVAILABLE` rates.
+4. Roll back by restoring the previous file and restarting all replicas. There
+   is no hot reload and no database policy state to repair.
+
+`QUOTA_EXCEEDED` is an expected admission result and persists no Operation,
+Event, outbox item, or idempotency outcome. A same-key retry can therefore be
+admitted after policy changes. Successful earlier requests remain replayable
+under a stricter current revision.
+
+For an unexpected quota denial, use read-only diagnostics grouped by the exact
+owner and remember that every retained state except `Deleted` counts. First
+check for corrupt retained rows with no durable status; Liftr fails those
+owners closed as `INTERNAL` rather than undercounting:
+
+```sql
+SELECT r.id
+FROM resources r
+LEFT JOIN resource_statuses s ON s.resource_id = r.id
+WHERE r.owner_kind = $1 AND r.owner_id = $2 AND s.resource_id IS NULL;
+```
+
+Never edit statuses or delete tombstones to free quota. Correct policy through
+a coordinated rollout, or use normal lifecycle deletion so the retained
+Resource reaches `Deleted`. Event `data.admission.policyRevision` identifies
+which private revision admitted a successful create/update; rule IDs and
+counts intentionally never appear in public Problems or metric labels.
 
 ## Alerting cookbook (examples, not product)
 

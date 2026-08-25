@@ -18,20 +18,22 @@ import (
 // ProvisionerRef, request/correlation IDs, Idempotency-Key) and arbitrary
 // error text are forbidden as labels (ADR-0018).
 const (
-	attrCapability    = "liftr.capability"
-	attrRetry         = "liftr.retry"
-	attrOperationStat = "liftr.operation.state"
-	attrWorkerKind    = "liftr.worker.kind"
-	attrWorkOutcome   = "liftr.worker.outcome"
-	attrProvKind      = "liftr.provisioner.kind"
-	attrProvOutcome   = "liftr.provisioner.outcome"
-	attrProvMethod    = "liftr.provisioner.method"
-	attrAuthResult    = "liftr.auth.result"
-	attrAuthReason    = "liftr.auth.failure_reason"
-	attrJWKSResult    = "liftr.jwks.result"
-	attrPersistResult = "liftr.persistence.result"
-	attrSeverity      = "liftr.severity"
-	attrPanicPhase    = "liftr.panic.phase"
+	attrCapability     = "liftr.capability"
+	attrRetry          = "liftr.retry"
+	attrOperationStat  = "liftr.operation.state"
+	attrWorkerKind     = "liftr.worker.kind"
+	attrWorkOutcome    = "liftr.worker.outcome"
+	attrProvKind       = "liftr.provisioner.kind"
+	attrProvOutcome    = "liftr.provisioner.outcome"
+	attrProvMethod     = "liftr.provisioner.method"
+	attrAuthResult     = "liftr.auth.result"
+	attrAuthReason     = "liftr.auth.failure_reason"
+	attrJWKSResult     = "liftr.jwks.result"
+	attrPersistResult  = "liftr.persistence.result"
+	attrSeverity       = "liftr.severity"
+	attrPanicPhase     = "liftr.panic.phase"
+	attrPolicyMutation = "liftr.policy.mutation"
+	attrPolicyOutcome  = "liftr.policy.outcome"
 )
 
 // Panic phases for HTTP request handling.
@@ -72,6 +74,7 @@ type instruments struct {
 	provCallDuration    metric.Float64Histogram
 	persistenceTxs      metric.Int64Counter
 	persistenceTxMillis metric.Float64Histogram
+	policyAdmissions    metric.Int64Counter
 
 	poolAcquired   metric.Int64Gauge
 	poolIdle       metric.Int64Gauge
@@ -191,6 +194,11 @@ func newInstruments(meter metric.Meter) (*instruments, error) {
 	if i.persistenceTxMillis, err = meter.Float64Histogram("liftr.persistence.transaction.duration",
 		metric.WithDescription("Persistence transaction wall time."),
 		metric.WithUnit("s")); err != nil {
+		return nil, err
+	}
+	if i.policyAdmissions, err = meter.Int64Counter("liftr.policy.admissions",
+		metric.WithDescription("Platform policy decisions by bounded mutation and outcome."),
+		metric.WithUnit("{admission}")); err != nil {
 		return nil, err
 	}
 	if i.poolAcquired, err = meter.Int64Gauge("liftr.persistence.pool.acquired",

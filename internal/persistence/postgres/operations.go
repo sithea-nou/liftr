@@ -222,12 +222,19 @@ func (r *repositories) Append(ctx context.Context, event domain.Event) error {
 	// audit fields for admitted user mutations — the stable principal ID and
 	// principal kind only. Access tokens, raw claims, and memberships never
 	// reach this payload (ADR-0012).
-	var data any
+	data := make(map[string]any, 2)
 	if actor, present := event.Actor(); present {
-		data = map[string]any{"actor": map[string]string{"id": actor.ID, "kind": actor.Kind}}
+		data["actor"] = map[string]string{"id": actor.ID, "kind": actor.Kind}
+	}
+	if admission, present := event.Admission(); present {
+		data["admission"] = map[string]string{"policyRevision": admission.PolicyRevision}
+	}
+	var persistedData any
+	if len(data) != 0 {
+		persistedData = data
 	}
 	_, err := r.tx.Exec(ctx, `INSERT INTO events(id,resource_id,operation_id,generation,type,reason,message,occurred_at_ns,data)
-		VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8,$9)`, event.ID(), event.ResourceID(), operationID, uintText(event.Generation()), event.Type(), event.Reason(), event.Message(), event.OccurredAt().UnixNano(), data)
+		VALUES ($1,$2,$3,$4::numeric,$5,$6,$7,$8,$9)`, event.ID(), event.ResourceID(), operationID, uintText(event.Generation()), event.Type(), event.Reason(), event.Message(), event.OccurredAt().UnixNano(), persistedData)
 	return translateError(err)
 }
 

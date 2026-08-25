@@ -129,7 +129,13 @@ type ProvisionerResolver interface {
 }
 
 type ResourceRepository interface {
+	// LookupResource returns a Resource without locking it. Admission uses it
+	// only to authorize immutable owner/type identity before idempotency locks.
+	LookupResource(context.Context, domain.ResourceID) (ResourceRecord, error)
 	GetResource(context.Context, domain.ResourceID) (ResourceRecord, error)
+	// LockResourceID serializes creation of one Resource identity and reports
+	// whether any retained Resource or tombstone already owns it.
+	LockResourceID(context.Context, domain.ResourceID) (bool, error)
 	CreateResource(context.Context, ResourceRecord) error
 	SaveResource(context.Context, ResourceRecord, uint64) error
 	// ListResources returns one keyset page of the trusted ResourceListQuery.
@@ -278,6 +284,7 @@ type UnitOfWork interface {
 	SubmissionAttempts() SubmissionAttemptRepository
 	Outbox() OutboxRepository
 	Outputs() ResourceOutputRepository
+	Quotas() QuotaRepository
 }
 
 type TransactionRunner interface {
@@ -292,19 +299,29 @@ type Service struct {
 	// Authorizer decides admission-time authorization for exported business
 	// use cases. It is never consulted by worker execution paths (ADR-0012).
 	Authorizer Authorizer
-	Lifecycle  lifecycle.Engine
-	eager      bool
+	// AdmissionPolicy is a restrictive, pure admission overlay. Workers never
+	// consult it.
+	AdmissionPolicy AdmissionPolicy
+	Lifecycle       lifecycle.Engine
+	eager           bool
 }
 
 // EnableEagerExecutionForTesting preserves the Milestone 4 synchronous test
 // harness. Production services must use the durable outbox worker.
 func (s *Service) EnableEagerExecutionForTesting() { s.eager = true }
 
-func NewService(types ResourceTypeCatalog, selector ProvisionerSelector, resolver ProvisionerResolver, transactions TransactionRunner, authorizer Authorizer) (*Service, error) {
+func NewService(types ResourceTypeCatalog, selector ProvisionerSelector, resolver ProvisionerResolver, transactions TransactionRunner, authorizer Authorizer, policies ...AdmissionPolicy) (*Service, error) {
 	if isNilInterface(types) || isNilInterface(selector) || isNilInterface(resolver) || isNilInterface(transactions) || authorizer == nil {
 		return nil, fmt.Errorf("%w: application dependencies are required", ErrInvalidApplicationCall)
 	}
-	return &Service{Types: types, Selector: selector, Resolver: resolver, Transactions: transactions, Authorizer: authorizer}, nil
+	if len(policies) > 1 || len(policies) == 1 && isNilInterface(policies[0]) {
+		return nil, fmt.Errorf("%w: at most one non-nil admission policy is allowed", ErrInvalidApplicationCall)
+	}
+	admissionPolicy := AdmissionPolicy(NoRestrictionsAdmissionPolicy{})
+	if len(policies) == 1 {
+		admissionPolicy = policies[0]
+	}
+	return &Service{Types: types, Selector: selector, Resolver: resolver, Transactions: transactions, Authorizer: authorizer, AdmissionPolicy: admissionPolicy}, nil
 }
 
 type CreateResourceCommand struct {
@@ -851,22 +868,15 @@ func (s *Service) persistRetryRequest(ctx context.Context, cmd RetryOperationCom
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
 		}
-		record, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+		preflightResource, err := tx.Resources().LookupResource(ctx, preflight.Operation.ResourceID())
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
 		}
-		if err := s.authorize(ctx, cmd.Actor, identity.ActionResourceRetry, resourceTargetOf(record)); err != nil {
+		if err := s.authorize(ctx, cmd.Actor, identity.ActionResourceRetry, resourceTargetOf(preflightResource)); err != nil {
 			return err
 		}
 		if cmd.ExpectedGeneration == 0 {
 			return fmt.Errorf("%w: expected generation is required", ErrInvalidApplicationCall)
-		}
-		failed, err := tx.Operations().GetOperation(ctx, cmd.OperationID)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
-		}
-		if failed.Operation.ResourceID() != record.Resource.ID() {
-			return ErrConcurrencyConflict
 		}
 		fingerprint := retryCommandFingerprint(cmd)
 		if replay, found, err := replayWithin(ctx, tx, idempotencyScope(cmd.Actor), cmd.IdempotencyKey, fingerprint, "retry"); err != nil {
@@ -874,6 +884,20 @@ func (s *Service) persistRetryRequest(ctx context.Context, cmd RetryOperationCom
 		} else if found {
 			result = replay
 			return nil
+		}
+		record, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
+		}
+		if resourceTargetOf(record) != resourceTargetOf(preflightResource) {
+			return ErrConcurrencyConflict
+		}
+		failed, err := tx.Operations().GetOperation(ctx, cmd.OperationID)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrOperationNotFound, err)
+		}
+		if failed.Operation.ResourceID() != record.Resource.ID() {
+			return ErrConcurrencyConflict
 		}
 		if record.Resource.Generation() != cmd.ExpectedGeneration {
 			return fmt.Errorf("%w: expected generation %d, got %d", ErrConcurrencyConflict, cmd.ExpectedGeneration, record.Resource.Generation())
@@ -1571,24 +1595,12 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 			result = replay
 			return nil
 		}
-		if active, found, err := tx.Operations().ActiveForResource(ctx, cmd.ID); err != nil {
-			return err
-		} else if found {
-			return fmt.Errorf("%w: resource %q has operation %q", lifecycle.ErrOperationActive, cmd.ID, active.Operation.ID())
-		}
 		resourceType, err := s.Types.Get(ctx, cmd.Type)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceTypeNotFound, err)
 		}
 		if err := validateCommandSpec(resourceType, cmd.Spec); err != nil {
 			return err
-		}
-		ref, err := s.Selector.Select(ctx, cmd.Type, domain.CapabilityCreate)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
-		}
-		if _, err := NewProvisionerRef(string(ref)); err != nil {
-			return fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
 		}
 		resource, err := domain.NewResource(cmd.ID, cmd.Type, cmd.Owner, cmd.Spec, cmd.RequestedAt)
 		if err != nil {
@@ -1602,7 +1614,57 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 		if err != nil {
 			return err
 		}
-		transition.Event, err = stampedAdmissionEvent(transition, cmd.Actor)
+		plan, err := s.AdmissionPolicy.Plan(AdmissionIntent{Mutation: AdmissionCreate, Owner: cmd.Owner, ResourceType: cmd.Type})
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrPolicyEvaluation, err)
+		}
+		facts := ResourceCountFacts{}
+		if plan.RequiresResourceCounts() {
+			if err := tx.Quotas().LockOwnerQuota(ctx, cmd.Owner); err != nil {
+				return fmt.Errorf("%w: quota owner lock failed: %v", ErrPersistenceUnavailable, err)
+			}
+		}
+		// The owner quota lock, when required, is always held before this
+		// Resource identity lock. No fresh quota-bearing create can invert it.
+		exists, err := tx.Resources().LockResourceID(ctx, cmd.ID)
+		if err != nil {
+			return err
+		}
+		if active, found, err := tx.Operations().ActiveForResource(ctx, cmd.ID); err != nil {
+			return err
+		} else if found {
+			return fmt.Errorf("%w: resource %q has operation %q", lifecycle.ErrOperationActive, cmd.ID, active.Operation.ID())
+		}
+		if exists {
+			return fmt.Errorf("%w: resource already exists", ErrConcurrencyConflict)
+		}
+		if plan.RequiresResourceCounts() {
+			facts, err = tx.Quotas().ResourceCountFacts(ctx, cmd.Owner, cmd.Type)
+			if err != nil {
+				if errors.Is(err, ErrQuotaInvariant) {
+					return err
+				}
+				return fmt.Errorf("%w: quota fact query failed: %v", ErrPersistenceUnavailable, err)
+			}
+		}
+		decision, err := s.AdmissionPolicy.Decide(plan, facts)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrPolicyEvaluation, err)
+		}
+		if decision.Outcome != AdmissionAllowed {
+			if decision.Denial == nil {
+				return fmt.Errorf("%w: denial omitted reason", ErrPolicyEvaluation)
+			}
+			return &PolicyAdmissionError{Revision: decision.Revision, Denial: *decision.Denial}
+		}
+		ref, err := s.Selector.Select(ctx, cmd.Type, domain.CapabilityCreate)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
+		}
+		if _, err := NewProvisionerRef(string(ref)); err != nil {
+			return fmt.Errorf("%w: %v", ErrProvisionerNotFound, err)
+		}
+		transition.Event, err = stampedAdmissionEvent(transition, cmd.Actor, decision.Revision)
 		if err != nil {
 			return err
 		}
@@ -1625,11 +1687,11 @@ func (s *Service) persistExistingRequest(ctx context.Context, request existingRe
 	}
 	var result Result
 	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
-		stored, err := tx.Resources().GetResource(ctx, request.id)
+		preflight, err := tx.Resources().LookupResource(ctx, request.id)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
 		}
-		if err := s.authorize(ctx, request.actor, actionForCapability(request.capability), resourceTargetOf(stored)); err != nil {
+		if err := s.authorize(ctx, request.actor, actionForCapability(request.capability), resourceTargetOf(preflight)); err != nil {
 			return err
 		}
 		fingerprint, err := fingerprintForExistingRequest(request)
@@ -1642,6 +1704,13 @@ func (s *Service) persistExistingRequest(ctx context.Context, request existingRe
 		} else if found {
 			result = replay
 			return nil
+		}
+		stored, err := tx.Resources().GetResource(ctx, request.id)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
+		}
+		if resourceTargetOf(stored) != resourceTargetOf(preflight) {
+			return ErrConcurrencyConflict
 		}
 		if stored.Resource.Generation() != request.expectedGeneration {
 			return fmt.Errorf("%w: expected generation %d, got %d", ErrConcurrencyConflict, request.expectedGeneration, stored.Resource.Generation())
@@ -1680,7 +1749,25 @@ func (s *Service) persistExistingRequest(ctx context.Context, request existingRe
 		if err != nil {
 			return err
 		}
-		transition.Event, err = stampedAdmissionEvent(transition, request.actor)
+		var revision PolicyRevision
+		if request.capability == domain.CapabilityUpdate {
+			plan, planErr := s.AdmissionPolicy.Plan(AdmissionIntent{Mutation: AdmissionUpdate, Owner: stored.Resource.Owner(), ResourceType: stored.Resource.Type()})
+			if planErr != nil {
+				return fmt.Errorf("%w: %v", ErrPolicyEvaluation, planErr)
+			}
+			decision, decideErr := s.AdmissionPolicy.Decide(plan, ResourceCountFacts{})
+			if decideErr != nil {
+				return fmt.Errorf("%w: %v", ErrPolicyEvaluation, decideErr)
+			}
+			if decision.Outcome != AdmissionAllowed {
+				if decision.Denial == nil {
+					return fmt.Errorf("%w: denial omitted reason", ErrPolicyEvaluation)
+				}
+				return &PolicyAdmissionError{Revision: decision.Revision, Denial: *decision.Denial}
+			}
+			revision = decision.Revision
+		}
+		transition.Event, err = stampedAdmissionEvent(transition, request.actor, revision)
 		if err != nil {
 			return err
 		}
@@ -1726,8 +1813,15 @@ func fingerprintForExistingRequest(request existingRequest) (string, error) {
 // admission Event so durable history answers "who requested this?" for every
 // admitted user mutation (ADR-0012). Stamping happens before any persistence,
 // so a malformed actor fails the request with zero durable effects.
-func stampedAdmissionEvent(transition lifecycle.Result, principal identity.Principal) (domain.Event, error) {
-	return transition.Event.WithActor(domain.EventActor{ID: string(principal.ID), Kind: string(principal.Kind)})
+func stampedAdmissionEvent(transition lifecycle.Result, principal identity.Principal, policyRevision ...PolicyRevision) (domain.Event, error) {
+	event, err := transition.Event.WithActor(domain.EventActor{ID: string(principal.ID), Kind: string(principal.Kind)})
+	if err != nil {
+		return domain.Event{}, err
+	}
+	if len(policyRevision) == 0 || policyRevision[0] == "" {
+		return event, nil
+	}
+	return event.WithAdmissionPolicyRevision(string(policyRevision[0]))
 }
 
 func persistNewRequest(ctx context.Context, tx UnitOfWork, record ResourceRecord, transition lifecycle.Result, scope, key, fingerprint string) (Result, error) {

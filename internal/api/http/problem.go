@@ -29,6 +29,8 @@ const (
 	CodeUnsupportedCapability   = "UNSUPPORTED_CAPABILITY"
 	CodePreconditionRequired    = "PRECONDITION_REQUIRED"
 	CodeProvisionerUnavailable  = "PROVISIONER_UNAVAILABLE"
+	CodePolicyDenied            = "POLICY_DENIED"
+	CodeQuotaExceeded           = "QUOTA_EXCEEDED"
 	CodePersistenceUnavailable  = "PERSISTENCE_UNAVAILABLE"
 	CodeInternal                = "INTERNAL"
 )
@@ -56,6 +58,8 @@ var problemTitles = map[string]string{
 	CodeUnsupportedCapability:   "Unsupported capability",
 	CodePreconditionRequired:    "Precondition required",
 	CodeProvisionerUnavailable:  "Provisioner unavailable",
+	CodePolicyDenied:            "Policy denied",
+	CodeQuotaExceeded:           "Quota exceeded",
 	CodePersistenceUnavailable:  "Persistence unavailable",
 	CodeInternal:                "Internal error",
 }
@@ -80,7 +84,7 @@ func problemStatus(code string) int {
 	switch code {
 	case CodeUnauthenticated:
 		return http.StatusUnauthorized
-	case CodeForbidden:
+	case CodeForbidden, CodePolicyDenied:
 		return http.StatusForbidden
 	case CodeInvalidArgument:
 		return http.StatusBadRequest
@@ -89,7 +93,7 @@ func problemStatus(code string) int {
 	case CodeResourceNotFound, CodeOperationNotFound, CodeResourceTypeNotFound:
 		return http.StatusNotFound
 	case CodeResourceAlreadyExists, CodeIdempotencyConflict, CodeGenerationConflict,
-		CodeOperationActive, CodeOperationNotRetryable, CodeResourceStateConflict, CodeUnsupportedCapability:
+		CodeOperationActive, CodeOperationNotRetryable, CodeResourceStateConflict, CodeUnsupportedCapability, CodeQuotaExceeded:
 		return http.StatusConflict
 	case CodePreconditionRequired:
 		return http.StatusPreconditionRequired

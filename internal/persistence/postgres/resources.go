@@ -13,19 +13,31 @@ import (
 )
 
 func (r *repositories) GetResource(ctx context.Context, id domain.ResourceID) (application.ResourceRecord, error) {
+	return r.loadResource(ctx, id, true)
+}
+
+func (r *repositories) LookupResource(ctx context.Context, id domain.ResourceID) (application.ResourceRecord, error) {
+	return r.loadResource(ctx, id, false)
+}
+
+func (r *repositories) loadResource(ctx context.Context, id domain.ResourceID, lock bool) (application.ResourceRecord, error) {
 	var typeName, typeVersion, ownerKind, ownerID, generationText, versionText string
 	var specVersion int
 	var specBytes []byte
 	var createdNS, updatedNS, statusUpdatedNS int64
 	var observedText, state, provisionerRef string
-	err := r.tx.QueryRow(ctx, `SELECT r.type_name, r.type_version, r.owner_kind, r.owner_id,
+	query := `SELECT r.type_name, r.type_version, r.owner_kind, r.owner_id,
 		r.generation::text, r.spec_codec_version, r.spec, r.record_version::text,
 		r.created_at_ns, r.updated_at_ns, s.observed_generation::text, s.state,
 		s.updated_at_ns, b.provisioner_ref
 		FROM resources r
 		JOIN resource_statuses s ON s.resource_id = r.id
 		JOIN provisioner_bindings b ON b.resource_id = r.id
-		WHERE r.id = $1 FOR UPDATE OF r, s, b`, id).Scan(
+		WHERE r.id = $1`
+	if lock {
+		query += ` FOR UPDATE OF r, s, b`
+	}
+	err := r.tx.QueryRow(ctx, query, id).Scan(
 		&typeName, &typeVersion, &ownerKind, &ownerID, &generationText, &specVersion, &specBytes,
 		&versionText, &createdNS, &updatedNS, &observedText, &state, &statusUpdatedNS, &provisionerRef,
 	)
@@ -68,6 +80,17 @@ func (r *repositories) GetResource(ctx context.Context, id domain.ResourceID) (a
 		return application.ResourceRecord{}, err
 	}
 	return application.ResourceRecord{Resource: resource, Status: status, ProvisionerRef: ref, Version: version}, nil
+}
+
+func (r *repositories) LockResourceID(ctx context.Context, id domain.ResourceID) (bool, error) {
+	if _, err := r.tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", id); err != nil {
+		return false, translateError(err)
+	}
+	var found bool
+	if err := r.tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1 FOR UPDATE)`, id).Scan(&found); err != nil {
+		return false, translateError(err)
+	}
+	return found, nil
 }
 
 func (r *repositories) loadConditions(ctx context.Context, id domain.ResourceID) ([]domain.Condition, error) {

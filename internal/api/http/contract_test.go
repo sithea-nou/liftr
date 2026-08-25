@@ -205,7 +205,7 @@ func TestOpenAPIDocumentsHeadersAndCodes(t *testing.T) {
 		"RESOURCE_SPEC_INVALID", "RESOURCE_NOT_FOUND", "OPERATION_NOT_FOUND",
 		"RESOURCE_ALREADY_EXISTS", "IDEMPOTENCY_CONFLICT", "GENERATION_CONFLICT", "OPERATION_ACTIVE",
 		"RESOURCE_STATE_CONFLICT", "UNSUPPORTED_CAPABILITY", "PRECONDITION_REQUIRED",
-		"PROVISIONER_UNAVAILABLE", "PERSISTENCE_UNAVAILABLE", "INTERNAL",
+		"PROVISIONER_UNAVAILABLE", "POLICY_DENIED", "QUOTA_EXCEEDED", "PERSISTENCE_UNAVAILABLE", "INTERNAL",
 	}
 	for _, code := range codes {
 		if !strings.Contains(raw, "- "+code) {
@@ -275,8 +275,10 @@ func TestOpenAPIDocumentsSecurity(t *testing.T) {
 					t.Errorf("%s %s must override the root security requirement with an empty list", method, path)
 				}
 			}
-			if _, has403 := responses["403"]; has403 && path != "/v1/resources" {
-				t.Errorf("%s %s documents 403 but only create admissions may answer FORBIDDEN", method, path)
+			_, policyUpdate := responses["403"]
+			policyUpdate = policyUpdate && path == "/v1/resources/{id}" && method == "put"
+			if _, has403 := responses["403"]; has403 && path != "/v1/resources" && !policyUpdate {
+				t.Errorf("%s %s documents an unsupported 403 response", method, path)
 			}
 		}
 	}

@@ -50,3 +50,24 @@ func TestNewEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestEventAdmissionPolicyRevisionIsTypedAndBounded(t *testing.T) {
+	event, err := domain.NewEvent("event-policy", "resource-policy", "operation-policy", 1, "OperationRequested", "CreateRequested", "", time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := "pol_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	stamped, err := event.WithAdmissionPolicyRevision(revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, present := stamped.Admission()
+	if !present || admission.PolicyRevision != revision {
+		t.Fatalf("admission=%+v present=%t", admission, present)
+	}
+	for _, invalid := range []string{"", "pol_v1_short", "pol_v1_0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"} {
+		if _, err := event.WithAdmissionPolicyRevision(invalid); err == nil {
+			t.Fatalf("invalid revision %q accepted", invalid)
+		}
+	}
+}

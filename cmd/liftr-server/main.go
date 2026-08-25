@@ -34,6 +34,7 @@ import (
 	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/observability"
 	"github.com/sithea-nou/liftr/internal/persistence/postgres"
+	"github.com/sithea-nou/liftr/internal/policy"
 	"github.com/sithea-nou/liftr/internal/provisioning"
 	"github.com/sithea-nou/liftr/internal/provisioning/bindings"
 	pulumiprovisioner "github.com/sithea-nou/liftr/internal/provisioning/pulumi"
@@ -324,6 +325,12 @@ func composeFullRuntime(ctx context.Context, logger *slog.Logger, obsConfig obse
 		closeStore()
 		return nil, nil, err
 	}
+	admissionPolicy, err := policy.LoadFile(ctx, os.Getenv("LIFTR_POLICY_FILE"), catalog)
+	if err != nil {
+		closeStore()
+		return nil, nil, fmt.Errorf("load platform admission policy: %w", err)
+	}
+	logger.Info("platform admission policy loaded", "policy_revision", admissionPolicy.Revision())
 	providerRef, provider, err := composePulumiProvisioner()
 	if err != nil {
 		closeStore()
@@ -335,6 +342,7 @@ func composeFullRuntime(ctx context.Context, logger *slog.Logger, obsConfig obse
 	runtime, err := server.Compose(server.Config{
 		Transactions:          store,
 		Catalog:               catalog,
+		AdmissionPolicy:       admissionPolicy,
 		Provisioners:          map[application.ProvisionerRef]provisioning.Provisioner{providerRef: provider},
 		DefaultProvisionerRef: providerRef,
 		Logger:                logger,

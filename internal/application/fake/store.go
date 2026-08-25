@@ -160,6 +160,9 @@ func cloneEvents(source map[domain.EventID]domain.Event) map[domain.EventID]doma
 		if actor, present := event.Actor(); present {
 			event, _ = event.WithActor(actor)
 		}
+		if admission, present := event.Admission(); present {
+			event, _ = event.WithAdmissionPolicyRevision(admission.PolicyRevision)
+		}
 		cloned[key] = event
 	}
 	return cloned
@@ -213,6 +216,7 @@ func (s *Store) Idempotency() application.IdempotencyRepository              { r
 func (s *Store) SubmissionAttempts() application.SubmissionAttemptRepository { return s }
 func (s *Store) Outbox() application.OutboxRepository                        { return s }
 func (s *Store) Outputs() application.ResourceOutputRepository               { return s }
+func (s *Store) Quotas() application.QuotaRepository                         { return s }
 
 // SaveResourceOutputs is idempotent only for identical provenance and
 // content; contradictory evidence for the same resource/generation pair
@@ -259,6 +263,38 @@ func (s *Store) GetResource(_ context.Context, id domain.ResourceID) (applicatio
 		return application.ResourceRecord{}, application.ErrResourceNotFound
 	}
 	return record, nil
+}
+
+func (s *Store) LookupResource(ctx context.Context, id domain.ResourceID) (application.ResourceRecord, error) {
+	return s.GetResource(ctx, id)
+}
+
+func (s *Store) LockResourceID(_ context.Context, id domain.ResourceID) (bool, error) {
+	_, found := s.resources[id]
+	return found, nil
+}
+
+func (s *Store) LockOwnerQuota(context.Context, domain.OwnerRef) error { return nil }
+
+func (s *Store) ResourceCountFacts(_ context.Context, owner domain.OwnerRef, ref domain.ResourceTypeRef) (application.ResourceCountFacts, error) {
+	facts := application.ResourceCountFacts{Available: true, Owner: owner, ResourceType: ref}
+	for _, record := range s.resources {
+		if record.Resource.Owner() != owner {
+			continue
+		}
+		state := record.Status.State()
+		if state == "" {
+			return application.ResourceCountFacts{}, application.ErrQuotaInvariant
+		}
+		if state == domain.ResourceStateDeleted {
+			continue
+		}
+		facts.OwnerNonDeleted++
+		if record.Resource.Type() == ref {
+			facts.TypeNonDeleted++
+		}
+	}
+	return facts, nil
 }
 
 func (s *Store) CreateResource(_ context.Context, record application.ResourceRecord) error {

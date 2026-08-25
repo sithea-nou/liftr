@@ -67,6 +67,18 @@ func (h *handler) mapMutationError(w http.ResponseWriter, r *http.Request, princ
 		writeProblem(w, r, CodeProvisionerUnavailable, "no provisioner is available for this request", nil)
 		return
 	}
+	if errors.Is(err, application.ErrPolicyDenied) {
+		writeProblem(w, r, CodePolicyDenied, "platform policy does not permit this Resource mutation", nil)
+		return
+	}
+	if errors.Is(err, application.ErrQuotaExceeded) {
+		writeProblem(w, r, CodeQuotaExceeded, "the applicable Resource count quota has been reached", nil)
+		return
+	}
+	if errors.Is(err, application.ErrPersistenceUnavailable) {
+		writeProblem(w, r, CodePersistenceUnavailable, "the control plane cannot currently verify admission against durable state", nil)
+		return
+	}
 	if errors.Is(err, application.ErrIdempotencyConflict) {
 		writeProblem(w, r, CodeIdempotencyConflict, "this Idempotency-Key was already used with different request content", nil)
 		return
