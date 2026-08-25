@@ -5,6 +5,7 @@ package worker_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +51,37 @@ func TestDispatchCarriesProviderNeutralAttemptCorrelation(t *testing.T) {
 	drain(t, instance, 8)
 	if provider.request.OperationID != command.OperationID || provider.request.AttemptNumber != 1 || provider.request.Capability != domain.CapabilityCreate {
 		t.Fatalf("request = %+v", provider.request)
+	}
+}
+
+func TestWorkerPassesCurrentOwnershipToFencedProvisioner(t *testing.T) {
+	provider := &ownershipProvider{}
+	service, store, instance := newHarness(t, provider)
+	resourceID := domain.ResourceID("resource-fenced")
+	command := createCommand(t, resourceID, "operation-fenced")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, instance, 8)
+	provider.mu.Lock()
+	if len(provider.submits) != 1 || provider.submits[0].MessageID == "" || provider.submits[0].LeaseToken == "" || provider.submits[0].Passive {
+		t.Fatalf("submit fences = %+v", provider.submits)
+	}
+	provider.mu.Unlock()
+	resource, err := store.GetResource(context.Background(), resourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.SchedulePassiveObservation(context.Background(), resourceID, 1, resource.Version); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("passive worked=%t error=%v", worked, err)
+	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if len(provider.observes) != 1 || !provider.observes[0].Passive || provider.observes[0].MessageID == "" || provider.observes[0].LeaseToken == "" {
+		t.Fatalf("observe fences = %+v", provider.observes)
 	}
 }
 
@@ -149,6 +181,247 @@ func TestLongDispatchRenewsLease(t *testing.T) {
 	}
 }
 
+func TestPreSubmissionUnavailableRetriesSameDispatchAttempt(t *testing.T) {
+	provider := &notAttemptedOnceProvider{}
+	service, store, instance := newHarness(t, provider)
+	instance.RetryBase = 0
+	command := createCommand(t, "resource-not-attempted", "operation-not-attempted")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if worked, err := instance.RunOnce(context.Background()); err == nil || !worked || !errors.Is(err, provisioning.ErrSubmissionNotAttempted) {
+		t.Fatalf("first dispatch worked=%t error=%v", worked, err)
+	}
+	execution, err := store.GetExecution(context.Background(), command.OperationID)
+	if err != nil || execution.State != application.AttemptPending || execution.CurrentAttempt != 1 {
+		t.Fatalf("execution error=%v state=%s attempt=%d", err, execution.State, execution.CurrentAttempt)
+	}
+	attempt, err := store.GetSubmissionAttempt(context.Background(), command.OperationID, 1)
+	if err != nil || attempt.State != application.SubmissionAttemptPending {
+		t.Fatalf("attempt error=%v state=%s", err, attempt.State)
+	}
+	dispatch, err := store.GetOutbox(context.Background(), application.DispatchMessage(command.OperationID, 1, 0).ID)
+	if err != nil || dispatch.State != application.OutboxPending || dispatch.AttemptNumber != 1 || dispatch.ExpectedVersion != execution.Version {
+		t.Fatalf("dispatch error=%v state=%s attempt=%d expected=%d execution=%d", err, dispatch.State, dispatch.AttemptNumber, dispatch.ExpectedVersion, execution.Version)
+	}
+	if _, err := store.GetOutbox(context.Background(), application.ObserveMessage(command.OperationID, 1, 0).ID); err == nil {
+		t.Fatal("not-attempted submission scheduled Observe")
+	}
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("retried dispatch worked=%t error=%v", worked, err)
+	}
+	operation, err := store.GetOperation(context.Background(), command.OperationID)
+	if err != nil || operation.Operation.State() != domain.OperationStateSucceeded || provider.calls != 2 {
+		t.Fatalf("operation error=%v state=%s submit calls=%d", err, operation.Operation.State(), provider.calls)
+	}
+}
+
+func TestSubmissionNotAttemptedContradictionsBecomeAmbiguous(t *testing.T) {
+	notAttempted := provisioning.SubmissionNotAttemptedError{Failure: provisioning.ExecutionFailure{
+		Kind: provisioning.FailureUnavailable, Reason: "BackendUnavailable", Message: "backend is temporarily unavailable",
+	}}
+	handle, err := provisioning.NewExecutionHandle("returned-execution")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		submission provisioning.Submission
+		err        error
+	}{
+		"invalid failure":  {err: provisioning.SubmissionNotAttemptedError{Failure: provisioning.ExecutionFailure{Kind: provisioning.FailureInvalidRequest, Reason: "Invalid"}}},
+		"joined ambiguity": {err: errors.Join(notAttempted, provisioning.ErrAmbiguousSubmission)},
+		"correlation": {submission: provisioning.Submission{Observation: provisioning.ExecutionObservation{
+			Correlation: provisioning.RequestCorrelationUnknown,
+		}}, err: notAttempted},
+		"execution": {submission: provisioning.Submission{Observation: provisioning.ExecutionObservation{
+			Execution: &provisioning.Execution{State: provisioning.ExecutionStateUnknown, Handle: &handle},
+		}}, err: notAttempted},
+		"resource facts": {submission: provisioning.Submission{Observation: provisioning.ExecutionObservation{
+			Resource: runningFacts(),
+		}}, err: notAttempted},
+		"observed at": {submission: provisioning.Submission{Observation: provisioning.ExecutionObservation{
+			ObservedAt: testTime,
+		}}, err: notAttempted},
+		"outputs": {submission: provisioning.Submission{Observation: provisioning.ExecutionObservation{
+			Outputs: &provisioning.OutputEvidence{State: provisioning.OutputsUnavailable},
+		}}, err: notAttempted},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			provider := &submissionResultProvider{submission: tc.submission, err: tc.err}
+			service, store, instance := newHarness(t, provider)
+			instance.RetryBase = 0
+			suffix := strings.ReplaceAll(name, " ", "-")
+			command := createCommand(t, domain.ResourceID("resource-contradictory-"+suffix), domain.OperationID("operation-contradictory-"+suffix))
+			if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				if _, err := instance.RunOnce(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+				t.Fatalf("ambiguous dispatch worked=%t error=%v", worked, err)
+			}
+			if provider.calls != 1 {
+				t.Fatalf("Submit calls=%d, want 1", provider.calls)
+			}
+			execution, err := store.GetExecution(context.Background(), command.OperationID)
+			if err != nil || execution.State != application.AttemptUnknown || execution.CurrentAttempt != 1 {
+				t.Fatalf("execution error=%v state=%s attempt=%d", err, execution.State, execution.CurrentAttempt)
+			}
+			attempt, err := store.GetSubmissionAttempt(context.Background(), command.OperationID, 1)
+			if err != nil || attempt.State != application.SubmissionAttemptUnknown {
+				t.Fatalf("attempt error=%v state=%s", err, attempt.State)
+			}
+			dispatch, err := store.GetOutbox(context.Background(), application.DispatchMessage(command.OperationID, 1, 0).ID)
+			if err != nil || dispatch.State != application.OutboxCompleted || dispatch.TerminalReason != "AmbiguousSubmission" {
+				t.Fatalf("dispatch error=%v state=%s reason=%q", err, dispatch.State, dispatch.TerminalReason)
+			}
+			observe, err := store.GetOutbox(context.Background(), application.ObserveMessage(command.OperationID, 1, 0).ID)
+			if err != nil || observe.State != application.OutboxPending {
+				t.Fatalf("Observe error=%v state=%s", err, observe.State)
+			}
+		})
+	}
+}
+
+func TestLongObserveRenewsLease(t *testing.T) {
+	provider := newBlockingObserveProvider()
+	service, store, instance := newHarness(t, provider)
+	instance.Lease = 60 * time.Millisecond
+	instance.RetryBase = 0
+	command := createCommand(t, "resource-long-observe", "operation-long-observe")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := instance.RunOnce(context.Background())
+		result <- err
+	}()
+	<-provider.started
+	observeID := application.ObserveMessage(command.OperationID, 1, 0).ID
+	loadMessage := func() (application.OutboxMessage, error) {
+		var message application.OutboxMessage
+		err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
+			var err error
+			message, err = tx.Outbox().GetOutbox(context.Background(), observeID)
+			return err
+		})
+		return message, err
+	}
+	initial, err := loadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	renewed := initial
+	for !renewed.LeasedUntil.After(initial.LeasedUntil) {
+		if time.Now().After(deadline) {
+			t.Fatal("observe lease was not renewed")
+		}
+		time.Sleep(5 * time.Millisecond)
+		renewed, err = loadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if worked, err := instance.RunOnce(context.Background()); err != nil || worked {
+		t.Fatalf("renewed Observe was reclaimed worked=%t error=%v", worked, err)
+	}
+	close(provider.release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	operation, err := store.GetOperation(context.Background(), command.OperationID)
+	if err != nil || operation.Operation.State() != domain.OperationStateSucceeded {
+		t.Fatalf("operation error=%v state=%s", err, operation.Operation.State())
+	}
+}
+
+func TestObserveHeartbeatLossDiscardsResultWithoutWrites(t *testing.T) {
+	provider := newBlockingObserveProvider()
+	service, store, instance := newHarness(t, provider)
+	instance.RetryBase = 0
+	command := createCommand(t, "resource-observe-loss", "operation-observe-loss")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wrapped := &renewFailingTransactions{inner: store}
+	replacement, err := worker.New(wrapped, instance.Resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement.Lease = 30 * time.Millisecond
+	replacement.RetryBase = 0
+	replacement.Clock = instance.Clock
+	worked, runErr := replacement.RunOnce(context.Background())
+	if !worked || runErr == nil || !strings.Contains(runErr.Error(), "lease ownership lost") {
+		t.Fatalf("RunOnce worked=%t error=%v", worked, runErr)
+	}
+	execution, err := store.GetExecution(context.Background(), command.OperationID)
+	if err != nil || execution.State != application.AttemptAccepted || execution.NextObservation != 2 {
+		t.Fatalf("stale result changed execution: error=%v state=%s next=%d", err, execution.State, execution.NextObservation)
+	}
+	message, err := store.GetOutbox(context.Background(), application.ObserveMessage(command.OperationID, 1, 0).ID)
+	if err != nil || message.State != application.OutboxLeased || message.TerminalReason != "" || message.LastError != "" {
+		t.Fatalf("lost lease was settled: error=%v state=%s terminal=%q lastError=%q", err, message.State, message.TerminalReason, message.LastError)
+	}
+	operation, err := store.GetOperation(context.Background(), command.OperationID)
+	if err != nil || operation.Operation.IsTerminal() {
+		t.Fatalf("lost observation terminalized operation: error=%v state=%s", err, operation.Operation.State())
+	}
+}
+
+func TestObservePanicStopsHeartbeat(t *testing.T) {
+	provider := &panicObserveProvider{}
+	service, store, instance := newHarness(t, provider)
+	instance.Lease = 90 * time.Millisecond
+	instance.RetryBase = 0
+	command := createCommand(t, "resource-observe-panic", "operation-observe-panic")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if worked, err := instance.RunOnce(context.Background()); !worked || err == nil {
+		t.Fatalf("panicking Observe worked=%t error=%v", worked, err)
+	}
+	id := application.ObserveMessage(command.OperationID, 1, 0).ID
+	afterPanic, err := store.GetOutbox(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(45 * time.Millisecond)
+	later, err := store.GetOutbox(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !later.LeasedUntil.Equal(afterPanic.LeasedUntil) {
+		t.Fatalf("heartbeat continued after panic: %v -> %v", afterPanic.LeasedUntil, later.LeasedUntil)
+	}
+}
+
 func TestExpiredPendingDispatchRequeuesSameMessage(t *testing.T) {
 	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
 	service, store, instance := newHarness(t, provider)
@@ -191,6 +464,82 @@ func TestExpiredPendingDispatchRequeuesSameMessage(t *testing.T) {
 	}
 	if provider.SubmissionCount(command.OperationID) != 1 {
 		t.Fatalf("submissions=%d, want 1", provider.SubmissionCount(command.OperationID))
+	}
+}
+
+func TestExpiredFencedDispatchRedeliversSameAttempt(t *testing.T) {
+	provider := &panicOnceFencedProvider{}
+	service, store, instance := newHarness(t, provider)
+	instance.Lease = 5 * time.Millisecond
+	instance.RetryBase = 0
+	command := createCommand(t, "resource-fenced-crash", "operation-fenced-crash")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if worked, err := instance.RunOnce(context.Background()); !worked || err == nil {
+		t.Fatalf("crashed fenced dispatch worked=%t error=%v", worked, err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("fenced recovery worked=%t error=%v", worked, err)
+	}
+	execution, err := store.GetExecution(context.Background(), command.OperationID)
+	if err != nil || execution.State != application.AttemptPending || execution.CurrentAttempt != 1 {
+		t.Fatalf("execution error=%v state=%s attempt=%d", err, execution.State, execution.CurrentAttempt)
+	}
+	attempt, err := store.GetSubmissionAttempt(context.Background(), command.OperationID, 1)
+	if err != nil || attempt.State != application.SubmissionAttemptPending {
+		t.Fatalf("attempt error=%v state=%s", err, attempt.State)
+	}
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("redelivered fenced dispatch worked=%t error=%v", worked, err)
+	}
+	operation, err := store.GetOperation(context.Background(), command.OperationID)
+	if err != nil || operation.Operation.State() != domain.OperationStateSucceeded || provider.calls != 2 {
+		t.Fatalf("operation error=%v state=%s calls=%d", err, operation.Operation.State(), provider.calls)
+	}
+}
+
+func TestExpiredRestartSafeDispatchAfterAuthorizationSchedulesObserve(t *testing.T) {
+	provider := &postAuthorizationCrashFencedProvider{}
+	service, store, instance := newHarness(t, provider)
+	instance.Lease = 5 * time.Millisecond
+	instance.RetryBase = 0
+	command := createCommand(t, "resource-fenced-authorized-crash", "operation-fenced-authorized-crash")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := instance.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if worked, err := instance.RunOnce(context.Background()); !worked || err == nil {
+		t.Fatalf("authorized crash worked=%t error=%v", worked, err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("authorized recovery worked=%t error=%v", worked, err)
+	}
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("authorized redelivery worked=%t error=%v", worked, err)
+	}
+	execution, err := store.GetExecution(context.Background(), command.OperationID)
+	if err != nil || execution.State != application.AttemptUnknown || execution.CurrentAttempt != 1 {
+		t.Fatalf("execution error=%v state=%s attempt=%d", err, execution.State, execution.CurrentAttempt)
+	}
+	if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("authorized Observe worked=%t error=%v", worked, err)
+	}
+	drain(t, instance, 10)
+	operation, err := store.GetOperation(context.Background(), command.OperationID)
+	if err != nil || operation.Operation.State() != domain.OperationStateSucceeded || provider.submits != 2 || provider.observes < 1 {
+		t.Fatalf("operation error=%v state=%s submits=%d observes=%d", err, operation.Operation.State(), provider.submits, provider.observes)
 	}
 }
 
@@ -908,7 +1257,156 @@ type recoveryProvider struct {
 	submissions int
 }
 
+type notAttemptedOnceProvider struct{ calls int }
+
+type submissionResultProvider struct {
+	calls      int
+	submission provisioning.Submission
+	err        error
+}
+
+func (*submissionResultProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
+func (p *submissionResultProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	p.calls++
+	return p.submission, p.err
+}
+func (*submissionResultProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, errors.New("unexpected Observe")
+}
+
+func (*notAttemptedOnceProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
+func (p *notAttemptedOnceProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	p.calls++
+	if p.calls == 1 {
+		return provisioning.Submission{}, provisioning.SubmissionNotAttemptedError{Failure: provisioning.ExecutionFailure{
+			Kind: provisioning.FailureUnavailable, Reason: "BackendUnavailable", Message: "backend is temporarily unavailable",
+		}}
+	}
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts()}}, nil
+}
+func (*notAttemptedOnceProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, errors.New("unexpected Observe")
+}
+
+type blockingObserveProvider struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+type panicObserveProvider struct{}
+
+func (*panicObserveProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
+func (*panicObserveProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateRunning}, Resource: runningFacts(), ObservedAt: testTime}}, nil
+}
+func (*panicObserveProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	panic("synthetic Observe panic")
+}
+
+func newBlockingObserveProvider() *blockingObserveProvider {
+	return &blockingObserveProvider{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (*blockingObserveProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
+func (*blockingObserveProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateRunning}, Resource: runningFacts(), ObservedAt: testTime}}, nil
+}
+func (p *blockingObserveProvider) Observe(ctx context.Context, _ provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-p.release:
+		return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+			Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts(), ObservedAt: testTime.Add(time.Hour)}, nil
+	case <-ctx.Done():
+		return provisioning.ExecutionObservation{}, ctx.Err()
+	}
+}
+
 type capturingProvider struct{ request provisioning.ExecutionRequest }
+
+type ownershipProvider struct {
+	mu       sync.Mutex
+	submits  []provisioning.ExecutionFence
+	observes []provisioning.ExecutionFence
+}
+
+type panicOnceFencedProvider struct{ calls int }
+
+func (*panicOnceFencedProvider) CanRedeliverExpiredDispatch() bool { return true }
+
+func (*panicOnceFencedProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
+func (*panicOnceFencedProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	return provisioning.Submission{}, errors.New("ordinary Submit must not be used")
+}
+func (*panicOnceFencedProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, errors.New("ordinary Observe must not be used")
+}
+func (p *panicOnceFencedProvider) SubmitFenced(context.Context, provisioning.ExecutionRequest, provisioning.ExecutionFence) (provisioning.Submission, error) {
+	p.calls++
+	if p.calls == 1 {
+		panic("synthetic fenced crash while Prepared")
+	}
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts()}}, nil
+}
+func (*panicOnceFencedProvider) ObserveFenced(context.Context, provisioning.ObservationRequest, provisioning.ExecutionFence) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, errors.New("unexpected Observe")
+}
+
+type postAuthorizationCrashFencedProvider struct {
+	submits  int
+	observes int
+}
+
+func (*postAuthorizationCrashFencedProvider) Capabilities() []provisioning.ProvisionerCapability {
+	return nil
+}
+func (*postAuthorizationCrashFencedProvider) CanRedeliverExpiredDispatch() bool { return true }
+func (*postAuthorizationCrashFencedProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	return provisioning.Submission{}, errors.New("ordinary Submit must not be used")
+}
+func (*postAuthorizationCrashFencedProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, errors.New("ordinary Observe must not be used")
+}
+func (p *postAuthorizationCrashFencedProvider) SubmitFenced(context.Context, provisioning.ExecutionRequest, provisioning.ExecutionFence) (provisioning.Submission, error) {
+	p.submits++
+	if p.submits == 1 {
+		panic("synthetic crash after durable ApplyMayStart")
+	}
+	handle, _ := provisioning.NewExecutionHandle("authorized-execution")
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateUnknown, Handle: &handle}}}, provisioning.ErrAmbiguousSubmission
+}
+func (p *postAuthorizationCrashFencedProvider) ObserveFenced(context.Context, provisioning.ObservationRequest, provisioning.ExecutionFence) (provisioning.ExecutionObservation, error) {
+	p.observes++
+	return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts(), ObservedAt: testTime.Add(2 * time.Minute)}, nil
+}
+
+func (*ownershipProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
+func (*ownershipProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	return provisioning.Submission{}, errors.New("ordinary Submit must not be used")
+}
+func (*ownershipProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, errors.New("ordinary Observe must not be used")
+}
+func (p *ownershipProvider) SubmitFenced(_ context.Context, _ provisioning.ExecutionRequest, fence provisioning.ExecutionFence) (provisioning.Submission, error) {
+	p.mu.Lock()
+	p.submits = append(p.submits, fence)
+	p.mu.Unlock()
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: readyFacts()}}, nil
+}
+func (p *ownershipProvider) ObserveFenced(_ context.Context, _ provisioning.ObservationRequest, fence provisioning.ExecutionFence) (provisioning.ExecutionObservation, error) {
+	p.mu.Lock()
+	p.observes = append(p.observes, fence)
+	p.mu.Unlock()
+	return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationUnknown, Resource: readyFacts()}, nil
+}
 
 func (*capturingProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
 func (p *capturingProvider) Submit(_ context.Context, request provisioning.ExecutionRequest) (provisioning.Submission, error) {

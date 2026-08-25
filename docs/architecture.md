@@ -2,89 +2,204 @@
 
 ## Status
 
-This document describes Liftr's intended high-level architecture. It is a direction for future development, not a claim that all components are implemented. Today, Liftr has the provisioner-neutral domain and lifecycle model, durable PostgreSQL orchestration, a fenced outbox worker, a Pulumi Automation API adapter foundation, a versioned HTTP Resource API, ResourceType contracts with schema discovery and transition semantics, a first real execution path for PostgreSQLDatabase/v1 through the Pulumi adapter (a private Azure reference implementation is provided but awaits its first successful opt-in acceptance run — see [ADR-0010](adr/0010-resource-type-implementation-binding-and-transition-semantics.md)), generation-associated ResourceOutputs with selected non-secret extraction ([ADR-0011](adr/0011-resource-outputs-and-secret-references.md)), RFC 9068 access-token authentication and owner-membership authorization ([ADR-0012](adr/0012-authentication-authorization-and-actor-identity.md)), the official `liftr` CLI as a pure client of the public HTTP API ([ADR-0013](adr/0013-cli-as-a-public-api-client.md)), Resource-scoped Operation history with explicit failed-Operation retry ([ADR-0014](adr/0014-operation-history-and-explicit-retry.md)), ownership-scoped Resource inventory ([ADR-0016](adr/0016-ownership-scoped-resource-inventory.md)), an official Backstage integration as a delegated public-API client with a constrained BFF ([ADR-0017](adr/0017-backstage-as-a-delegated-public-api-client.md)) under `integrations/backstage`, and immutable platform admission policy with transactionally serialized per-owner Resource quotas ([ADR-0019](adr/0019-platform-policy-and-transactional-admission-quotas.md)).
+This document describes Liftr's intended high-level architecture and marks the
+boundary between implemented components and future composition. It does not
+claim that every accepted adapter or production integration is wired.
+
+The repository currently includes the provisioner-neutral domain and lifecycle
+model, durable PostgreSQL orchestration, a ticker-driven fenced outbox worker,
+the versioned public HTTP Resource API, ResourceType discovery and validation,
+the official CLI and Backstage clients, production observability, platform
+admission policy and quotas, and Pulumi and Crossplane adapter foundations.
+PostgreSQLDatabase/v1 has a real Pulumi execution path; its private Azure
+reference program still awaits its first successful opt-in acceptance run.
+
+M19 also implements the stateful OpenTofu package and private PostgreSQL
+evidence/quarantine foundation described by
+[ADR-0020](adr/0020-stateful-opentofu-cli-provisioning.md). It is scoped only to
+OpenTofu 1.12.6 and does not change the public API. Production server
+composition is optional through one strict operator-supplied configuration
+file; no production cloud program or backend registration is shipped.
+Qualification is complete against a real official OpenTofu 1.12.6 binary and
+the conformant test HTTP backend. Qualification of each production HTTPS HTTP
+backend remains the operator's responsibility. Terraform remains unsupported
+and has no selected version.
 
 ## Product Boundary
 
-Liftr is intended to be a vendor-neutral resource lifecycle control plane. Developers interact with stable Resource contracts. Platform teams determine how those resources are implemented without exposing implementation-specific concepts to resource consumers.
+Liftr is a vendor-neutral resource lifecycle control plane. Developers interact
+with stable Resource contracts. Platform teams determine how those Resources
+are implemented without exposing provisioner, backend, source-control,
+orchestration, or cloud-provider details to consumers.
 
 ## Conceptual Architecture
 
-The long-term architecture is organized around the following flow:
-
 ```text
-Backstage / CLI / API / other portals
-                  |
-                  v
-                Liftr
-                  |
-       +----------+----------+
-       |          |          |
-   Resource   Lifecycle   Operations
-    Model       Engine
-       |          |          |
-       +----------+----------+
-                  |
-             Adapter Layer
-                  |
-       +----------+----------+
-       |          |          |
-    Pulumi    Terraform   Crossplane
-       |          |          |
-       +----------+----------+
-                  |
-      Cloud / Kubernetes / on-premises
+Backstage / liftr CLI / direct API clients / other portals
+                            |
+                            v
+                          Liftr
+                            |
+             +--------------+--------------+
+             |              |              |
+         Resource       Lifecycle      Operations
+          Model           Engine        and Events
+             |              |              |
+             +--------------+--------------+
+                            |
+                       Adapter Layer
+                            |
+             +--------------+--------------+
+             |              |              |
+          Pulumi         OpenTofu       Crossplane
+             |              |              |
+             +--------------+--------------+
+                            |
+              Cloud / Kubernetes / on-premises
 ```
 
-The named clients, adapters, and infrastructure targets are illustrative rather than required. Backstage is one possible client. Pulumi, Terraform, and Crossplane are possible adapter implementations. Git, Kubernetes, and any particular cloud provider remain optional implementation choices.
-
-## Target Components
-
-The target architecture is expected to include these conceptual areas as the product evolves:
-
-- **Clients:** Backstage, command-line tools, direct API consumers, developer portals, and automation consume Liftr through its public API.
-- **Resource Model:** Defines provisioner-neutral resource identity, desired state, observed state, lifecycle state, and status.
-- **Lifecycle Engine:** Owns lifecycle policy and coordinates asynchronous transitions between desired and observed state.
-- **Operations and Events:** Provide an auditable account of requested mutations, execution progress, and outcomes.
-- **Adapter Layer:** Translates Liftr-defined infrastructure capabilities into calls to external implementation systems. Adapters execute capabilities but do not define business policy.
-- **Infrastructure targets:** Cloud platforms, Kubernetes environments, and on-premises systems may be managed through adapters without becoming part of public Resource contracts.
-- **Persistence boundary:** Stores resources, operations, events, and observed state through interfaces defined by domain needs.
+The named clients, adapters, and targets are illustrative, not mandatory.
+Backstage is one API client. Git and Kubernetes are optional. Cloud providers
+and all provisioner technologies remain private implementation choices.
 
 ## Architectural Boundaries
 
-Public Resource contracts must not depend on a specific provisioner, source-control workflow, CI/CD system, orchestrator, or cloud provider. Git and Kubernetes may participate in an implementation, but neither is required by Liftr's architecture.
+- **Resource model:** Defines provisioner-neutral identity, desired state,
+  observed state, lifecycle state, and status.
+- **Lifecycle engine:** Owns deterministic create, update, delete, retry, and
+  asynchronous reconciliation policy. Adapters do not own business policy.
+- **Operations and Events:** Provide the auditable account of requested
+  mutations, progress, and outcomes. Public Operation history is
+  Resource-scoped; attempts, phases, mappings, and insertion sequence remain
+  private.
+- **Adapter layer:** Translates Liftr capabilities into implementation-system
+  actions. Adapter concepts never become ResourceSpec fields or public API
+  methods.
+- **Persistence boundary:** Stores Resources, Operations, Events, outputs,
+  private bindings, execution evidence, and outbox work through ports defined
+  by application and domain needs.
+- **Clients:** The CLI, Backstage, portals, and automation consume only the
+  public `/v1` API. They do not import server or provisioner implementation
+  packages.
 
-Dependencies point toward Liftr's domain concepts and capability contracts. Adapter implementations depend on those contracts; the Resource Model and Lifecycle Engine do not depend on adapter or infrastructure-technology types.
-
-Long-running infrastructure work is modeled asynchronously. A lifecycle request creates an auditable Operation, with Events describing meaningful progress and outcomes. Public Operation history is Resource-scoped, while Events, attempts, phases, mappings, and insertion sequence remain private execution detail.
-
-The initial domain model keeps Resource developer intent separate from normalized ResourceStatus observations. Operations target a specific desired-state generation. Events carry that generation as append-only audit history; they are not an event-sourcing mechanism. These decisions are recorded in [ADR-0002](adr/0002-core-domain-model.md).
-
-The lifecycle engine applies deterministic create, update, and delete rules using explicit Operation phases. Conditions report normalized facts such as Ready and Reconciled but do not control workflow transitions. Generation concurrency, capability-specific failure semantics, retry attempts, and the Deleted tombstone state are defined in [ADR-0003](adr/0003-deterministic-lifecycle-engine.md).
+Desired state and normalized observed state are separate. Operations target a
+specific desired-state generation. Events are append-only audit history, not an
+event-sourcing mechanism. Long-running infrastructure work is asynchronous and
+must not hold database, Resource, Operation, quota, or idempotency locks while a
+provider executes.
 
 ## Current Implementation
 
-The process bootstrap, core domain model, pure lifecycle semantics, provider-neutral provisioning contract, and application orchestration ports exist:
+### Core and public API
 
-- `cmd/liftr-server` starts the HTTP server, composes the durable runtime when `LIFTR_DATABASE_URL` is configured, emits structured logs, and performs graceful shutdown including the worker loop.
-- Authentication and authorization follow [ADR-0012](adr/0012-authentication-authorization-and-actor-identity.md): the transport verifies RFC 9068 bearer tokens against one configured OIDC issuer; the application owns the Authorizer port and authorizes every exported business use case against stored or requested owners. Principal identity is issuer-qualified with a versioned derivation, memberships are typed owner references normalized at claim mapping, idempotency keys are scoped per principal, admission events record the normalized actor, and worker execution never re-authorizes admitted work.
-- `internal/api/http` implements the versioned Resource and Operation HTTP contract ([ADR-0008](adr/0008-http-resource-api-contract-v1.md)): asynchronous create, read, update-admission, and delete-admission with concrete generation preconditions, mandatory idempotency keys, RFC 9457 problems, deterministic latest-operation reads, Resource-scoped paginated Operation history, explicit failed-Operation retry, and health endpoints. It adds ResourceType discovery ([ADR-0009](adr/0009-resource-type-contracts-and-schema-discovery.md)): `GET /v1/resource-types` and `GET /v1/resource-types/{name}/{version}` expose developer contracts with their embedded JSON Schema 2020-12 spec schemas; discovery carries no provisioner or platform state.
-- `internal/domain` defines the provisioner-neutral Resource model, normalized status, asynchronous Operations, and audit Events.
-- `internal/lifecycle` defines deterministic create, update, and delete orchestration rules without executing infrastructure.
-- `internal/provisioning` defines the provider-neutral Submit/Observe boundary, a deterministic contract fake, an isolated Pulumi Automation API adapter ([ADR-0007](adr/0007-pulumi-automation-api-provisioner-adapter.md)), and a Crossplane declarative-reconciliation adapter ([ADR-0015](adr/0015-crossplane-provisioner-and-declarative-reconciliation.md)) that drives platform-owned composite resources with identity-safe conditional writes, UID-preconditioned deletion, dual Crossplane/Liftr freshness for readiness, and all Kubernetes knowledge confined to the adapter subtree.
-- `internal/application` coordinates lifecycle, provisioning, stable private provisioner bindings, repository ports, passive observation, evidence monotonicity (stale provider evidence never applies), malformed-facts sanitization, and spec validation against the consumer-owned ResourceType contract before any durable effect. It owns exact-generation retry admission under independent `resource:retry` authorization and durable output resolution (`None/Pending/Published/Rejected`) so backend execution success and reconciliation completion stay separable monotonic dimensions. Explicitly compatible output-mapping repair observes the original successful attempt without resubmitting infrastructure; mappings and recovery provenance remain private.
-- `internal/resourcetypes` defines the developer-facing ResourceType contract — identity, display metadata, capabilities, self-contained JSON Schema (draft 2020-12) documents, semantic validation hooks, declared non-secret output fields — and a deterministic in-memory registry satisfying the application catalog port through the neutral shared vocabulary in `internal/resourcecontract`, which both sides import without importing each other. It is the only package that depends on a JSON Schema implementation; validation performs no network schema resolution.
-- `internal/persistence/postgres` implements durable state, immutable submission attempts, deterministic private Operation insertion sequence, retry provenance, checksummed migrations, and a transactional outbox.
-- `internal/worker` drives lifecycle work, renews long-running Dispatch leases, fences ambiguous recovery, keeps the observe loop alive for active executions when backend evidence is stale or absent, and structurally prevents output-only repair Operations from dispatching provider work.
-- `internal/resourcetypes/postgresqldatabase` defines the first executable ResourceType outside the core: its contract publishes the accepted developer intent (`version`, `storageGB`, `highAvailability`), validates specs, and owns the v1 update-transition semantics (version immutable, storage grow-only, availability freely toggleable) that admission enforces synchronously.
-- `internal/provisioning/bindings` translates provider-neutral execution intent into private program input envelopes with representation-safe numeric consumption; `internal/provisioning/xrbinding` performs the equivalent translation onto the platform-owned XR contract; composition binds contracts to implementations and platform configuration to implementations without any public leakage. The same `PostgreSQLDatabase/v2` contract runs against either implementation technology depending on deployment composition.
-- `internal/server` composes persistence, catalog, provisioner, HTTP handler, and a ticker-driven outbox worker loop for process startup.
-- `cmd/liftr` with `internal/cli` and `internal/client` implements the official CLI ([ADR-0013](adr/0013-cli-as-a-public-api-client.md)): a pure client of the public `/v1` HTTP surface that imports no server implementation packages, consumes externally issued bearer tokens from files or the environment, refuses non-loopback plaintext HTTP and all redirects, treats server-supplied monitor references as same-origin-only navigation, preserves server JSON number representations verbatim, generates one idempotency key per mutation invocation with explicit replay override, enforces concrete generation preconditions without silent conflict resolution, gates destructive deletes on exact-ID confirmation or `--yes`, lists Resource-scoped Operation history, retries failed Operations, polls the authoritative monitor Operation under `--wait`, and exposes a documented exit-code contract. Retry `--wait` returns the terminal child Operation JSON rather than a Resource snapshot.
+- `cmd/liftr-server` composes the HTTP server and, when
+  `LIFTR_DATABASE_URL` is set, PostgreSQL persistence and a ticker-driven
+  outbox worker loop. API and worker roles remain independently deployable even
+  though the repository does not yet ship a separate worker executable.
+- `internal/domain` and `internal/lifecycle` define the neutral Resource model
+  and pure lifecycle semantics without importing HTTP, storage, telemetry, or
+  provisioner implementations.
+- `internal/application` owns admission, authorization ports, orchestration,
+  stable private provisioner bindings, passive observation, evidence
+  monotonicity, explicit retry, output reconciliation, and schema/transition
+  validation before durable effects.
+- `internal/api/http` implements the versioned `/v1` Resource, ResourceType,
+  and Resource-scoped Operation API with asynchronous mutations, concrete
+  generation preconditions, idempotency, keyset pagination, and RFC 9457
+  Problems.
+- `internal/resourcetypes` publishes self-contained JSON Schema draft 2020-12
+  contracts and declared non-secret output fields without exposing platform
+  registrations. PostgreSQLDatabase/v1 and v2 preserve their versioned public
+  contracts.
+- Authentication verifies RFC 9068 access tokens from the configured issuer;
+  application authorization uses normalized owner membership. Inventory uses
+  independent `resource:list` authorization and visibility-bound pagination.
+- `internal/persistence/postgres` provides checksummed migrations, durable
+  lifecycle records, immutable attempts, outputs, private evidence, and the
+  transactionally claimed and fenced outbox.
 
-- Observability ([ADR-0018](adr/0018-production-observability-and-operational-diagnostics.md)) is a composition-owned concern: only `internal/observability` and `cmd/liftr-server` import telemetry libraries, while domain, lifecycle, resource-contract, application, worker, provisioning, persistence, auth, and transport stay telemetry-free behind consumer-side ports (architecture tests pin this). Structured slog logs carry request/admission/worker correlation with sanitized caller-supplied correlation IDs; OpenTelemetry metrics use standard HTTP semantic conventions plus bounded Liftr-namespaced instruments with an opt-in separate Prometheus listener and optional OTLP push; tracing is boundary-only and inert unless configured. Metric labels come exclusively from bounded enums and route templates — identifiers such as ResourceID, OperationID, PrincipalID, ProvisionerRef, or ResourceType names never become labels. An operational sampler periodically publishes cluster-global gauges (backlog depth and age, active-Operation age, long-running and reconciliation-silence stuck candidates) under strict query budgets; those diagnostics never mutate lifecycle state. Readiness gates on the control-plane core only (PostgreSQL usable, schema verified at startup, not draining); provisioners and authentication infrastructure never gate global readiness.
+### Provisioning adapters
 
-- Platform admission policy ([ADR-0019](adr/0019-platform-policy-and-transactional-admission-quotas.md)) is a restrictive overlay after authorization and before lifecycle persistence. `internal/policy` strictly compiles one immutable startup document into pure create/update capability and count decisions; durable facts come through an application-owned quota port. Quota-bearing creates serialize by actual owner inside explicit `READ COMMITTED` transactions before Resource/Operation locks, count every retained non-Deleted Resource, and fail closed on missing durable status. Successful idempotent replays bypass the current revision after current authorization and fingerprint match. Workers, provisioners, ResourceType contracts, and public Resource representations remain policy-neutral; typed Event metadata privately records the admitting revision.
+- The provider-neutral boundary exposes capabilities plus asynchronous
+  Submit/Observe behavior. Provisioners receive private, stable bindings from
+  composition; public Resource contracts contain no Pulumi, OpenTofu,
+  Crossplane, backend, provider, or cloud fields.
+- The Pulumi Automation API foundation uses isolated local Go programs and
+  deterministic retained stacks. PostgreSQLDatabase/v1 executes through this
+  path. The credential-free CLI/file-backend path is distinct from the
+  unvalidated, opt-in, cost-bearing Azure reference acceptance suite.
+- The Crossplane adapter drives platform-owned composite resources with
+  identity-safe conditional writes, UID-preconditioned deletion, and
+  freshness-aware readiness. All Kubernetes knowledge stays in its adapter
+  subtree ([ADR-0015](adr/0015-crossplane-provisioner-and-declarative-reconciliation.md)).
+- `internal/provisioning/opentofu` implements the OpenTofu 1.12.6 adapter
+  package. Its production profile is an operator-supplied conformant HTTPS HTTP
+  state backend. OpenTofu owns GET/state-update/LOCK/UNLOCK and lock-ID
+  propagation; the local backend and any test HTTP backend are
+  development/test-only.
 
-- `integrations/backstage` implements the official Backstage integration ([ADR-0017](adr/0017-backstage-as-a-delegated-public-api-client.md)): a frontend plugin, a user-only constrained BFF backend plugin, and shared public-API contracts. The BFF authenticates Backstage user principals, binds each delegated assertion's issuer+subject to that principal before use, exchanges it for a short-lived RFC 9068 Liftr-audience token via a configured STS (RFC 8693 reference; passthrough alternative), mirrors an explicit finite route set, propagates admitted Operation identity through a typed `{data, monitorOperationId}` envelope derived only from validated monitor links, forwards opaque idempotency keys byte-for-byte, never replays mutations across authentication refresh, sanitizes Problem passthrough, and persists nothing. Frontend views cover discovery, ownership-scoped inventory, detail with output-freshness semantics, operation history, and generation-safe create/update/delete/retry. The Software Catalog remains unrelated to inventory; owner mapping is display-only.
+The OpenTofu adapter retains one stable backend state key per Resource while
+using private, disposable per-call scratch workdirs. Normal success removes
+scratch. Ambiguous/errored workdirs, including those containing
+`errored.tfstate`, move to a separate quarantine; startup scans only owned
+orphans. Private PostgreSQL attempt and state evidence is fenced and monotonic.
+On Unix, context cancellation interrupts and then forcibly terminates the owned
+process group after a bound; public Operation cancellation and Windows adapter
+support remain deferred.
 
-A first real execution path exists: PostgreSQLDatabase/v1 executes through the Pulumi adapter, validated end to end by deterministic credential-free CI programs that drive the real CLI against the file backend. A private reference implementation targeting Azure Database for PostgreSQL Flexible Server accompanies it behind an opt-in, cost-bearing acceptance suite that has **not yet been run**; the Azure program is architecture today and becomes validated only when that suite passes against a live subscription. `Ready` status means the latest desired-generation execution succeeded (execution-reconciliation semantics); drift detection and independent readiness verification are future work.
+For OpenTofu delete, Liftr applies a normal saved plan with
+`desiredPresent=false`: registered workload addresses disappear, but the
+private control marker and backend state remain. It never uses whole-state
+destroy, backend DELETE, `state rm`, or garbage collection. Output extraction
+uses bounded private all-root-output metadata to enforce `sensitive=false`,
+immediately discards unmapped values, and never logs output names or values.
+
+Production OpenTofu composition is optional through
+`LIFTR_OPENTOFU_CONFIG_FILE`. The private type route affects only new Resources;
+existing Resources resolve their persisted provisioner ref exactly. Operators
+must retain all historical registrations referenced by Resources in the one
+file while routing new Resources separately. Each provisioner ref and its
+executable/source/program/backend identities remain immutable; operators must
+not hide a configuration change beneath an existing ref. No production cloud program or
+backend registration is shipped. Real OpenTofu 1.12.6 qualification is complete
+against the conformant test HTTP backend; each operator remains responsible for
+qualifying its production HTTPS HTTP backend. Remote execution products such as
+HCP Terraform or Terraform Enterprise are deferred; that does not defer the
+selected HTTP state backend.
+
+### Clients and integrations
+
+- `cmd/liftr` → `internal/cli` → `internal/client` implements the official
+  CLI as a pure public-API client ([ADR-0013](adr/0013-cli-as-a-public-api-client.md)).
+  It uses externally issued bearer tokens, rejects non-loopback plaintext HTTP
+  and redirects, keeps server links same-origin, preserves JSON number
+  representations, and supports generation-safe create/update/delete, inventory,
+  Operation history, retry, and authoritative `--wait` polling.
+- `integrations/backstage` contains the official frontend plugin, constrained
+  user-delegating BFF, and shared TypeScript public-API contracts
+  ([ADR-0017](adr/0017-backstage-as-a-delegated-public-api-client.md)). The
+  Software Catalog is not Liftr inventory.
+
+### Policy and observability
+
+- Immutable platform admission policy is a restrictive application overlay
+  after authorization and before persistence. Quota-bearing creates serialize
+  by owner in PostgreSQL and count every retained non-Deleted Resource
+  ([ADR-0019](adr/0019-platform-policy-and-transactional-admission-quotas.md)).
+  Policy never enters ResourceType or provisioner contracts.
+- Observability is composition-owned and cannot participate in lifecycle
+  decisions. Structured logs, bounded OpenTelemetry metrics, optional
+  Prometheus and OTLP export, boundary tracing, panic recovery, operational
+  sampling, readiness, and ordered shutdown are implemented under
+  [ADR-0018](adr/0018-production-observability-and-operational-diagnostics.md).
+  Identifiers never become metric labels, and exporter failures never affect
+  requests or durable outcomes.
+
+## Still Future
+
+Independent readiness verification, drift detection, secret reference
+resolution, production cloud compositions beyond private reference bindings,
+shipped OpenTofu cloud registrations, production HTTPS backend qualification,
+remote execution integrations, multi-region execution, and conditional
+exact-version Terraform support remain future work unless another ADR records
+their implementation.

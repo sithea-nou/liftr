@@ -17,16 +17,6 @@ import (
 	"github.com/sithea-nou/liftr/internal/provisioning"
 )
 
-// OutputMappingSource is implemented by provisioners that declare a private,
-// immutable output-mapping identity for their create/update executions. The
-// worker persists the declared identity on the execution at the dispatch
-// claim, before any provider work; recovery resolves decoders through that
-// persisted identity and never through whatever registration happens to be
-// current after a restart.
-type OutputMappingSource interface {
-	OutputMappingRef(resourceType domain.ResourceTypeRef, capability domain.Capability) string
-}
-
 type Worker struct {
 	Transactions application.TransactionRunner
 	Resolver     application.ProvisionerResolver
@@ -108,6 +98,9 @@ func (w *Worker) reportWork(kind, operationID string, found bool, err error) {
 	switch {
 	case err == nil:
 		event.Outcome = OutcomeSuccess
+	case isLeaseOwnershipLost(err):
+		event.Outcome = OutcomeLeaseLos
+		event.ErrorClass = "lease_lost"
 	case isAmbiguousDispatch(err):
 		// Ambiguous and lease-lost are different diagnoses; the error itself
 		// carries which one occurred.
@@ -131,6 +124,11 @@ func (w *Worker) reportWork(kind, operationID string, found bool, err error) {
 		event.ErrorClass = "retryable"
 	}
 	w.Telemetry.WorkCompleted(event)
+}
+
+func isLeaseOwnershipLost(err error) bool {
+	var lost leaseOwnershipLostError
+	return errors.As(err, &lost)
 }
 
 func (w *Worker) runOnce(ctx context.Context, kindPtr *string) (found bool, operationID string, err error) {
@@ -174,6 +172,19 @@ func (w *Worker) runOnce(ctx context.Context, kindPtr *string) (found bool, oper
 	if errors.As(err, &ambiguous) {
 		// Submit may already have reached the provider. Keep the lease intact so
 		// expiry recovery moves the attempt through Unknown and Observe.
+		return true, operationID, err
+	}
+	var requeued dispatchRequeuedError
+	if errors.As(err, &requeued) {
+		// The dispatch handler already restored and rescheduled this exact
+		// attempt atomically. Generic outbox retry would lose its refreshed
+		// execution-version fence.
+		return true, operationID, err
+	}
+	var leaseLost leaseOwnershipLostError
+	if errors.As(err, &leaseLost) {
+		// Fenced ownership is gone. Do not attempt completion, quarantine, or
+		// retry writes with a stale token.
 		return true, operationID, err
 	}
 	switch classifyFailure(err) {
@@ -433,7 +444,11 @@ func (w *Worker) dispatch(ctx context.Context, message application.OutboxMessage
 		return err
 	}
 	submitCtx, cancel := context.WithCancel(ctx)
-	heartbeat := w.startLeaseHeartbeat(submitCtx, cancel, message)
+	heartbeat, heartbeatStartErr := w.startLeaseHeartbeat(submitCtx, cancel, message)
+	if heartbeatStartErr != nil {
+		cancel()
+		return ambiguousDispatchError{cause: fmt.Errorf("dispatch lease ownership lost: %w", heartbeatStartErr), leaseLost: true}
+	}
 	var submission provisioning.Submission
 	var submitErr error
 	var heartbeatErr error
@@ -451,7 +466,12 @@ func (w *Worker) dispatch(ctx context.Context, message application.OutboxMessage
 			}
 			heartbeatErr = heartbeat.stop()
 		}()
-		submission, submitErr = prepared.provider.Submit(submitCtx, executionRequest(prepared.execution))
+		request := executionRequest(prepared.execution)
+		if fenced, ok := prepared.provider.(provisioning.FencedProvisioner); ok {
+			submission, submitErr = fenced.SubmitFenced(submitCtx, request, executionFence(message, false))
+		} else {
+			submission, submitErr = prepared.provider.Submit(submitCtx, request)
+		}
 	}()
 	cancel()
 	if submitPanicked {
@@ -462,6 +482,19 @@ func (w *Worker) dispatch(ctx context.Context, message application.OutboxMessage
 		// fenced ownership of the lease. That is a different operator
 		// diagnosis from submission ambiguity (ADR-0018).
 		return ambiguousDispatchError{cause: fmt.Errorf("dispatch lease ownership lost"), leaseLost: true}
+	}
+	if notAttempted, ok := provisioning.AsSubmissionNotAttempted(submitErr); ok {
+		if notAttempted.Validate() == nil && !errors.Is(submitErr, provisioning.ErrAmbiguousSubmission) && submission.IsZero() {
+			if retryErr := w.retryNotAttemptedDispatch(ctx, message, prepared, notAttempted); retryErr != nil {
+				return ambiguousDispatchError{cause: retryErr, leaseLost: errors.Is(retryErr, application.ErrConcurrencyConflict)}
+			}
+			return dispatchRequeuedError{cause: submitErr}
+		}
+		// A not-attempted claim that is malformed, joined with ambiguity, or
+		// accompanied by backend facts is contradictory. Discard those facts
+		// and durably recover through Unknown -> Observe, never redispatch.
+		submission = provisioning.Submission{}
+		submitErr = fmt.Errorf("%w: contradictory submission-not-attempted result: %v", provisioning.ErrAmbiguousSubmission, submitErr)
 	}
 	if err := w.recordDispatch(ctx, message, prepared, submission, submitErr); err != nil {
 		if recoveryErr := w.markDispatchUnknown(ctx, message, prepared, err); recoveryErr == nil {
@@ -485,8 +518,16 @@ func (h leaseHeartbeat) stop() error {
 	return <-h.done
 }
 
-func (w *Worker) startLeaseHeartbeat(ctx context.Context, cancel context.CancelFunc, message application.OutboxMessage) leaseHeartbeat {
+func (w *Worker) startLeaseHeartbeat(ctx context.Context, cancel context.CancelFunc, message application.OutboxMessage) (leaseHeartbeat, error) {
 	heartbeat := leaseHeartbeat{stopSignal: make(chan struct{}), done: make(chan error, 1)}
+	renew := func() error {
+		return w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
+			return tx.Outbox().RenewOutbox(ctx, message.ID, message.LeaseToken, w.Lease)
+		})
+	}
+	if err := renew(); err != nil {
+		return leaseHeartbeat{}, err
+	}
 	interval := w.Lease / 3
 	if interval < time.Millisecond {
 		interval = time.Millisecond
@@ -494,11 +535,6 @@ func (w *Worker) startLeaseHeartbeat(ctx context.Context, cancel context.CancelF
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		renew := func() error {
-			return w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
-				return tx.Outbox().RenewOutbox(ctx, message.ID, message.LeaseToken, w.Lease)
-			})
-		}
 		for {
 			select {
 			case <-heartbeat.stopSignal:
@@ -516,8 +552,25 @@ func (w *Worker) startLeaseHeartbeat(ctx context.Context, cancel context.CancelF
 			}
 		}
 	}()
-	return heartbeat
+	return heartbeat, nil
 }
+
+// dispatchRequeuedError reports a transient Submit failure that conclusively
+// happened before any provider execution attempt. The durable retry has
+// already been committed by the dispatch handler.
+type dispatchRequeuedError struct{ cause error }
+
+func (e dispatchRequeuedError) Error() string { return e.cause.Error() }
+func (e dispatchRequeuedError) Unwrap() error { return e.cause }
+
+// leaseOwnershipLostError fences observation results after any heartbeat
+// renewal failure. Callers must return it without further durable writes.
+type leaseOwnershipLostError struct{ cause error }
+
+func (e leaseOwnershipLostError) Error() string {
+	return "outbox lease ownership lost: " + e.cause.Error()
+}
+func (e leaseOwnershipLostError) Unwrap() error { return e.cause }
 
 // ambiguousDispatchError reports that the outcome of one provider submission
 // is uncertain. leaseLost distinguishes the two operator diagnoses: a plain
@@ -579,6 +632,45 @@ func (w *Worker) markDispatchUnknown(ctx context.Context, message application.Ou
 	})
 }
 
+func (w *Worker) retryNotAttemptedDispatch(ctx context.Context, message application.OutboxMessage, prepared dispatchContext, failure provisioning.SubmissionNotAttemptedError) error {
+	return w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
+		current, err := tx.Outbox().GetOutbox(ctx, message.ID)
+		if err != nil {
+			return err
+		}
+		if current.State != application.OutboxLeased || current.LeaseToken != message.LeaseToken {
+			return application.ErrConcurrencyConflict
+		}
+		execution, err := tx.Executions().GetExecution(ctx, message.OperationID)
+		if err != nil {
+			return err
+		}
+		if execution.Version != prepared.version || execution.CurrentAttempt != message.AttemptNumber || execution.State != application.AttemptDispatching {
+			return application.ErrConcurrencyConflict
+		}
+		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, message.OperationID, message.AttemptNumber)
+		if err != nil {
+			return err
+		}
+		if attempt.State != application.SubmissionAttemptLeased || attempt.DispatchMessage != message.ID {
+			return application.ErrConcurrencyConflict
+		}
+		attempt.State = application.SubmissionAttemptPending
+		attempt.ClaimedAt = time.Time{}
+		attempt.ResolvedAt = time.Time{}
+		attempt.Failure = nil
+		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptLeased); err != nil {
+			return err
+		}
+		execution.State = application.AttemptPending
+		if err := tx.Executions().SaveExecution(ctx, execution, prepared.version); err != nil {
+			return err
+		}
+		return tx.Outbox().RetryDispatchOutbox(ctx, message.ID, message.LeaseToken, prepared.version+1,
+			w.backoff(message.AttemptCount), failure.Error())
+	})
+}
+
 func (w *Worker) prepareDispatch(ctx context.Context, message application.OutboxMessage) (dispatchContext, error) {
 	var result dispatchContext
 	err := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
@@ -610,6 +702,12 @@ func (w *Worker) prepareDispatch(ctx context.Context, message application.Outbox
 		return dispatchContext{}, fmt.Errorf("%w: %v", application.ErrProvisionerNotFound, err)
 	}
 	result.provider = provider
+	outputMappingRef := result.execution.OutputMappingRef
+	if outputMappingRef == "" {
+		if source, ok := provider.(provisioning.OutputMappingSource); ok {
+			outputMappingRef = source.OutputMappingRef(result.execution.ResourceType, result.execution.Capability)
+		}
+	}
 	err = w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
 		current, err := tx.Outbox().GetOutbox(ctx, message.ID)
 		if err != nil {
@@ -639,13 +737,11 @@ func (w *Worker) prepareDispatch(ctx context.Context, message application.Outbox
 		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptPending); err != nil {
 			return err
 		}
-		// The durable output-mapping identity is bound here, before any
-		// provider work, and never changes afterwards. Recovery must decode
-		// outputs through exactly this identity.
+		// The durable output-mapping identity is bound before provider work and
+		// never changes afterwards. SaveExecution applies the version CAS and
+		// immutable mapping guard to the value selected outside this transaction.
 		if execution.OutputMappingRef == "" {
-			if source, ok := provider.(OutputMappingSource); ok {
-				execution.OutputMappingRef = source.OutputMappingRef(execution.ResourceType, execution.Capability)
-			}
+			execution.OutputMappingRef = outputMappingRef
 		}
 		execution.State = application.AttemptDispatching
 		if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
@@ -757,7 +853,7 @@ func (w *Worker) observe(ctx context.Context, message application.OutboxMessage)
 	if err != nil || provider == nil {
 		return fmt.Errorf("%w: %v", application.ErrProvisionerNotFound, err)
 	}
-	observation, observeErr := provider.Observe(ctx, request)
+	observation, observeErr := w.observeWithHeartbeat(ctx, message, provider, request)
 	if observeErr != nil {
 		return observeErr
 	}
@@ -768,6 +864,37 @@ func (w *Worker) observe(ctx context.Context, message application.OutboxMessage)
 		return fmt.Errorf("contradictory observation reports NotFound with an execution")
 	}
 	return w.recordObservation(ctx, message, loaded, observation)
+}
+
+func (w *Worker) observeWithHeartbeat(ctx context.Context, message application.OutboxMessage, provider provisioning.Provisioner, request provisioning.ObservationRequest) (observation provisioning.ExecutionObservation, err error) {
+	observeCtx, cancel := context.WithCancel(ctx)
+	heartbeat, heartbeatStartErr := w.startLeaseHeartbeat(observeCtx, cancel, message)
+	if heartbeatStartErr != nil {
+		cancel()
+		return provisioning.ExecutionObservation{}, leaseOwnershipLostError{cause: heartbeatStartErr}
+	}
+	var heartbeatErr error
+	func() {
+		// The defer also runs during a provider panic, preventing a leaked
+		// heartbeat from retaining ownership after the work item unwinds.
+		defer func() {
+			heartbeatErr = heartbeat.stop()
+			cancel()
+		}()
+		if fenced, ok := provider.(provisioning.FencedProvisioner); ok {
+			observation, err = fenced.ObserveFenced(observeCtx, request, executionFence(message, message.Kind == application.OutboxPassiveObserve))
+		} else {
+			observation, err = provider.Observe(observeCtx, request)
+		}
+	}()
+	if heartbeatErr != nil {
+		return provisioning.ExecutionObservation{}, leaseOwnershipLostError{cause: heartbeatErr}
+	}
+	return observation, err
+}
+
+func executionFence(message application.OutboxMessage, passive bool) provisioning.ExecutionFence {
+	return provisioning.ExecutionFence{MessageID: message.ID, LeaseToken: message.LeaseToken, Passive: passive}
 }
 
 func (w *Worker) recordObservation(ctx context.Context, message application.OutboxMessage, loaded application.ProvisioningExecutionRecord, observation provisioning.ExecutionObservation) error {
@@ -897,7 +1024,13 @@ func (w *Worker) passiveObserve(ctx context.Context, message application.OutboxM
 	var loaded application.ResourceRecord
 	stale := false
 	if err := w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
-		var err error
+		currentMessage, err := tx.Outbox().GetOutbox(ctx, message.ID)
+		if err != nil {
+			return err
+		}
+		if currentMessage.State != application.OutboxLeased || currentMessage.LeaseToken != message.LeaseToken {
+			return application.ErrConcurrencyConflict
+		}
 		loaded, err = tx.Resources().GetResource(ctx, message.ResourceID)
 		if err != nil {
 			return err
@@ -917,11 +1050,18 @@ func (w *Worker) passiveObserve(ctx context.Context, message application.OutboxM
 	if err != nil || provider == nil {
 		return fmt.Errorf("%w: %v", application.ErrProvisionerNotFound, err)
 	}
-	observation, err := provider.Observe(ctx, provisioning.ObservationRequest{ResourceID: loaded.Resource.ID(), ResourceType: loaded.Resource.Type(), Spec: loaded.Resource.Spec(), TargetGeneration: loaded.Resource.Generation()})
+	observation, err := w.observeWithHeartbeat(ctx, message, provider, provisioning.ObservationRequest{ResourceID: loaded.Resource.ID(), ResourceType: loaded.Resource.Type(), Spec: loaded.Resource.Spec(), TargetGeneration: loaded.Resource.Generation()})
 	if err != nil {
 		return err
 	}
 	return w.Transactions.Within(ctx, func(tx application.UnitOfWork) error {
+		currentMessage, err := tx.Outbox().GetOutbox(ctx, message.ID)
+		if err != nil {
+			return err
+		}
+		if currentMessage.State != application.OutboxLeased || currentMessage.LeaseToken != message.LeaseToken {
+			return application.ErrConcurrencyConflict
+		}
 		current, err := tx.Resources().GetResource(ctx, message.ResourceID)
 		if err != nil {
 			return err
@@ -1152,6 +1292,24 @@ func (w *Worker) recoverExpiredDispatch(ctx context.Context) (bool, error) {
 		}
 		if execution.State != application.AttemptDispatching || attempt.State != application.SubmissionAttemptLeased {
 			return application.ErrConcurrencyConflict
+		}
+		provider, resolveErr := w.Resolver.Resolve(ctx, execution.ProvisionerRef)
+		if resolveErr == nil && provider != nil {
+			if redeliverer, ok := provider.(provisioning.ExpiredDispatchRedeliverer); ok && redeliverer.CanRedeliverExpiredDispatch() {
+				attempt.State = application.SubmissionAttemptPending
+				attempt.ClaimedAt = time.Time{}
+				attempt.ResolvedAt = time.Time{}
+				attempt.Failure = nil
+				if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptLeased); err != nil {
+					return err
+				}
+				execution.State = application.AttemptPending
+				if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
+					return err
+				}
+				return tx.Outbox().RetryExpiredDispatchOutbox(ctx, message.ID, message.LeaseToken, execution.Version+1,
+					w.backoff(message.AttemptCount), "ExpiredFencedDispatch")
+			}
 		}
 		attempt.State = application.SubmissionAttemptUnknown
 		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptLeased); err != nil {

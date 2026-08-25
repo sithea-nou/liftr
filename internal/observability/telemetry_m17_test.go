@@ -126,6 +126,98 @@ func TestProvisionerRefCardinalityNeverReachesMetrics(t *testing.T) {
 	}
 }
 
+func TestProvisionerKindsIncludeOpenTofuButNotTerraform(t *testing.T) {
+	if !observability.ProvisionerKindOpenTofu.Valid() {
+		t.Fatal("OpenTofu provisioner kind is not valid")
+	}
+	if observability.ProvisionerKind("terraform").Valid() {
+		t.Fatal("Terraform must not be an observability provisioner kind")
+	}
+}
+
+func TestInstrumentedProvisionerPreservesOptionalOutputCapabilities(t *testing.T) {
+	telemetry := newTestTelemetry(t)
+	inner := &outputCapableProvisioner{refEchoProvisioner: refEchoProvisioner{}}
+	wrapped, err := observability.InstrumentProvisioner(inner, observability.ProvisionerKindOpenTofu, telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := wrapped.(provisioning.OutputMappingSource)
+	if !ok || source.OutputMappingRef(domain.ResourceTypeRef{}, domain.CapabilityCreate) != "mapping-v2" {
+		t.Fatal("instrumentation hid output mapping capability")
+	}
+	selector, ok := wrapped.(provisioning.OutputRecoveryMappingSelector)
+	if !ok {
+		t.Fatal("instrumentation hid output recovery capability")
+	}
+	if mapping, selected := selector.SelectOutputRecoveryMapping(domain.ResourceTypeRef{}, domain.CapabilityCreate, "mapping-v1"); !selected || mapping != "mapping-v2" {
+		t.Fatal("instrumentation changed output recovery selection")
+	}
+
+	plain, err := observability.InstrumentProvisioner(&refEchoProvisioner{}, observability.ProvisionerKindPulumi, telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plain.(provisioning.OutputMappingSource); ok {
+		t.Fatal("instrumentation invented an optional output capability")
+	}
+	if _, ok := plain.(provisioning.FencedProvisioner); ok {
+		t.Fatal("instrumentation invented an optional fenced execution capability")
+	}
+}
+
+func TestInstrumentedProvisionerForwardsFencedCallsThroughTelemetry(t *testing.T) {
+	telemetry := newTestTelemetry(t)
+	inner := &fencedProvisioner{refEchoProvisioner: refEchoProvisioner{}}
+	wrapped, err := observability.InstrumentProvisioner(inner, observability.ProvisionerKindOpenTofu, telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fenced, ok := wrapped.(provisioning.FencedProvisioner)
+	if !ok {
+		t.Fatal("instrumentation hid fenced execution capability")
+	}
+	fence := provisioning.ExecutionFence{MessageID: "message-1", LeaseToken: "lease-1"}
+	_, _ = fenced.SubmitFenced(context.Background(), provisioning.ExecutionRequest{OperationID: "op", AttemptNumber: 1, ResourceID: "res", ResourceType: domain.ResourceTypeRef{Name: "T", Version: "v1"}, Capability: domain.CapabilityCreate, TargetGeneration: 1}, fence)
+	if inner.fence != fence {
+		t.Fatalf("forwarded fence = %+v", inner.fence)
+	}
+	if text := gatherText(t, telemetry); !strings.Contains(text, "liftr_provisioner_submissions_total") {
+		t.Fatal("fenced call bypassed telemetry")
+	}
+}
+
+func TestSubmitDurationMeasuresWallTime(t *testing.T) {
+	telemetry := newTestTelemetry(t)
+	wrapped, err := observability.InstrumentProvisioner(&slowSubmitProvisioner{}, observability.ProvisionerKindOpenTofu, telemetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = wrapped.Submit(context.Background(), provisioning.ExecutionRequest{OperationID: "op-duration", AttemptNumber: 1,
+		ResourceID: "res-duration", ResourceType: domain.ResourceTypeRef{Name: "T", Version: "v1"}, Capability: domain.CapabilityCreate, TargetGeneration: 1})
+	families, err := telemetry.PrometheusRegistry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != "liftr_provisioner_call_duration_seconds" {
+			continue
+		}
+		for _, sample := range family.GetMetric() {
+			method := ""
+			for _, label := range sample.GetLabel() {
+				if label.GetName() == "liftr_provisioner_method" || label.GetName() == "provisioner_method" {
+					method = label.GetValue()
+				}
+			}
+			if method == "submit" && sample.GetHistogram().GetSampleSum() >= 0.005 {
+				return
+			}
+		}
+	}
+	t.Fatal("Submit duration histogram did not record elapsed wall time")
+}
+
 // refEchoProvisioner embeds its (arbitrary) tag in every result so a leak
 // would be visible.
 type refEchoProvisioner struct{ tag string }
@@ -142,6 +234,39 @@ func (p *refEchoProvisioner) Submit(context.Context, provisioning.ExecutionReque
 func (p *refEchoProvisioner) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
 	return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
 		Execution: &provisioning.Execution{State: provisioning.ExecutionStateRunning}}, nil
+}
+
+type outputCapableProvisioner struct{ refEchoProvisioner }
+
+func (*outputCapableProvisioner) OutputMappingRef(domain.ResourceTypeRef, domain.Capability) string {
+	return "mapping-v2"
+}
+
+func (*outputCapableProvisioner) SelectOutputRecoveryMapping(_ domain.ResourceTypeRef, _ domain.Capability, source string) (string, bool) {
+	return "mapping-v2", source == "mapping-v1"
+}
+
+type slowSubmitProvisioner struct{ refEchoProvisioner }
+
+type fencedProvisioner struct {
+	refEchoProvisioner
+	fence provisioning.ExecutionFence
+}
+
+func (p *fencedProvisioner) SubmitFenced(ctx context.Context, request provisioning.ExecutionRequest, fence provisioning.ExecutionFence) (provisioning.Submission, error) {
+	p.fence = fence
+	return p.Submit(ctx, request)
+}
+
+func (p *fencedProvisioner) ObserveFenced(ctx context.Context, request provisioning.ObservationRequest, fence provisioning.ExecutionFence) (provisioning.ExecutionObservation, error) {
+	p.fence = fence
+	return p.Observe(ctx, request)
+}
+
+func (*slowSubmitProvisioner) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	time.Sleep(10 * time.Millisecond)
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateAccepted}}}, nil
 }
 
 // Auth failure labels come exclusively from the typed enum.

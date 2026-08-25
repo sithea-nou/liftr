@@ -1,6 +1,6 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build fmt fmt-check test test-race test-integration build-programs test-acceptance-azure vet verify verify-backstage
+.PHONY: build fmt fmt-check test test-race test-integration test-opentofu build-programs test-acceptance-azure vet verify verify-backstage
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" ./cmd/...
@@ -21,6 +21,10 @@ test-race:
 test-integration:
 	@test -n "$$LIFTR_TEST_DATABASE_URL" || (echo "LIFTR_TEST_DATABASE_URL is required." && exit 1)
 	go test ./internal/persistence/postgres -count=1
+
+test-opentofu:
+	@test -n "$$LIFTR_TEST_OPENTOFU_BIN" || (echo "LIFTR_TEST_OPENTOFU_BIN is required." && exit 1)
+	go test ./internal/provisioning/opentofu -run 'TestL2|TestHTTP' -count=1 -v
 
 # Builds the prebuilt binary for every registered Pulumi program. The
 # binaries are never committed; registration digests cover the source tree.

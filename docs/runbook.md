@@ -19,6 +19,8 @@ semantics.
 4. Restarts are safe by lease design: abandoned leases expire and recover
    through the existing Unknown → Observe machinery. Prefer restart over any
    manual intervention.
+5. **Never bypass an OpenTofu state lock.** Do not use `force-unlock`,
+   `-lock=false`, delete lock artifacts, or run plan/refresh as a lock probe.
 
 ## 1. API unhealthy
 
@@ -98,8 +100,10 @@ These are DIFFERENT diagnoses:
 Ambiguity is safe by design (attempt → Unknown → Observe recovery), but a
 rising rate means the provisioner cannot complete a submission round trip.
 For Pulumi check workspace/backend availability; for Crossplane check API
-reachability. The attempt's Unknown state guarantees no double-execution —
-do not "help" by re-submitting anything manually.
+reachability. For a composed OpenTofu registration, check the HTTPS HTTP state
+backend and the adapter-private evidence/quarantine boundary described below.
+The attempt's Unknown state guarantees no double-execution — do not "help" by
+re-submitting anything manually.
 
 ## 6. Auth / JWKS errors
 
@@ -197,6 +201,106 @@ a coordinated rollout, or use normal lifecycle deletion so the retained
 Resource reaches `Deleted`. Event `data.admission.policyRevision` identifies
 which private revision admitted a successful create/update; rule IDs and
 counts intentionally never appear in public Problems or metric labels.
+
+## 12. OpenTofu HTTP state, locks, scratch, and quarantine
+
+The OpenTofu package, PostgreSQL evidence store, per-call scratch/quarantine
+handling, and Unix process-tree cancellation are optionally wired into
+production server composition only when `LIFTR_OPENTOFU_CONFIG_FILE` names the
+strict operator-supplied registration set. Its `registrations` array retains
+every immutable ref still bound to a Resource; its `routes` array selects the
+ref used only for new Resources of each ResourceType. An empty variable leaves
+the Pulumi default unchanged. Liftr ships no production cloud program or
+backend registration.
+
+The only approved engine target is a real official OpenTofu 1.12.6 binary.
+Production also requires an operator-supplied conformant HTTPS HTTP state
+backend. Qualification is complete against a real official OpenTofu 1.12.6
+binary and the conformant test HTTP backend, but each operator must separately
+qualify its production HTTPS backend. The local backend and insecure HTTP are
+development/test-only and cannot be selected by production composition. No
+Terraform version is selected or supported.
+
+Treat each provisioner ref, identity, exact executable, source digest, program
+ref, and backend ref as immutable while any Resource uses that registration. To
+roll forward, add a new registration, move the matching current route, and keep
+the old registration and artifacts available. Existing Resources resolve their
+persisted ref exactly and do not follow the current type route or default. The
+config file must not be group- or world-writable. Program environments cannot
+set OpenTofu control variables; backend environments allow only the explicit
+HTTP credential/TLS variables. Their values must never be logged.
+
+### Backend and lock handling
+
+- OpenTofu, not Liftr, owns HTTP backend GET, state update, LOCK, and UNLOCK and
+  propagates the backend lock ID. Never proxy these through an improvised Liftr
+  lock or treat a scratch-workdir file lock as the state lock.
+- For a busy state lock, identify the OpenTofu process and owning worker lease,
+  then wait for normal completion. On Unix, cancellation of owned internal work
+  interrupts the process group and uses bounded forced termination if needed;
+  backend lock release and Observe still determine recovery. Public Operation
+  cancellation and Windows adapter support are not available.
+- Never use `force-unlock`, `-lock=false`, lock deletion, or a sacrificial
+  plan/refresh probe. The normal saved plan and saved-plan apply acquire their
+  own engine locks.
+
+### Attempt and state diagnosis
+
+- `ApplyMayStart` means no `tofu apply` process may have started before that
+  phase became durable. Init, normal planning, and plan inspection may already
+  have read state, initialized providers, evaluated data sources, or made
+  provider reads; they did not authorize Apply mutation.
+- Unknown operational init/plan/inspection failures before `ApplyMayStart` may
+  redeliver the same attempt with capped backoff. Deterministic registration,
+  source, input, supply-chain, or plan-closure errors are terminal. The exact
+  1.12.6 implementation recognizes only its closed, tested machine-UI semantic
+  summary allowlist; all other nonzero outcomes remain unavailable. Never infer
+  lock or backend conclusions from diagnostic text.
+- A missing, malformed, wrong-lineage, regressed, or digest-mismatched backend
+  state does not prove infrastructure absence. Stop execution for the affected
+  registration and compare the private attempt journal/state binding with
+  PostgreSQL history read-only. Do not import, push/edit state, rewrite a
+  SHA-256 digest, run OpenTofu manually, or resubmit.
+- Delete is a normal saved-plan apply with `desiredPresent=false`. Workload
+  addresses are removed while the private control marker and stable backend
+  state remain. Never substitute whole-state `destroy`, backend DELETE,
+  `state rm`, or garbage collection.
+
+### Scratch and quarantine
+
+- Every call uses a private scratch workdir; normal conclusive success removes
+  it. Scratch is not the stable state location and is not reused as a
+  workspace.
+- Ambiguous/errored workdirs, including any containing `errored.tfstate`, move
+  to a separate same-filesystem quarantine. Startup scans only adapter-owned
+  orphan names and quarantines only confirmed inactive owned workdirs; it does
+  not adopt or delete unrelated directories.
+- Quarantine may contain state fragments, plans, provider data, command output,
+  and secrets. Keep it non-executable, encrypted, access-restricted, and
+  retained until an approved diagnostic/retention action. Never restore it into
+  the work namespace or delete it solely by age. Quarantine is diagnostic
+  evidence, not authoritative backend state.
+
+### Backup and capacity
+
+- Pause workers before backup or restore. Coordinate PostgreSQL and the
+  production HTTP state backend as one recovery set; restoring only one side
+  can invalidate attempt/state bindings. Back up quarantine separately under
+  its diagnostic retention and access policy.
+- Under pressure, add backend or quarantine capacity. Do not delete backend
+  state, the retained delete marker, journals, or quarantine to make space.
+- External-provider registrations require their immutable dependency lock and
+  verified offline provider packages. The built-in-only path has no provider
+  lock entry or provider/registry network access; even after it is run, it is
+  not external-provider or cloud acceptance evidence.
+
+### Output confidentiality
+
+Output collection privately retrieves bounded metadata for all root outputs so
+the mapped envelope can be required to have `sensitive=false`. Unmapped values
+are discarded immediately. Never log or copy output names, output values, raw
+state, plans, stdout, or stderr into tickets, Events, metrics, or public API
+fields.
 
 ## Alerting cookbook (examples, not product)
 

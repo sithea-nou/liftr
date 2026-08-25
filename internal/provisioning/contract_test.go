@@ -3,9 +3,11 @@
 package provisioning_test
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/provisioning"
@@ -97,6 +99,59 @@ func TestNormalizedFailureError(t *testing.T) {
 	}
 	if got := failure.Error(); !strings.Contains(got, "BackendUnavailable") {
 		t.Fatalf("failure error = %q, want reason", got)
+	}
+}
+
+func TestSubmissionNotAttemptedErrorRequiresCompleteTransientFailure(t *testing.T) {
+	valid := provisioning.SubmissionNotAttemptedError{Failure: provisioning.ExecutionFailure{
+		Kind: provisioning.FailureUnavailable, Reason: "ControlPlaneUnavailable", Message: "control plane is unavailable",
+	}}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid not-attempted error rejected: %v", err)
+	}
+	if !errors.Is(valid, provisioning.ErrSubmissionNotAttempted) {
+		t.Fatal("not-attempted error does not unwrap to its sentinel")
+	}
+
+	for name, failure := range map[string]provisioning.ExecutionFailure{
+		"permanent kind": {Kind: provisioning.FailureInvalidRequest, Reason: "Invalid", Message: "invalid request"},
+		"missing kind":   {Reason: "Unavailable", Message: "unavailable"},
+		"missing reason": {Kind: provisioning.FailureTimeout, Message: "timed out"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := (provisioning.SubmissionNotAttemptedError{Failure: failure}).Validate(); err == nil {
+				t.Fatal("malformed not-attempted error was accepted")
+			}
+		})
+	}
+	if extracted, ok := provisioning.AsSubmissionNotAttempted(&valid); !ok || extracted.Failure.Reason != valid.Failure.Reason {
+		t.Fatal("pointer-form not-attempted error was not extracted")
+	}
+}
+
+func TestSubmissionIsZeroRequiresCompleteAbsenceOfEvidence(t *testing.T) {
+	if !(provisioning.Submission{}).IsZero() {
+		t.Fatal("zero submission was not recognized")
+	}
+	handle, err := provisioning.NewExecutionHandle("execution-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]provisioning.Submission{
+		"correlation": {Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationUnknown}},
+		"execution":   {Observation: provisioning.ExecutionObservation{Execution: &provisioning.Execution{State: provisioning.ExecutionStateUnknown, Handle: &handle}}},
+		"resource": {Observation: provisioning.ExecutionObservation{Resource: provisioning.ResourceObservation{
+			Presence: provisioning.ResourcePresenceUnknown, Readiness: provisioning.ResourceReadinessUnknown, Drift: provisioning.ResourceDriftUnknown,
+		}}},
+		"observed at": {Observation: provisioning.ExecutionObservation{ObservedAt: time.Unix(1, 0)}},
+		"outputs":     {Observation: provisioning.ExecutionObservation{Outputs: &provisioning.OutputEvidence{State: provisioning.OutputsUnavailable}}},
+	}
+	for name, submission := range cases {
+		t.Run(name, func(t *testing.T) {
+			if submission.IsZero() {
+				t.Fatal("submission containing evidence was considered zero")
+			}
+		})
 	}
 }
 

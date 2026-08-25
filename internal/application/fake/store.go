@@ -812,6 +812,50 @@ func (s *Store) RetryOutbox(_ context.Context, id, token string, delay time.Dura
 	return nil
 }
 
+func (s *Store) RetryDispatchOutbox(_ context.Context, id, token string, expectedVersion uint64, delay time.Duration, messageText string) error {
+	message, ok := s.outbox[id]
+	if !ok {
+		return application.ErrConcurrencyConflict
+	}
+	if message.Kind != application.OutboxDispatch || message.State != application.OutboxLeased || message.LeaseToken != token || !message.LeasedUntil.After(time.Now()) {
+		return application.ErrConcurrencyConflict
+	}
+	execution, exists := s.executions[message.OperationID]
+	if !exists || execution.Version != expectedVersion {
+		return application.ErrConcurrencyConflict
+	}
+	message.ExpectedVersion = expectedVersion
+	message.LeaseToken = ""
+	message.LeasedUntil = time.Time{}
+	message.LastError = messageText
+	message.State = application.OutboxPending
+	message.AvailableAt = time.Now().Add(delay)
+	s.outbox[id] = message
+	return nil
+}
+
+func (s *Store) RetryExpiredDispatchOutbox(_ context.Context, id, token string, expectedVersion uint64, delay time.Duration, messageText string) error {
+	message, ok := s.outbox[id]
+	if !ok {
+		return application.ErrConcurrencyConflict
+	}
+	if message.Kind != application.OutboxDispatch || message.State != application.OutboxLeased || message.LeaseToken != token || message.LeasedUntil.After(time.Now()) {
+		return application.ErrConcurrencyConflict
+	}
+	execution, exists := s.executions[message.OperationID]
+	if !exists || execution.Version != expectedVersion {
+		return application.ErrConcurrencyConflict
+	}
+	message.ExpectedVersion = expectedVersion
+	message.LeaseToken = ""
+	message.LeasedUntil = time.Time{}
+	message.LastError = messageText
+	message.State = application.OutboxPending
+	message.AvailableAt = time.Now().Add(delay)
+	s.outbox[id] = message
+	return nil
+}
+
 func (s *Store) DeadOutbox(_ context.Context, id, token, reason string) error {
 	message, ok := s.outbox[id]
 	if !ok {

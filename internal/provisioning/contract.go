@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	ErrAmbiguousSubmission = errors.New("provisioner submission outcome is ambiguous")
-	ErrObservationFailure  = errors.New("provisioner observation failed")
+	ErrAmbiguousSubmission    = errors.New("provisioner submission outcome is ambiguous")
+	ErrSubmissionNotAttempted = errors.New("provisioner submission was not attempted")
+	ErrObservationFailure     = errors.New("provisioner observation failed")
 )
 
 // Provisioner is the minimum contract required by Liftr. Submit sends
@@ -25,6 +26,52 @@ type Provisioner interface {
 	Capabilities() []ProvisionerCapability
 	Submit(context.Context, ExecutionRequest) (Submission, error)
 	Observe(context.Context, ObservationRequest) (ExecutionObservation, error)
+}
+
+// ExecutionFence is the caller's current ownership of one durable work item.
+// It is intentionally opaque to ordinary provisioners. Stateful adapters may
+// use it to fence private execution evidence against the same lease that
+// authorizes the worker call. Passive calls may cancel work on ownership loss
+// but must not mutate execution evidence.
+type ExecutionFence struct {
+	MessageID  string
+	LeaseToken string
+	Passive    bool
+}
+
+func (f ExecutionFence) Validate() error {
+	if strings.TrimSpace(f.MessageID) == "" || strings.TrimSpace(f.LeaseToken) == "" {
+		return fmt.Errorf("message ID and lease token are required")
+	}
+	return nil
+}
+
+// FencedProvisioner is an optional private execution seam for stateful
+// adapters. Provisioner remains the public minimum contract; the worker falls
+// back to its ordinary methods when this capability is absent.
+type FencedProvisioner interface {
+	SubmitFenced(context.Context, ExecutionRequest, ExecutionFence) (Submission, error)
+	ObserveFenced(context.Context, ObservationRequest, ExecutionFence) (ExecutionObservation, error)
+}
+
+// ExpiredDispatchRedeliverer is an optional private capability for an adapter
+// whose durable submission evidence makes same-attempt redelivery safe. A
+// fence alone does not imply this property.
+type ExpiredDispatchRedeliverer interface {
+	CanRedeliverExpiredDispatch() bool
+}
+
+// OutputMappingSource optionally declares the private, immutable output
+// mapping selected for an execution. Liftr persists the returned identity
+// before calling Submit.
+type OutputMappingSource interface {
+	OutputMappingRef(domain.ResourceTypeRef, domain.Capability) string
+}
+
+// OutputRecoveryMappingSelector optionally selects an explicitly compatible
+// output mapping for recovery of a previously successful execution.
+type OutputRecoveryMappingSelector interface {
+	SelectOutputRecoveryMapping(domain.ResourceTypeRef, domain.Capability, string) (string, bool)
 }
 
 // ProvisionerCapability describes a ResourceType action supported by a backend.
@@ -95,6 +142,15 @@ func (h ExecutionHandle) String() string { return h.token }
 // present after Submit, including when the backend accepted asynchronous work.
 type Submission struct {
 	Observation ExecutionObservation
+}
+
+// IsZero reports whether Submit returned no backend facts at all. A
+// SubmissionNotAttemptedError may authorize redispatch only with this exact
+// absence of evidence.
+func (s Submission) IsZero() bool {
+	observation := s.Observation
+	return observation.Correlation == "" && observation.Execution == nil &&
+		observation.Resource == (ResourceObservation{}) && observation.ObservedAt.IsZero() && observation.Outputs == nil
 }
 
 // ObservationRequest identifies what the provisioner should observe. Handle
@@ -194,6 +250,48 @@ func (f ExecutionFailure) Error() string {
 		return fmt.Sprintf("%s: %s", f.Kind, f.Reason)
 	}
 	return fmt.Sprintf("%s: %s: %s", f.Kind, f.Reason, f.Message)
+}
+
+// SubmissionNotAttemptedError explicitly reports that Submit returned before
+// making any backend execution attempt. Only transient availability failures
+// are legal: this error authorizes Liftr to retry the same durable attempt.
+// All other Submit errors remain potentially attempted and therefore
+// ambiguous unless accompanied by conclusive submission evidence.
+type SubmissionNotAttemptedError struct {
+	Failure ExecutionFailure
+}
+
+func (e SubmissionNotAttemptedError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrSubmissionNotAttempted, e.Failure.Error())
+}
+
+func (e SubmissionNotAttemptedError) Unwrap() error { return ErrSubmissionNotAttempted }
+
+// AsSubmissionNotAttempted extracts either the value or pointer form so
+// adapters can follow their normal typed-error convention without changing
+// worker semantics.
+func AsSubmissionNotAttempted(err error) (SubmissionNotAttemptedError, bool) {
+	var value SubmissionNotAttemptedError
+	if errors.As(err, &value) {
+		return value, true
+	}
+	var pointer *SubmissionNotAttemptedError
+	if errors.As(err, &pointer) && pointer != nil {
+		return *pointer, true
+	}
+	return SubmissionNotAttemptedError{}, false
+}
+
+// Validate ensures the error carries complete, retryable provider-neutral
+// failure evidence.
+func (e SubmissionNotAttemptedError) Validate() error {
+	if e.Failure.Kind != FailureUnavailable && e.Failure.Kind != FailureTimeout {
+		return fmt.Errorf("submission not attempted failure kind must be Unavailable or Timeout")
+	}
+	if strings.TrimSpace(e.Failure.Reason) == "" {
+		return fmt.Errorf("submission not attempted failure reason is required")
+	}
+	return nil
 }
 
 // ResourceObservation contains normalized resource facts. It does not contain

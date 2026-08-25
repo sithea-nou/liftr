@@ -89,6 +89,13 @@ type OutboxRepository interface {
 	// RetryOutbox reschedules retryable work. It never quarantines: work that
 	// exhausts its backoff window keeps retrying at the bounded backoff cap.
 	RetryOutbox(context.Context, string, string, time.Duration, string) error
+	// RetryDispatchOutbox reschedules the same conclusively not-attempted
+	// Dispatch and refreshes its execution-version fence atomically with the
+	// caller's attempt and execution rollback.
+	RetryDispatchOutbox(context.Context, string, string, uint64, time.Duration, string) error
+	// RetryExpiredDispatchOutbox restores an expired, fenced Dispatch after its
+	// provider can safely re-enter the same durable attempt.
+	RetryExpiredDispatchOutbox(context.Context, string, string, uint64, time.Duration, string) error
 	// DeadOutbox quarantines work that is provably invalid and cannot succeed
 	// on retry. It is the only path that moves work to the Dead state.
 	DeadOutbox(context.Context, string, string, string) error

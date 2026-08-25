@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,6 +107,7 @@ type mappingProvider struct {
 	recoveryMapping     string
 	observedBase        time.Time
 	requestedOperations []domain.OperationID
+	mappingProbe        func()
 }
 
 func newMappingProvider(mappingRef string, failUnknownRef bool) *mappingProvider {
@@ -119,6 +121,9 @@ func (p *mappingProvider) Capabilities() []provisioning.ProvisionerCapability {
 
 // OutputMappingRef declares this deployment's mapping identity.
 func (p *mappingProvider) OutputMappingRef(domain.ResourceTypeRef, domain.Capability) string {
+	if p.mappingProbe != nil {
+		p.mappingProbe()
+	}
 	return p.mappingRef
 }
 
@@ -228,6 +233,53 @@ func pumpOnce(t *testing.T, instance *worker.Worker) error {
 		return errDrained{}
 	}
 	return nil
+}
+
+type transactionProbeRunner struct {
+	inner  application.TransactionRunner
+	active atomic.Int32
+}
+
+func (r *transactionProbeRunner) Within(ctx context.Context, fn func(application.UnitOfWork) error) error {
+	return r.inner.Within(ctx, func(tx application.UnitOfWork) error {
+		r.active.Add(1)
+		defer r.active.Add(-1)
+		return fn(tx)
+	})
+}
+
+func TestOutputMappingCallbackRunsOutsideDispatchTransaction(t *testing.T) {
+	provider := newMappingProvider(firstMapping, false)
+	service, store, _, _, instance := outputsHarness(t, provider)
+	probe := &transactionProbeRunner{inner: store}
+	instance.Transactions = probe
+	var calls atomic.Int32
+	var calledInTransaction atomic.Bool
+	provider.mappingProbe = func() {
+		calls.Add(1)
+		if probe.active.Load() != 0 {
+			calledInTransaction.Store(true)
+		}
+	}
+	command := createCommand(t, "mapping-callback-db", "op-mapping-callback")
+	if _, err := service.AdmitCreateResource(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		if worked, err := instance.RunOnce(context.Background()); err != nil || !worked {
+			t.Fatalf("worker setup worked=%t error=%v", worked, err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("OutputMappingRef calls=%d, want 1", calls.Load())
+	}
+	if calledInTransaction.Load() {
+		t.Fatal("OutputMappingRef was called inside a database transaction")
+	}
+	execution, err := store.GetExecution(context.Background(), command.OperationID)
+	if err != nil || execution.OutputMappingRef != firstMapping {
+		t.Fatalf("execution error=%v mapping=%q", err, execution.OutputMappingRef)
+	}
 }
 
 type errDrained struct{}

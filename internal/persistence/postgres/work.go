@@ -200,6 +200,40 @@ func (r *repositories) RetryOutbox(ctx context.Context, id, token string, delay 
 	return nil
 }
 
+func (r *repositories) RetryDispatchOutbox(ctx context.Context, id, token string, expectedVersion uint64, delay time.Duration, lastError string) error {
+	command, err := r.tx.Exec(ctx, `UPDATE outbox_messages SET
+		state='Pending',expected_version=$3::numeric,available_at=clock_timestamp()+($4::bigint * interval '1 millisecond'),
+		lease_token=NULL,leased_until=NULL,last_error=$5,dead_at=NULL,terminal_reason=NULL
+		WHERE id=$1 AND kind='Dispatch' AND state='Leased' AND lease_token=$2 AND leased_until > clock_timestamp()
+		  AND EXISTS (SELECT 1 FROM provisioning_executions AS execution
+		    WHERE execution.operation_id=outbox_messages.operation_id AND execution.record_version=$3::numeric)`,
+		id, token, uintText(expectedVersion), delay.Milliseconds(), lastError)
+	if err != nil {
+		return translateError(err)
+	}
+	if command.RowsAffected() != 1 {
+		return application.ErrConcurrencyConflict
+	}
+	return nil
+}
+
+func (r *repositories) RetryExpiredDispatchOutbox(ctx context.Context, id, token string, expectedVersion uint64, delay time.Duration, lastError string) error {
+	command, err := r.tx.Exec(ctx, `UPDATE outbox_messages SET
+		state='Pending',expected_version=$3::numeric,available_at=clock_timestamp()+($4::bigint * interval '1 millisecond'),
+		lease_token=NULL,leased_until=NULL,last_error=$5,dead_at=NULL,terminal_reason=NULL
+		WHERE id=$1 AND kind='Dispatch' AND state='Leased' AND lease_token=$2 AND leased_until <= clock_timestamp()
+		  AND EXISTS (SELECT 1 FROM provisioning_executions AS execution
+		    WHERE execution.operation_id=outbox_messages.operation_id AND execution.record_version=$3::numeric)`,
+		id, token, uintText(expectedVersion), delay.Milliseconds(), lastError)
+	if err != nil {
+		return translateError(err)
+	}
+	if command.RowsAffected() != 1 {
+		return application.ErrConcurrencyConflict
+	}
+	return nil
+}
+
 func (r *repositories) DeadOutbox(ctx context.Context, id, token, reason string) error {
 	command, err := r.tx.Exec(ctx, `UPDATE outbox_messages SET state='Dead',lease_token=NULL,leased_until=NULL,
 		terminal_reason=$3,dead_at=clock_timestamp() WHERE id=$1 AND state='Leased' AND lease_token=$2 AND leased_until > clock_timestamp()`, id, token, reason)

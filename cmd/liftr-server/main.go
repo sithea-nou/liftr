@@ -2,9 +2,10 @@
 
 // Command liftr-server runs the Liftr control plane. With LIFTR_DATABASE_URL
 // configured it composes the full stack — PostgreSQL persistence, the
-// registered ResourceType catalog, the Pulumi provisioner adapter, the HTTP
-// surface, and the outbox worker loop. Without it the server runs in a
-// deliberately degraded health-only mode.
+// registered ResourceType catalog, the Pulumi provisioner adapter, an optional
+// operator-configured OpenTofu registration, the HTTP surface, and the outbox
+// worker loop. Without it the server runs in a deliberately degraded
+// health-only mode.
 //
 // The full runtime requires authentication (ADR-0012): either OIDC access
 // token configuration — LIFTR_AUTH_ISSUER and LIFTR_AUTH_AUDIENCE plus
@@ -339,16 +340,37 @@ func composeFullRuntime(ctx context.Context, logger *slog.Logger, obsConfig obse
 	kinds := map[application.ProvisionerRef]observability.ProvisionerKind{
 		providerRef: observability.ProvisionerKindPulumi,
 	}
+	provisioners := map[application.ProvisionerRef]provisioning.Provisioner{providerRef: provider}
+	routes := map[domain.ResourceTypeRef]application.ProvisionerRef{}
+	if openTofuConfigFile := os.Getenv("LIFTR_OPENTOFU_CONFIG_FILE"); openTofuConfigFile != "" {
+		openTofuProviders, openTofuRoutes, composeErr := composeOpenTofuProvisioners(ctx, openTofuConfigFile, catalog, store)
+		if composeErr != nil {
+			closeStore()
+			return nil, nil, composeErr
+		}
+		for openTofuRef, openTofuProvider := range openTofuProviders {
+			if _, duplicate := provisioners[openTofuRef]; duplicate {
+				closeStore()
+				return nil, nil, fmt.Errorf("OpenTofu provisioner reference %q is already registered", openTofuRef)
+			}
+			provisioners[openTofuRef] = openTofuProvider
+			kinds[openTofuRef] = observability.ProvisionerKindOpenTofu
+		}
+		for resourceType, openTofuRef := range openTofuRoutes {
+			routes[resourceType] = openTofuRef
+		}
+	}
 	runtime, err := server.Compose(server.Config{
-		Transactions:          store,
-		Catalog:               catalog,
-		AdmissionPolicy:       admissionPolicy,
-		Provisioners:          map[application.ProvisionerRef]provisioning.Provisioner{providerRef: provider},
-		DefaultProvisionerRef: providerRef,
-		Logger:                logger,
-		Telemetry:             telemetry,
-		ProvisionerKinds:      kinds,
-		Sampler:               samplerReader{store: store},
+		Transactions:                store,
+		Catalog:                     catalog,
+		AdmissionPolicy:             admissionPolicy,
+		Provisioners:                provisioners,
+		DefaultProvisionerRef:       providerRef,
+		ResourceTypeProvisionerRefs: routes,
+		Logger:                      logger,
+		Telemetry:                   telemetry,
+		ProvisionerKinds:            kinds,
+		Sampler:                     samplerReader{store: store},
 		Thresholds: server.DiagnosticThresholds{
 			LongRunningWarnAfter: obsConfig.LongRunningWarnAfter,
 			LongRunningCritAfter: obsConfig.LongRunningCritAfter,

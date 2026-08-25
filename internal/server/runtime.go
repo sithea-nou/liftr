@@ -93,6 +93,10 @@ type Config struct {
 	Provisioners map[application.ProvisionerRef]provisioning.Provisioner
 	// DefaultProvisionerRef is selected for new Resources.
 	DefaultProvisionerRef application.ProvisionerRef
+	// ResourceTypeProvisionerRefs privately overrides the default for new
+	// Resources of a registered ResourceType. Existing Resources always use
+	// their persisted ProvisionerRef through the resolver.
+	ResourceTypeProvisionerRefs map[domain.ResourceTypeRef]application.ProvisionerRef
 	// WorkerInterval spaces out idle polling of the outbox. It does not
 	// affect in-flight work; long provider calls run under renewed leases.
 	WorkerInterval time.Duration
@@ -137,6 +141,10 @@ func Compose(config Config) (*Runtime, error) {
 	}
 	if _, ok := config.Provisioners[defaultRef]; !ok {
 		return nil, fmt.Errorf("%w: default provisioner %q is not registered", application.ErrInvalidApplicationCall, defaultRef)
+	}
+	routes, routeCapabilities, err := validateProvisionerRoutes(config)
+	if err != nil {
+		return nil, err
 	}
 	authenticator, authorizer, err := composeAuth(config)
 	if err != nil {
@@ -194,7 +202,7 @@ func Compose(config Config) (*Runtime, error) {
 		}
 		admissionPolicy = wrapped
 	}
-	service, err := application.NewService(config.Catalog, staticSelector{ref: defaultRef}, staticResolver{providers: instrumented}, transactions, authorizer, admissionPolicy)
+	service, err := application.NewService(config.Catalog, staticSelector{defaultRef: defaultRef, routes: routes, capabilities: routeCapabilities}, staticResolver{providers: instrumented}, transactions, authorizer, admissionPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -404,10 +412,57 @@ func (r *Runtime) Wait() {
 	<-r.done
 }
 
-type staticSelector struct{ ref application.ProvisionerRef }
+type staticSelector struct {
+	defaultRef   application.ProvisionerRef
+	routes       map[domain.ResourceTypeRef]application.ProvisionerRef
+	capabilities map[application.ProvisionerRef]map[provisioning.ProvisionerCapability]struct{}
+}
 
-func (s staticSelector) Select(context.Context, domain.ResourceTypeRef, domain.Capability) (application.ProvisionerRef, error) {
-	return s.ref, nil
+func (s staticSelector) Select(_ context.Context, resourceType domain.ResourceTypeRef, capability domain.Capability) (application.ProvisionerRef, error) {
+	ref, routed := s.routes[resourceType]
+	if !routed {
+		return s.defaultRef, nil
+	}
+	registered := provisioning.ProvisionerCapability{ResourceType: resourceType, Capability: capability}
+	if _, ok := s.capabilities[ref][registered]; !ok {
+		return "", fmt.Errorf("provisioner %q does not declare %s for %s/%s", ref, capability, resourceType.Name, resourceType.Version)
+	}
+	return ref, nil
+}
+
+func validateProvisionerRoutes(config Config) (map[domain.ResourceTypeRef]application.ProvisionerRef, map[application.ProvisionerRef]map[provisioning.ProvisionerCapability]struct{}, error) {
+	routes := make(map[domain.ResourceTypeRef]application.ProvisionerRef, len(config.ResourceTypeProvisionerRefs))
+	capabilities := make(map[application.ProvisionerRef]map[provisioning.ProvisionerCapability]struct{})
+	for resourceType, ref := range config.ResourceTypeProvisionerRefs {
+		if _, err := application.NewProvisionerRef(string(ref)); err != nil {
+			return nil, nil, fmt.Errorf("%w: invalid provisioner route for %s/%s: %v", application.ErrInvalidApplicationCall, resourceType.Name, resourceType.Version, err)
+		}
+		provider, ok := config.Provisioners[ref]
+		if !ok || provider == nil {
+			return nil, nil, fmt.Errorf("%w: routed provisioner %q is not registered", application.ErrInvalidApplicationCall, ref)
+		}
+		contract, err := config.Catalog.Get(context.Background(), resourceType)
+		if err != nil || contract == nil {
+			return nil, nil, fmt.Errorf("%w: routed resource type %s/%s is not registered", application.ErrInvalidApplicationCall, resourceType.Name, resourceType.Version)
+		}
+		declared := make(map[provisioning.ProvisionerCapability]struct{})
+		for _, capability := range provider.Capabilities() {
+			if _, duplicate := declared[capability]; duplicate {
+				return nil, nil, fmt.Errorf("%w: provisioner %q declares a duplicate capability", application.ErrInvalidApplicationCall, ref)
+			}
+			declared[capability] = struct{}{}
+			if capability.ResourceType == resourceType && !contract.Domain().Supports(capability.Capability) {
+				return nil, nil, fmt.Errorf("%w: provisioner %q declares unsupported capability %q for %s/%s", application.ErrInvalidApplicationCall, ref, capability.Capability, resourceType.Name, resourceType.Version)
+			}
+		}
+		create := provisioning.ProvisionerCapability{ResourceType: resourceType, Capability: domain.CapabilityCreate}
+		if _, ok := declared[create]; !ok {
+			return nil, nil, fmt.Errorf("%w: routed provisioner %q does not declare create for %s/%s", application.ErrInvalidApplicationCall, ref, resourceType.Name, resourceType.Version)
+		}
+		routes[resourceType] = ref
+		capabilities[ref] = declared
+	}
+	return routes, capabilities, nil
 }
 
 type staticResolver struct {

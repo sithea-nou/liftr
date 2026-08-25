@@ -641,6 +641,182 @@ func TestPostgresExpiredPendingDispatchRequeuesSameMessage(t *testing.T) {
 	}
 }
 
+func TestPostgresNotAttemptedSubmissionRequeuesSameAttemptAndRefreshesFence(t *testing.T) {
+	pool, cleanup := migratedPool(t)
+	defer cleanup()
+	ctx := context.Background()
+	store, _ := postgres.NewStore(pool)
+	provider := &postgresNotAttemptedOnceProvider{}
+	service, resolver := postgresService(t, store, provider)
+	command := postgresCreateCommand(t, "resource-not-attempted", "operation-not-attempted", map[string]any{"v": uint64(1)})
+	if _, err := service.AdmitCreateResource(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	instance, _ := worker.New(store, resolver)
+	instance.RetryBase = 0
+	for range 3 {
+		if _, err := instance.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if worked, err := instance.RunOnce(ctx); !worked || !errors.Is(err, provisioning.ErrSubmissionNotAttempted) {
+		t.Fatalf("first dispatch worked=%t error=%v", worked, err)
+	}
+	var messageState, executionState, attemptState, attemptNumber, expectedVersion, executionVersion string
+	if err := pool.QueryRow(ctx, `SELECT m.state,e.state,a.state,m.attempt_number::text,m.expected_version::text,e.record_version::text
+		FROM outbox_messages m JOIN provisioning_executions e ON e.operation_id=m.operation_id
+		JOIN provisioning_submission_attempts a ON a.operation_id=e.operation_id AND a.attempt_number=m.attempt_number
+		WHERE m.id=$1`, application.DispatchMessage(command.OperationID, 1, 0).ID).Scan(
+		&messageState, &executionState, &attemptState, &attemptNumber, &expectedVersion, &executionVersion); err != nil {
+		t.Fatal(err)
+	}
+	if messageState != "Pending" || executionState != "Pending" || attemptState != "Pending" || attemptNumber != "1" || expectedVersion != executionVersion {
+		t.Fatalf("message=%s execution=%s attempt=%s number=%s expected=%s version=%s", messageState, executionState, attemptState, attemptNumber, expectedVersion, executionVersion)
+	}
+	if worked, err := instance.RunOnce(ctx); err != nil || !worked {
+		t.Fatalf("second dispatch worked=%t error=%v", worked, err)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("Submit calls=%d, want 2", provider.calls)
+	}
+}
+
+func TestPostgresRetryDispatchVersionMismatchRollsBackAttemptAndExecution(t *testing.T) {
+	pool, cleanup := migratedPool(t)
+	defer cleanup()
+	ctx := context.Background()
+	store, _ := postgres.NewStore(pool)
+	provider := provisioningfake.New(provisioningfake.ModeSynchronous)
+	service, _ := postgresService(t, store, provider)
+	command := postgresCreateCommand(t, "resource-retry-rollback", "operation-retry-rollback", map[string]any{"v": uint64(1)})
+	if _, err := service.AdmitCreateResource(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	instance, _ := worker.New(store, &applicationfake.Resolver{})
+	for range 3 {
+		if _, err := instance.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var dispatch application.OutboxMessage
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		var found bool
+		var err error
+		dispatch, found, err = tx.Outbox().ClaimOutbox(ctx, "retry-rollback-token", time.Minute)
+		if err == nil && (!found || dispatch.Kind != application.OutboxDispatch) {
+			return errors.New("Dispatch was not claimed")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, command.OperationID, 1)
+		if err != nil {
+			return err
+		}
+		attempt.State = application.SubmissionAttemptLeased
+		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptPending); err != nil {
+			return err
+		}
+		execution, err := tx.Executions().GetExecution(ctx, command.OperationID)
+		if err != nil {
+			return err
+		}
+		execution.State = application.AttemptDispatching
+		return tx.Executions().SaveExecution(ctx, execution, execution.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	before := getExecution(t, store, command.OperationID)
+	err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, command.OperationID, 1)
+		if err != nil {
+			return err
+		}
+		attempt.State = application.SubmissionAttemptPending
+		attempt.ClaimedAt = time.Time{}
+		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptLeased); err != nil {
+			return err
+		}
+		execution, err := tx.Executions().GetExecution(ctx, command.OperationID)
+		if err != nil {
+			return err
+		}
+		execution.State = application.AttemptPending
+		if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
+			return err
+		}
+		// The execution row is now version+1 inside this transaction. Supplying
+		// its stale loaded version must fail the outbox CAS and roll everything back.
+		return tx.Outbox().RetryDispatchOutbox(ctx, dispatch.ID, dispatch.LeaseToken, execution.Version, 0, "deliberate mismatch")
+	})
+	if !errors.Is(err, application.ErrConcurrencyConflict) {
+		t.Fatalf("RetryDispatchOutbox error = %v, want ErrConcurrencyConflict", err)
+	}
+	after := getExecution(t, store, command.OperationID)
+	var attempt application.SubmissionAttemptRecord
+	var message application.OutboxMessage
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		var err error
+		attempt, err = tx.SubmissionAttempts().GetSubmissionAttempt(ctx, command.OperationID, 1)
+		if err != nil {
+			return err
+		}
+		message, err = tx.Outbox().GetOutbox(ctx, dispatch.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after.State != application.AttemptDispatching || after.Version != before.Version || attempt.State != application.SubmissionAttemptLeased ||
+		message.State != application.OutboxLeased || message.LeaseToken != dispatch.LeaseToken || message.ExpectedVersion != dispatch.ExpectedVersion {
+		t.Fatalf("failed retry was not atomic: before=%+v after=%+v attempt=%+v message=%+v", before, after, attempt, message)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE outbox_messages SET leased_until=clock_timestamp()-interval '1 microsecond' WHERE id=$1`, dispatch.ID); err != nil {
+		t.Fatal(err)
+	}
+	err = store.Within(ctx, func(tx application.UnitOfWork) error {
+		attempt, err := tx.SubmissionAttempts().GetSubmissionAttempt(ctx, command.OperationID, 1)
+		if err != nil {
+			return err
+		}
+		attempt.State = application.SubmissionAttemptPending
+		attempt.ClaimedAt = time.Time{}
+		if err := tx.SubmissionAttempts().SaveSubmissionAttempt(ctx, attempt, application.SubmissionAttemptLeased); err != nil {
+			return err
+		}
+		execution, err := tx.Executions().GetExecution(ctx, command.OperationID)
+		if err != nil {
+			return err
+		}
+		execution.State = application.AttemptPending
+		if err := tx.Executions().SaveExecution(ctx, execution, execution.Version); err != nil {
+			return err
+		}
+		return tx.Outbox().RetryExpiredDispatchOutbox(ctx, dispatch.ID, dispatch.LeaseToken, execution.Version, 0, "deliberate expired mismatch")
+	})
+	if !errors.Is(err, application.ErrConcurrencyConflict) {
+		t.Fatalf("RetryExpiredDispatchOutbox error = %v, want ErrConcurrencyConflict", err)
+	}
+	after = getExecution(t, store, command.OperationID)
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		var err error
+		attempt, err = tx.SubmissionAttempts().GetSubmissionAttempt(ctx, command.OperationID, 1)
+		if err != nil {
+			return err
+		}
+		message, err = tx.Outbox().GetOutbox(ctx, dispatch.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after.State != application.AttemptDispatching || after.Version != before.Version || attempt.State != application.SubmissionAttemptLeased ||
+		message.State != application.OutboxLeased || message.LeaseToken != dispatch.LeaseToken || message.ExpectedVersion != dispatch.ExpectedVersion {
+		t.Fatalf("failed expired retry was not atomic: before=%+v after=%+v attempt=%+v message=%+v", before, after, attempt, message)
+	}
+}
+
 func TestPostgresConcurrentUpdateDeleteLeavesOneActiveOperation(t *testing.T) {
 	pool, cleanup := migratedPool(t)
 	defer cleanup()
@@ -1040,6 +1216,29 @@ func drainWorker(t *testing.T, instance *worker.Worker) {
 type postgresRecoveryProvider struct {
 	mu          sync.Mutex
 	submissions int
+}
+
+type postgresNotAttemptedOnceProvider struct{ calls int }
+
+func (*postgresNotAttemptedOnceProvider) Capabilities() []provisioning.ProvisionerCapability {
+	return nil
+}
+
+func (p *postgresNotAttemptedOnceProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	p.calls++
+	if p.calls == 1 {
+		return provisioning.Submission{}, provisioning.SubmissionNotAttemptedError{Failure: provisioning.ExecutionFailure{
+			Kind: provisioning.FailureTimeout, Reason: "StartupTimeout", Message: "execution did not start",
+		}}
+	}
+	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
+		Execution: &provisioning.Execution{State: provisioning.ExecutionStateSucceeded}, Resource: provisioning.ResourceObservation{
+			Presence: provisioning.ResourcePresencePresent, Readiness: provisioning.ResourceReadinessReady, Drift: provisioning.ResourceDriftInSync,
+		}}}, nil
+}
+
+func (*postgresNotAttemptedOnceProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, errors.New("unexpected Observe")
 }
 
 type postgresBlockingProvider struct {

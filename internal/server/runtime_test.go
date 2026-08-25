@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -134,4 +135,155 @@ func TestComposeRejectsIncompleteConfiguration(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestComposeRoutesNewResourcesByTypeAndKeepsPersistedResolutionExact(t *testing.T) {
+	store := appfake.NewStore()
+	routedType := provisioningfake.ResourceType()
+	fallbackType := domain.ResourceTypeRef{Name: "FallbackResource", Version: "v1"}
+	fallbackDomain, err := domain.NewResourceType(fallbackType, "fallback runtime test type", []domain.Capability{domain.CapabilityCreate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := runtimeCatalog(t)
+	catalog.Types[fallbackType] = fallbackDomain
+	defaultRef := application.ProvisionerRef("pulumi-default")
+	routedRef := application.ProvisionerRef("opentofu-private")
+	defaultProvider := &capabilityProvisioner{capabilities: []provisioning.ProvisionerCapability{{ResourceType: fallbackType, Capability: domain.CapabilityCreate}}}
+	routedProvider := &capabilityProvisioner{capabilities: []provisioning.ProvisionerCapability{
+		{ResourceType: routedType, Capability: domain.CapabilityCreate},
+		{ResourceType: routedType, Capability: domain.CapabilityUpdate},
+		{ResourceType: routedType, Capability: domain.CapabilityDelete},
+	}}
+	composed, err := Compose(Config{
+		Transactions: store, Catalog: catalog,
+		Provisioners: map[application.ProvisionerRef]provisioning.Provisioner{
+			defaultRef: defaultProvider,
+			routedRef:  routedProvider,
+		},
+		DefaultProvisionerRef: defaultRef,
+		ResourceTypeProvisionerRefs: map[domain.ResourceTypeRef]application.ProvisionerRef{
+			routedType: routedRef,
+		},
+		InsecureAuth: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for index, resourceType := range []domain.ResourceTypeRef{routedType, fallbackType} {
+		spec, specErr := domain.NewResourceSpec(map[string]any{"index": int64(index)})
+		if specErr != nil {
+			t.Fatal(specErr)
+		}
+		suffix := strconv.Itoa(index + 1)
+		id := domain.ResourceID("routed-resource-" + suffix)
+		_, createErr := composed.Service().CreateResource(context.Background(), application.CreateResourceCommand{
+			Actor: appfake.Principal("tester"), ID: id, Type: resourceType,
+			Owner: domain.OwnerRef{Kind: "team", ID: "platform"}, Spec: spec,
+			OperationID: domain.OperationID("operation-" + suffix),
+			EventID:     domain.EventID("event-" + suffix), RequestedAt: time.Now().UTC(),
+			IdempotencyKey: "routing-" + suffix,
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		want := defaultRef
+		if resourceType == routedType {
+			want = routedRef
+		}
+		if err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
+			record, getErr := tx.Resources().GetResource(context.Background(), id)
+			if getErr == nil && record.ProvisionerRef != want {
+				t.Fatalf("resource %s provisioner = %q, want %q", id, record.ProvisionerRef, want)
+			}
+			return getErr
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	resolver := staticResolver{providers: map[application.ProvisionerRef]provisioning.Provisioner{
+		defaultRef: defaultProvider,
+		routedRef:  routedProvider,
+	}}
+	resolved, err := resolver.Resolve(context.Background(), routedRef)
+	if err != nil || resolved != routedProvider {
+		t.Fatalf("persisted routed ref resolution = %T, %v", resolved, err)
+	}
+}
+
+func TestComposeRejectsInvalidPrivateRoutes(t *testing.T) {
+	resourceType := provisioningfake.ResourceType()
+	defaultRef := application.ProvisionerRef("default")
+	routedRef := application.ProvisionerRef("routed")
+	base := Config{
+		Transactions: appfake.NewStore(), Catalog: runtimeCatalog(t),
+		Provisioners: map[application.ProvisionerRef]provisioning.Provisioner{
+			defaultRef: provisioningfake.New(provisioningfake.ModeSynchronous),
+			routedRef: &capabilityProvisioner{capabilities: []provisioning.ProvisionerCapability{
+				{ResourceType: resourceType, Capability: domain.CapabilityCreate},
+			}},
+		},
+		DefaultProvisionerRef:       defaultRef,
+		ResourceTypeProvisionerRefs: map[domain.ResourceTypeRef]application.ProvisionerRef{resourceType: routedRef},
+		InsecureAuth:                true,
+	}
+	tests := []struct {
+		name   string
+		mutate func(Config) Config
+	}{
+		{name: "unregistered ref", mutate: func(config Config) Config {
+			config.ResourceTypeProvisionerRefs = map[domain.ResourceTypeRef]application.ProvisionerRef{resourceType: "missing"}
+			return config
+		}},
+		{name: "unregistered resource type", mutate: func(config Config) Config {
+			config.ResourceTypeProvisionerRefs = map[domain.ResourceTypeRef]application.ProvisionerRef{{Name: "Missing", Version: "v1"}: routedRef}
+			return config
+		}},
+		{name: "missing create declaration", mutate: func(config Config) Config {
+			config.Provisioners = cloneProvisioners(config.Provisioners)
+			config.Provisioners[routedRef] = &capabilityProvisioner{capabilities: []provisioning.ProvisionerCapability{{ResourceType: resourceType, Capability: domain.CapabilityUpdate}}}
+			return config
+		}},
+		{name: "capability outside contract", mutate: func(config Config) Config {
+			config.Provisioners = cloneProvisioners(config.Provisioners)
+			config.Provisioners[routedRef] = &capabilityProvisioner{capabilities: []provisioning.ProvisionerCapability{
+				{ResourceType: resourceType, Capability: domain.CapabilityCreate},
+				{ResourceType: resourceType, Capability: domain.Capability("rotate")},
+			}}
+			return config
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Compose(test.mutate(base)); err == nil {
+				t.Fatal("invalid private route was accepted")
+			}
+		})
+	}
+}
+
+type capabilityProvisioner struct {
+	capabilities []provisioning.ProvisionerCapability
+}
+
+func (p *capabilityProvisioner) Capabilities() []provisioning.ProvisionerCapability {
+	return append([]provisioning.ProvisionerCapability(nil), p.capabilities...)
+}
+
+func (*capabilityProvisioner) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
+	return provisioning.Submission{}, nil
+}
+
+func (*capabilityProvisioner) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
+	return provisioning.ExecutionObservation{}, nil
+}
+
+func cloneProvisioners(source map[application.ProvisionerRef]provisioning.Provisioner) map[application.ProvisionerRef]provisioning.Provisioner {
+	cloned := make(map[application.ProvisionerRef]provisioning.Provisioner, len(source))
+	for ref, provider := range source {
+		cloned[ref] = provider
+	}
+	return cloned
 }

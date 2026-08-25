@@ -26,7 +26,10 @@ jobs:
     env:
       LIFTR_TEST_DATABASE_URL: postgres://postgres:liftr@localhost:5432/liftr?sslmode=disable
       LIFTR_TEST_PULUMI_ROOT: /home/runner/.pulumi
+      LIFTR_TEST_OPENTOFU_ROOT: /home/runner/.opentofu
+      LIFTR_TEST_OPENTOFU_BIN: /home/runner/.opentofu/bin/tofu
       PULUMI_VERSION: 3.257.0
+      OPENTOFU_VERSION: 1.12.6
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -48,6 +51,17 @@ jobs:
           tar --extract --gzip --file "$archive" --directory "$LIFTR_TEST_PULUMI_ROOT/bin" --strip-components=1
           "$LIFTR_TEST_PULUMI_ROOT/bin/pulumi" version
 
+      - name: Install pinned OpenTofu CLI
+        run: |
+          archive="$RUNNER_TEMP/tofu.zip"
+          curl --fail --silent --show-error --location \
+            "https://github.com/opentofu/opentofu/releases/download/v${OPENTOFU_VERSION}/tofu_${OPENTOFU_VERSION}_linux_amd64.zip" \
+            --output "$archive"
+          echo "5dc43da4f750f33873dc25e94587128709e819e544b7be9016b255316153c3a8  $archive" | sha256sum --check
+          mkdir -p "$LIFTR_TEST_OPENTOFU_ROOT/bin"
+          unzip -q "$archive" -d "$LIFTR_TEST_OPENTOFU_ROOT/bin"
+          "$LIFTR_TEST_OPENTOFU_BIN" version -json
+
       - name: Check formatting
         run: test -z "$(gofmt -l $(git ls-files '*.go'))"
 
@@ -56,6 +70,9 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+      - name: Run real OpenTofu L2 tests
+        run: make test-opentofu
 
       - name: Run race detector
         run: go test -race ./...

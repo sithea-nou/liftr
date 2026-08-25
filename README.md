@@ -36,11 +36,31 @@ Liftr is in early development. The repository currently implements:
 - Resource-scoped Operation history and explicit failed-Operation retry ([ADR-0014](docs/adr/0014-operation-history-and-explicit-retry.md)): `GET /v1/resources/{id}/operations` provides stable cursor pagination with no global list, and `POST /v1/operations/{id}/retry` admits a new exact-generation child Operation under independent `resource:retry` authorization. Retry provenance is public as optional `retryOf`; insertion sequence, Events, attempts, mappings, and phases remain private. Output-only repair observes an explicitly compatible mapping against the source attempt without resubmitting infrastructure.
 - Production observability ([ADR-0018](docs/adr/0018-production-observability-and-operational-diagnostics.md)): structured request/admission/worker logs correlated by server-minted request IDs and sanitized caller correlation IDs; OpenTelemetry metrics with standard HTTP semantic conventions plus a Liftr-namespaced lifecycle/worker/outbox/provisioner surface, exported via an opt-in Prometheus listener (`LIFTR_METRICS_ADDR`) and optional OTLP/gRPC push through the standard `OTEL_*` variables (M17 supports OTLP/gRPC only; other protocols fail startup clearly); minimal boundary tracing that stays inert unless OTLP is configured; typed authentication failure diagnostics behind one unchanged public 401; low-cardinality labels enforced by architecture tests; an operational sampler exposing cluster-global backlog, active-Operation age, and honest long-running / reconciliation-silence stuck-candidate gauges (diagnostic only — never lifecycle state); commitment-aware panic recovery for HTTP and per-work recovery for workers with lease-preserving ambiguity; readiness gated only on the control-plane core (PostgreSQL usable, schema verified at boot, not draining); and an ordered graceful shutdown that preserves M6/M14 ambiguity safety. Telemetry never participates in lifecycle decisions and exporter failures never affect requests. Operational guidance lives in [docs/runbook.md](docs/runbook.md).
 - Platform policy and transactional admission quotas ([ADR-0019](docs/adr/0019-platform-policy-and-transactional-admission-quotas.md)): `LIFTR_POLICY_FILE` strictly compiles one immutable startup revision supporting restrictive create/update capability denials and per-owner retained-Resource limits. Quota-bearing creates serialize by owner in PostgreSQL before Resource/Operation locks, count every non-Deleted state, fail closed on corrupt missing status, and persist the admitting revision as private typed Event provenance. Authorization remains before replay; successful replays bypass changed policy. Public clients receive only stable `POLICY_DENIED` or `QUOTA_EXCEEDED` Problems.
+- A stateful OpenTofu CLI adapter package and PostgreSQL evidence foundation
+  ([ADR-0020](docs/adr/0020-stateful-opentofu-cli-provisioning.md)), scoped
+  exactly to OpenTofu 1.12.6. It implements fenced attempt/state correlation,
+  one stable backend state key, normal saved-plan apply for
+  create/update/delete, and bounded private all-root-output metadata handling
+  that enforces `sensitive=false`, immediately discards unmapped values, and
+  never logs output data. It also implements Unix process-tree cancellation,
+  disposable per-call scratch workdirs, and quarantine. Production requires an
+  operator-supplied conformant HTTPS HTTP
+  state backend where OpenTofu owns GET/update/LOCK/UNLOCK and lock-ID
+  propagation; the local backend and test HTTP backend are
+  development/test-only. Production server composition is optional through one
+  strict, immutable operator-supplied `LIFTR_OPENTOFU_CONFIG_FILE`. That file
+  retains immutable historical registrations separately from the current routes
+  used for new Resources; no production cloud program or backend registration is
+  shipped. Qualification is complete
+  against a real official OpenTofu 1.12.6 binary and the conformant test HTTP
+  backend, while qualification of each production HTTPS HTTP backend remains
+  the operator's responsibility. The public API is unchanged. Terraform has no
+  selected version or support claim.
 - Initial tests and continuous integration.
 
 ## Future Direction
 
-Liftr implements one reference implementation, not generic multi-cloud PostgreSQL support. Secret references (opaque, non-bearer, externally backed) are defined in ADR-0011 but not yet implemented: administrator credentials are generated privately inside the Pulumi secret dataflow and have no retrieval or resolution path. Drift detection, independent readiness verification, credential retrieval and rotation, multi-cloud implementations, Terraform/OpenTofu and Crossplane adapters, multi-issuer federation, and secret resolution remain future work. The API requires RFC 9068 JWT access-token authentication with owner-based authorization (ADR-0012): the full runtime refuses to start without issuer configuration, and `LIFTR_AUTH_MODE=insecure` is an explicit, loudly-warned development opt-in only. The target architecture is described in [docs/architecture.md](docs/architecture.md), and the decisions that shape future work are recorded in [docs/adr](docs/adr).
+Liftr implements one reference implementation, not generic multi-cloud PostgreSQL support. Secret references (opaque, non-bearer, externally backed) are defined in ADR-0011 but not yet implemented: administrator credentials are generated privately inside the Pulumi secret dataflow and have no retrieval or resolution path. Drift detection, independent readiness verification, credential retrieval and rotation, multi-cloud implementations, shipped production OpenTofu cloud registrations, conditional Terraform compatibility, multi-issuer federation, and secret resolution remain future work. The API requires RFC 9068 JWT access-token authentication with owner-based authorization (ADR-0012): the full runtime refuses to start without issuer configuration, and `LIFTR_AUTH_MODE=insecure` is an explicit, loudly-warned development opt-in only. The target architecture is described in [docs/architecture.md](docs/architecture.md), and the decisions that shape future work are recorded in [docs/adr](docs/adr).
 
 ## Getting Started
 
@@ -49,6 +69,13 @@ Requirements:
 - Go 1.25.11 or newer.
 - PostgreSQL 17 for persistence integration tests.
 - Pulumi CLI 3.257.0 for Pulumi adapter integration tests.
+
+OpenTofu is not required unless `LIFTR_OPENTOFU_CONFIG_FILE` is set. M19
+qualification has run with a real official OpenTofu CLI at exactly 1.12.6 and
+the conformant test HTTP backend. That is not qualification evidence for an
+operator's production HTTPS HTTP state backend; operators must qualify their
+own backend and keep every bound provisioner ref plus executable, source,
+program, and backend identity present and immutable while existing Resources use it.
 
 Run the server:
 

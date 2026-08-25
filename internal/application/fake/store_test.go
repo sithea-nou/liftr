@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/application/fake"
@@ -49,6 +50,47 @@ func TestExecutionOutputMappingBindsOnce(t *testing.T) {
 		if !errors.Is(err, application.ErrConcurrencyConflict) {
 			t.Fatalf("mapping replacement %q error = %v", replacement, err)
 		}
+	}
+}
+
+func TestDispatchRetryRequiresCurrentExecutionVersion(t *testing.T) {
+	ctx := context.Background()
+	store := fake.NewStore()
+	execution := application.ProvisioningExecutionRecord{
+		OperationID: "retry-op", ResourceID: "resource", ResourceType: domain.ResourceTypeRef{Name: "Type", Version: "v1"},
+		Capability: domain.CapabilityCreate, TargetGeneration: 1, State: application.AttemptDispatching, Version: 1,
+	}
+	message := application.DispatchMessage(execution.OperationID, 1, execution.Version)
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		if err := tx.Executions().CreateExecution(ctx, execution); err != nil {
+			return err
+		}
+		return tx.Outbox().Enqueue(ctx, message)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var claimed application.OutboxMessage
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		var found bool
+		var err error
+		claimed, found, err = tx.Outbox().ClaimOutbox(ctx, "token", time.Millisecond)
+		if err == nil && !found {
+			return errors.New("dispatch was not claimed")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		return tx.Outbox().RetryDispatchOutbox(ctx, claimed.ID, claimed.LeaseToken, execution.Version+1, 0, "mismatch")
+	}); !errors.Is(err, application.ErrConcurrencyConflict) {
+		t.Fatalf("active retry mismatch error=%v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
+		return tx.Outbox().RetryExpiredDispatchOutbox(ctx, claimed.ID, claimed.LeaseToken, execution.Version+1, 0, "mismatch")
+	}); !errors.Is(err, application.ErrConcurrencyConflict) {
+		t.Fatalf("expired retry mismatch error=%v", err)
 	}
 }
 
