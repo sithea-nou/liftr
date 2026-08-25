@@ -1,18 +1,19 @@
 # Liftr Operational Runbook
 
-This runbook assumes M17/M18 signals: structured JSON logs, the Prometheus
-endpoint on `LIFTR_METRICS_ADDR`, `/healthz` (liveness) and `/readyz`
-(control-plane core readiness). Metric names follow the pinned OTel SDK
-version; see the metric help strings for cluster-global vs per-process
-semantics.
+This runbook assumes M17-M20 signals: structured JSON logs, the Prometheus
+endpoint on `LIFTR_METRICS_ADDR`, `/healthz` (liveness), `/readyz`
+(control-plane core readiness), and the optional separate operator listener.
+Metric names follow the pinned OTel SDK version; see the metric help strings
+for cluster-global vs per-process semantics.
 
 ## Safety rules — read first
 
 1. **Never casually mutate database state.** Durable rows are the only source
    of lifecycle truth; outbox terminal rows are immutable by trigger.
-2. **Never delete Operation, Event, execution, or outbox rows.** There is no
-   redrive in M17; quarantined (`Dead`) work stays until an approved redrive
-   milestone exists.
+2. **Never delete Operation, Event, execution, or outbox rows, and never revive
+   a `Dead` row.** M20 recovery is narrowly safe: it creates one fresh work row
+   from current locked durable state through the admin API. It is not a general
+   redrive and never replays a Dead payload or creates a replacement Dispatch.
 3. **Never force-conclude ambiguous infrastructure work.** A Dispatch whose
    outcome reached the provider may be genuinely applied even if Liftr never
    learned so. Recovery always routes through Observe.
@@ -78,7 +79,9 @@ Runbook actions, in order:
 2. Read its public history (`GET /v1/resources/{id}/operations`) and Events.
 3. Check the relevant provisioner section below.
 4. If the developer wants a clean slate for a FAILED operation, explicit
-   retry (`POST /v1/operations/{id}/retry`) remains the only sanctioned path.
+   retry (`POST /v1/operations/{id}/retry`) remains the only sanctioned
+   developer retry path. Operator observation and dead-work recovery do not
+   create a lifecycle retry.
 5. Never mark anything Failed by hand; never delete the Operation.
 
 ## 5. Repeated ambiguous submissions
@@ -152,12 +155,14 @@ ResourceType contract — never edit persisted mappings.
 
 ## 10. Safe restart / shutdown expectations
 
-Sequence on SIGTERM: readiness flips 503 → HTTP drains (10s) → metrics
-listener stops → worker canceled and awaited (10s) → telemetry flushed → DB
-closed. In-flight Submits that get canceled remain durably ambiguous and
-recover via lease expiry + Observe after restart — expect (and ignore)
-transient `lease_lost`/Unknown entries around the restart window. Telemetry
-flush failures never affect lifecycle outcomes.
+Sequence on SIGTERM: public and admin readiness flip 503, with admin reporting
+`ADMIN_DRAINING` → public and admin HTTP drain (10s) → metrics listener stops
+→ worker canceled and awaited (10s) → telemetry flushed → DB closed. In-flight
+Submits that get canceled remain durably ambiguous and recover via lease expiry
++ Observe after restart — expect (and ignore) transient `lease_lost`/Unknown
+entries around the restart window. Telemetry flush failures never affect
+lifecycle outcomes. PostgreSQL must remain available until both HTTP listeners
+and the worker have stopped.
 
 ## 11. Platform policy and quota admission
 
@@ -301,6 +306,164 @@ the mapped envelope can be required to have `sensitive=false`. Unmapped values
 are discarded immediately. Never log or copy output names, output values, raw
 state, plans, stdout, or stderr into tickets, Events, metrics, or public API
 fields.
+
+## 13. Operator diagnostics and safe recovery
+
+The M20 operator API is an optional, separate control plane. It is disabled
+unless `LIFTR_ADMIN_ADDR` is set, requires `LIFTR_DATABASE_URL` and the full
+durable runtime, and is never composed in health-only mode. Its router contains
+only `/admin/v1` routes plus unauthenticated `/healthz` and `/readyz`; it does
+not appear on the public listener, and public `/v1` routes do not appear on the
+admin listener. Restrict the admin address at the network layer in addition to
+using bearer authentication.
+
+### Secured configuration
+
+An enabled secured listener requires a distinct audience and a strict static
+grants file:
+
+```sh
+LIFTR_ADMIN_ADDR=127.0.0.1:8082
+LIFTR_ADMIN_AUTH_AUDIENCE=https://liftr.example/operator
+LIFTR_ADMIN_AUTH_GRANTS_FILE=/etc/liftr/operator-grants.json
+```
+
+`LIFTR_ADMIN_AUTH_ISSUER` defaults to `LIFTR_AUTH_ISSUER`.
+`LIFTR_ADMIN_AUTH_ALGORITHMS` and `LIFTR_ADMIN_AUTH_KIND_CLAIM` likewise
+default to their public-listener settings. The admin audience must differ from
+`LIFTR_AUTH_AUDIENCE`. Audience checks use membership semantics: an explicitly
+issued dual-audience token may authenticate on both listeners, but public owner
+authorization and operator grants are still independent.
+
+The grants file is deny-by-default and is read strictly at startup:
+
+```json
+{
+  "subjects": {
+    "on-call-subject": [
+      "operator:diagnostics:read",
+      "operator:observation:trigger",
+      "operator:work:recover"
+    ]
+  }
+}
+```
+
+Unknown fields or permissions, duplicate permissions, empty grants, and
+non-canonical subjects fail startup. M20 grants subjects, not groups. Protect
+the file as security policy and roll processes to change it; do not assume a
+hot reload. `LIFTR_AUTH_MODE=insecure` is development-only and makes both the
+public and admin listeners insecure and allow-all. There is no independently
+insecure admin switch and no secure fallback from incomplete configuration.
+
+Probe the admin listener itself during rollout. `/healthz` proves listener
+liveness only. `/readyz` also checks durable operator state and returns
+`PERSISTENCE_UNAVAILABLE` when PostgreSQL cannot be reached or
+`ADMIN_DRAINING` during shutdown.
+
+### Finding and diagnosing a candidate
+
+Candidate listing is deliberately deferred. There is no admin list, search,
+or recovery-candidate endpoint in M20. Obtain IDs from bounded sampler WARN
+logs and existing metrics, then correlate Resource and Operation IDs through
+public history when authorized. Metrics identify a class of candidate; they do
+not contain IDs. This is a scope limitation, not an undocumented listing API.
+
+Use the target-specific diagnostic:
+
+```sh
+curl -i \
+  -H "Authorization: Bearer $LIFTR_OPERATOR_TOKEN" \
+  "$LIFTR_ADMIN_URL/admin/v1/operations/$OPERATION_ID/diagnostics"
+
+curl -i \
+  -H "Authorization: Bearer $LIFTR_OPERATOR_TOKEN" \
+  "$LIFTR_ADMIN_URL/admin/v1/resources/$RESOURCE_ID/diagnostics"
+
+curl -i \
+  -H "Authorization: Bearer $LIFTR_OPERATOR_TOKEN" \
+  "$LIFTR_ADMIN_URL/admin/v1/work/$WORK_ID/diagnostics"
+```
+
+Diagnostics require `operator:diagnostics:read`, carry
+`Cache-Control: no-store`, and return a quoted strong `ETag`. Inspect the
+bounded `recovery.state`, `recovery.reasons`, and `recovery.allowedActions`
+along with current lifecycle/work state and registration availability. A
+Resource response may contain the desired-state SHA-256 and, for OpenTofu, only
+a bounded private state digest prefix. Treat provisioner refs, state keys, and
+other private identifiers as restricted operator data.
+
+The response never includes raw ResourceSpec, output or secret values, provider
+diagnostics, outbox payload or last-error text, handles, state bytes, state
+lineage values, full private state digests, credentials, tokens, or idempotency
+keys. Do not seek those values in logs or copy private state/quarantine into a
+ticket.
+
+### Requesting an allowed action
+
+Every mutation requires an empty body, a non-blank `Idempotency-Key` of at most
+200 bytes, and the corresponding permission. Supplying the diagnostic ETag as
+`If-Match` is recommended:
+
+```sh
+curl -i -X POST \
+  -H "Authorization: Bearer $LIFTR_OPERATOR_TOKEN" \
+  -H "Idempotency-Key: incident-2026-08-25-observe-1" \
+  -H 'If-Match: "diag_v1_..."' \
+  "$LIFTR_ADMIN_URL/admin/v1/operations/$OPERATION_ID/observe"
+```
+
+Use `/admin/v1/resources/{id}/observe` for a Resource PassiveObserve and
+`/admin/v1/work/{id}/recover` for Dead work. A first acceptance returns `202`
+with `result: applied`, one `operatorActionId`, and one `createdWorkId`. A
+same-principal retry with the same key returns the original IDs, reports
+`result: replayed`, and adds `Idempotency-Replayed: true`; it creates no audit
+or work. A rejected request does not bind its key. Never put credentials,
+tokens, specs, or incident secrets in an idempotency key.
+
+An ETag is stale-decision assistance, not authorization. Liftr authorizes
+before lookup and again in the transaction, locks and reloads current durable
+state, and reruns the pure RecoveryPlanner even without `If-Match`. On
+`DIAGNOSTIC_STALE`, read diagnostics again and reassess; do not simply remove
+the precondition. On `OPERATOR_FORBIDDEN`, correct the grants rollout rather
+than borrowing a developer token or editing data.
+
+The safe mappings are deliberately narrow:
+
+| Request | Accepted only when | New work |
+| --- | --- | --- |
+| Operation observe | Active observable execution, no active Observe, registration available | `Observe` |
+| Resource observe | Current Resource is not Deleted, no active Operation/equivalent work, registration available | `PassiveObserve` |
+| Recover Dead Dispatch | Current execution is safely observable and no equivalent chain is active | `Observe`, never `Dispatch` |
+| Recover Dead Observe | Current execution remains observable and no Observe is active | `Observe` |
+| Recover Dead PassiveObserve | Current Resource is not Deleted and no equivalent work is active | `PassiveObserve` |
+| Recover Dead Drive | Current Operation is active and no Drive is active | `Drive` rebuilt from current state with `{}` payload |
+
+Terminal/superseded targets, equivalent active work, absent execution or
+registration, pre-submit Dead Dispatch without observable evidence, and unsafe
+ambiguity are refused. `ACTION_NOT_APPLICABLE` means the action has no safe
+meaning for current state; `RECOVERY_ALREADY_ACTIVE` means existing work owns
+it; `RECOVERY_UNSAFE` requires investigation rather than force. The API has no
+force, generic retry, cancel, terminal override, state edit, or provider call
+inside its admission transaction.
+
+Never mutate PostgreSQL to make an assessment pass, set a Dead row back to
+Pending, edit/delete its payload, invent a lease, or manually create Dispatch.
+The immutable Dead row is evidence. Accepted recovery writes a new row and an
+immutable `operator_actions` audit row; `source_work_id` exists only for
+dead-work recovery and `created_work_id` references the one new outbox row.
+
+### Operator signals
+
+- `liftr_operator_requests_total` uses only bounded action and result labels.
+- `liftr_operator_recoveries_total` uses only bounded source recovery kind and
+  result labels.
+
+Neither metric carries IDs, principals, provisioner refs, diagnostic revisions,
+or free-form errors. Use the accepted-action log and immutable audit for
+provenance; logs never contain the raw idempotency key. An increase in
+`unsafe`, `not_applicable`, `conflict`, or `stale` is a prompt to reread current
+diagnostics, not to bypass the planner.
 
 ## Alerting cookbook (examples, not product)
 

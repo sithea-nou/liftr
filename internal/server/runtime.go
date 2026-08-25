@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	apiadmin "github.com/sithea-nou/liftr/internal/api/admin"
 	apihttp "github.com/sithea-nou/liftr/internal/api/http"
 	"github.com/sithea-nou/liftr/internal/application"
 	"github.com/sithea-nou/liftr/internal/auth"
@@ -26,6 +27,7 @@ import (
 // that drives provisioning work.
 type Runtime struct {
 	handler        http.Handler
+	adminHandler   http.Handler
 	service        *application.Service
 	worker         *worker.Worker
 	logger         *slog.Logger
@@ -79,6 +81,23 @@ type AuthConfig struct {
 	HTTPClient *http.Client
 }
 
+// AdminAuthConfig carries the separate operator-plane verifier and
+// authorization configuration. Required-audience separation means ordinary
+// API-only and operator-only tokens fail on the opposite listener; a
+// deliberately dual-audience token may authenticate to both, but the two
+// independent authorizers still grant permissions separately (ADR-0021).
+type AdminAuthConfig struct {
+	Issuer           string
+	Audience         string
+	Algorithms       []string
+	GrantsFile       string
+	KindClaim        string
+	Clock            func() time.Time
+	Skew             time.Duration
+	JWKSRefreshEvery time.Duration
+	HTTPClient       *http.Client
+}
+
 // Config carries the composition dependencies. Transactions must be durable
 // in production; tests may supply deterministic fakes. Authentication is
 // mandatory for the full runtime: either Auth is configured or InsecureAuth
@@ -116,6 +135,11 @@ type Config struct {
 	// Thresholds configures long-running and reconciliation-silence
 	// diagnostics.
 	Thresholds DiagnosticThresholds
+	// AdminAuth enables composition of the separate operator HTTP handler.
+	// Nil disables it. The process entrypoint only supplies it when
+	// LIFTR_ADMIN_ADDR is configured and durable PostgreSQL composition has
+	// already succeeded.
+	AdminAuth *AdminAuthConfig
 
 	// Auth configures secured JWT access-token authentication. Exactly one
 	// of Auth and InsecureAuth must be provided.
@@ -206,6 +230,11 @@ func Compose(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	adminAuthenticator, operatorAuthorizer, err := composeAdminAuth(config)
+	if err != nil {
+		return nil, err
+	}
+	service.OperatorAuthorizer = operatorAuthorizer
 	instance, err := worker.NewWithCatalog(transactions, staticResolver{providers: instrumented}, config.Catalog)
 	if err != nil {
 		return nil, err
@@ -217,7 +246,49 @@ func Compose(config Config) (*Runtime, error) {
 		thresholds: config.Thresholds, done: make(chan struct{})}
 	runtime.handler = apihttp.NewHandler(apihttp.Deps{Service: service, Auth: authenticator, Logger: logger,
 		Telemetry: config.Telemetry, Draining: runtime.IsDraining})
+	if config.AdminAuth != nil {
+		kinds := make(map[application.ProvisionerRef]string, len(config.ProvisionerKinds))
+		for ref, kind := range config.ProvisionerKinds {
+			kinds[ref] = string(kind)
+		}
+		runtime.adminHandler = apiadmin.NewHandler(apiadmin.Deps{
+			Service: service, Auth: adminAuthenticator, Logger: logger,
+			Telemetry: config.Telemetry, Draining: runtime.IsDraining, ProvisionerKinds: kinds,
+		})
+	}
 	return runtime, nil
+}
+
+func composeAdminAuth(config Config) (apiadmin.Authenticator, application.OperatorAuthorizer, error) {
+	if config.AdminAuth == nil {
+		return nil, nil, nil
+	}
+	if config.InsecureAuth {
+		return newInsecureAuthenticator(), allowAllOperatorAuthorizer{}, nil
+	}
+	if config.Auth == nil {
+		return nil, nil, fmt.Errorf("admin authentication requires secured developer authentication or explicit insecure mode")
+	}
+	if config.AdminAuth.Issuer == "" || config.AdminAuth.Audience == "" {
+		return nil, nil, fmt.Errorf("admin auth issuer and audience are required")
+	}
+	if config.Auth.Audience == config.AdminAuth.Audience {
+		return nil, nil, fmt.Errorf("admin auth audience must differ from developer API audience")
+	}
+	grants, err := auth.LoadOperatorGrants(config.AdminAuth.GrantsFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	authenticator, err := auth.NewOIDCAuthenticator(context.Background(), auth.Config{
+		Issuer: config.AdminAuth.Issuer, Audience: config.AdminAuth.Audience,
+		Algorithms: config.AdminAuth.Algorithms, KindClaim: config.AdminAuth.KindClaim,
+		ClockSkew: config.AdminAuth.Skew, JWKSRefreshEvery: config.AdminAuth.JWKSRefreshEvery,
+		HTTPClient: config.AdminAuth.HTTPClient, Observers: authObservers(config.Telemetry),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("compose admin OIDC authenticator: %w", err)
+	}
+	return authenticator, auth.StaticOperatorAuthorizer{Grants: grants}, nil
 }
 
 // IsDraining reports whether graceful shutdown has begun; readiness answers
@@ -293,6 +364,10 @@ func authObservers(tel *observability.Telemetry) auth.Observers {
 
 // Handler returns the composed HTTP surface.
 func (r *Runtime) Handler() http.Handler { return r.handler }
+
+// AdminHandler returns the separately composed operator surface, or nil when
+// the admin listener is disabled.
+func (r *Runtime) AdminHandler() http.Handler { return r.adminHandler }
 
 // Service exposes the composed application boundary.
 func (r *Runtime) Service() *application.Service { return r.service }

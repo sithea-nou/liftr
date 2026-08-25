@@ -25,6 +25,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -91,6 +92,11 @@ func main() {
 	stopWorker := func() {}
 	closeStore := func() {}
 	databaseURL := os.Getenv("LIFTR_DATABASE_URL")
+	adminAddr := os.Getenv("LIFTR_ADMIN_ADDR")
+	if adminAddr != "" && databaseURL == "" {
+		logger.Error("admin listener requires durable PostgreSQL composition", "error_class", "configuration")
+		os.Exit(1)
+	}
 	if databaseURL != "" {
 		runtime, close, composeErr := composeFullRuntime(context.Background(), logger, obsConfig, telemetry)
 		if composeErr != nil {
@@ -123,12 +129,18 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	var adminServer *http.Server
+	if adminAddr != "" {
+		adminServer = &http.Server{
+			Addr: adminAddr, Handler: composed.AdminHandler(), ReadHeaderTimeout: 5 * time.Second,
+		}
+	}
 	metricsServer := startMetricsListener(logger, telemetry.PrometheusRegistry, obsConfig.MetricsAddr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		logger.Info("server starting",
 			"address", addr,
@@ -137,6 +149,12 @@ func main() {
 		)
 		errCh <- httpServer.ListenAndServe()
 	}()
+	if adminServer != nil {
+		go func() {
+			logger.Info("admin server starting", "address", adminAddr, "service_version", version)
+			errCh <- adminServer.ListenAndServe()
+		}()
+	}
 
 	select {
 	case serveErr := <-errCh:
@@ -146,7 +164,7 @@ func main() {
 		}
 	case <-ctx.Done():
 		logger.Info("shutdown requested")
-		shutdownInOrder(httpServer, metricsServer, composed, stopWorker, telemetry, closeStore, logger)
+		shutdownInOrder(httpServer, adminServer, metricsServer, composed, stopWorker, telemetry, closeStore, logger)
 	}
 
 	if err := telemetry.Shutdown(context.Background()); err != nil {
@@ -165,16 +183,30 @@ func main() {
 //  6. PostgreSQL closes.
 //
 // Telemetry flush failure never alters persisted lifecycle outcomes.
-func shutdownInOrder(httpServer *http.Server, metricsServer *http.Server, draining interface{ SetDraining() }, stopWorker func(), telemetry *observability.Telemetry, closeStore func(), logger *slog.Logger) {
+func shutdownInOrder(httpServer, adminServer, metricsServer *http.Server, draining interface{ SetDraining() }, stopWorker func(), telemetry *observability.Telemetry, closeStore func(), logger *slog.Logger) {
 	if draining != nil {
 		draining.SetDraining()
 		logger.Info("readiness flipped to not-ready (draining)")
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown failed", "error", err, "error_class", "invariant")
+	var listeners sync.WaitGroup
+	shutdownListener := func(name string, server *http.Server) {
+		defer listeners.Done()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error(name+" graceful shutdown failed", "error", err, "error_class", "invariant")
+			if closeErr := server.Close(); closeErr != nil {
+				logger.Warn(name+" forced close failed", "error", closeErr, "error_class", "invariant")
+			}
+		}
 	}
+	listeners.Add(1)
+	go shutdownListener("public server", httpServer)
+	if adminServer != nil {
+		listeners.Add(1)
+		go shutdownListener("admin server", adminServer)
+	}
+	listeners.Wait()
 	if metricsServer != nil {
 		metricsCtx, metricsCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer metricsCancel()
@@ -259,6 +291,41 @@ func composeAuthConfig() (server.AuthConfig, bool, error) {
 	return config, false, nil
 }
 
+func composeAdminAuthConfig(apiAuth server.AuthConfig, insecure, enabled bool) (*server.AdminAuthConfig, error) {
+	if !enabled {
+		return nil, nil
+	}
+	if insecure {
+		return &server.AdminAuthConfig{}, nil
+	}
+	issuer := os.Getenv("LIFTR_ADMIN_AUTH_ISSUER")
+	if issuer == "" {
+		issuer = apiAuth.Issuer
+	}
+	audience := os.Getenv("LIFTR_ADMIN_AUTH_AUDIENCE")
+	if audience == "" {
+		return nil, fmt.Errorf("LIFTR_ADMIN_AUTH_AUDIENCE is required when LIFTR_ADMIN_ADDR is configured")
+	}
+	if audience == apiAuth.Audience {
+		return nil, fmt.Errorf("LIFTR_ADMIN_AUTH_AUDIENCE must differ from LIFTR_AUTH_AUDIENCE")
+	}
+	algorithms := apiAuth.Algorithms
+	if raw := os.Getenv("LIFTR_ADMIN_AUTH_ALGORITHMS"); raw != "" {
+		algorithms = strings.Split(raw, ",")
+		for i := range algorithms {
+			algorithms[i] = strings.TrimSpace(algorithms[i])
+		}
+	}
+	kindClaim := os.Getenv("LIFTR_ADMIN_AUTH_KIND_CLAIM")
+	if kindClaim == "" {
+		kindClaim = apiAuth.KindClaim
+	}
+	return &server.AdminAuthConfig{
+		Issuer: issuer, Audience: audience, Algorithms: algorithms,
+		KindClaim: kindClaim, GrantsFile: os.Getenv("LIFTR_ADMIN_AUTH_GRANTS_FILE"),
+	}, nil
+}
+
 // samplerReader adapts the PostgreSQL store onto the server's operational
 // reader port, mapping adapter types onto telemetry-neutral sample values.
 type samplerReader struct{ store *postgres.Store }
@@ -299,6 +366,10 @@ func (s samplerReader) SnapshotOperationalState(ctx context.Context, thresholds 
 // compatibility is verified before serving (ADR-0018).
 func composeFullRuntime(ctx context.Context, logger *slog.Logger, obsConfig observability.Config, telemetry *observability.Telemetry) (*server.Runtime, func(), error) {
 	authConfig, insecure, err := composeAuthConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	adminAuth, err := composeAdminAuthConfig(authConfig, insecure, os.Getenv("LIFTR_ADMIN_ADDR") != "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -377,6 +448,7 @@ func composeFullRuntime(ctx context.Context, logger *slog.Logger, obsConfig obse
 			SilentAfter:          obsConfig.ReconciliationSilentAfter,
 		},
 		Auth:         authConfigOrNil(authConfig, insecure),
+		AdminAuth:    adminAuth,
 		InsecureAuth: insecure,
 	})
 	if err != nil {

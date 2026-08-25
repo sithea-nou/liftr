@@ -5,6 +5,8 @@ package fake
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,19 +40,23 @@ type Store struct {
 	attempts              map[string]application.SubmissionAttemptRecord
 	outbox                map[string]application.OutboxMessage
 	outputs               map[domain.ResourceID]map[uint64]application.ResourceOutputRecord
+	operatorActions       map[string]application.OperatorActionRecord
+	operatorIdempotency   map[string]application.OperatorIdempotencyRecord
 }
 
 func NewStore() *Store {
 	return &Store{
-		resources:         make(map[domain.ResourceID]application.ResourceRecord),
-		resourceSequences: make(map[domain.ResourceID]uint64),
-		operations:        make(map[domain.OperationID]application.OperationRecord),
-		events:            make(map[domain.EventID]domain.Event),
-		executions:        make(map[domain.OperationID]application.ProvisioningExecutionRecord),
-		idempotency:       make(map[string]application.IdempotencyRecord),
-		attempts:          make(map[string]application.SubmissionAttemptRecord),
-		outbox:            make(map[string]application.OutboxMessage),
-		outputs:           make(map[domain.ResourceID]map[uint64]application.ResourceOutputRecord),
+		resources:           make(map[domain.ResourceID]application.ResourceRecord),
+		resourceSequences:   make(map[domain.ResourceID]uint64),
+		operations:          make(map[domain.OperationID]application.OperationRecord),
+		events:              make(map[domain.EventID]domain.Event),
+		executions:          make(map[domain.OperationID]application.ProvisioningExecutionRecord),
+		idempotency:         make(map[string]application.IdempotencyRecord),
+		attempts:            make(map[string]application.SubmissionAttemptRecord),
+		outbox:              make(map[string]application.OutboxMessage),
+		outputs:             make(map[domain.ResourceID]map[uint64]application.ResourceOutputRecord),
+		operatorActions:     make(map[string]application.OperatorActionRecord),
+		operatorIdempotency: make(map[string]application.OperatorIdempotencyRecord),
 	}
 }
 
@@ -69,6 +75,8 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 		attempts:              cloneMap(s.attempts),
 		outbox:                cloneMap(s.outbox),
 		outputs:               cloneOutputs(s.outputs),
+		operatorActions:       cloneOperatorActions(s.operatorActions),
+		operatorIdempotency:   cloneOperatorIdempotency(s.operatorIdempotency),
 	}
 	if err := fn(tx); err != nil {
 		// PostgreSQL identity sequences are non-transactional: allocated values
@@ -88,7 +96,28 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 	s.attempts = tx.attempts
 	s.outbox = tx.outbox
 	s.outputs = tx.outputs
+	s.operatorActions = tx.operatorActions
+	s.operatorIdempotency = tx.operatorIdempotency
 	return nil
+}
+
+func (s *Store) OperatorDiagnostics() application.OperatorDiagnosticRepository { return s }
+
+func (s *Store) StateIdentity(context.Context, domain.ResourceID) (application.StateIdentitySummary, bool, error) {
+	return application.StateIdentitySummary{}, false, nil
+}
+
+func (s *Store) SpecDigest(_ context.Context, resourceID domain.ResourceID) (string, bool, error) {
+	record, ok := s.resources[resourceID]
+	if !ok {
+		return "", false, nil
+	}
+	body, err := json.Marshal(record.Resource.Spec().Values())
+	if err != nil {
+		return "", false, err
+	}
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:]), true, nil
 }
 
 func cloneOutputs(source map[domain.ResourceID]map[uint64]application.ResourceOutputRecord) map[domain.ResourceID]map[uint64]application.ResourceOutputRecord {
@@ -176,17 +205,37 @@ func cloneMap[K comparable, V any](source map[K]V) map[K]V {
 	return cloned
 }
 
+func cloneOperatorActions(source map[string]application.OperatorActionRecord) map[string]application.OperatorActionRecord {
+	cloned := make(map[string]application.OperatorActionRecord, len(source))
+	for key, record := range source {
+		record.IdempotencyDigest = append([]byte(nil), record.IdempotencyDigest...)
+		cloned[key] = record
+	}
+	return cloned
+}
+
+func cloneOperatorIdempotency(source map[string]application.OperatorIdempotencyRecord) map[string]application.OperatorIdempotencyRecord {
+	cloned := make(map[string]application.OperatorIdempotencyRecord, len(source))
+	for key, record := range source {
+		record.Fingerprint = append([]byte(nil), record.Fingerprint...)
+		cloned[key] = record
+	}
+	return cloned
+}
+
 // RecordCounts reports how many records of each kind are stored. It exists
 // for tests that assert an admission produced no durable side effects.
 type RecordCounts struct {
-	Resources       int
-	Operations      int
-	Events          int
-	Executions      int
-	Idempotency     int
-	Attempts        int
-	Outbox          int
-	OutputSnapshots int
+	Resources           int
+	Operations          int
+	Events              int
+	Executions          int
+	Idempotency         int
+	Attempts            int
+	Outbox              int
+	OutputSnapshots     int
+	OperatorActions     int
+	OperatorIdempotency int
 }
 
 func (s *Store) RecordCounts() RecordCounts {
@@ -197,26 +246,30 @@ func (s *Store) RecordCounts() RecordCounts {
 		snapshots += len(generations)
 	}
 	return RecordCounts{
-		Resources:       len(s.resources),
-		Operations:      len(s.operations),
-		Events:          len(s.events),
-		Executions:      len(s.executions),
-		Idempotency:     len(s.idempotency),
-		Attempts:        len(s.attempts),
-		Outbox:          len(s.outbox),
-		OutputSnapshots: snapshots,
+		Resources:           len(s.resources),
+		Operations:          len(s.operations),
+		Events:              len(s.events),
+		Executions:          len(s.executions),
+		Idempotency:         len(s.idempotency),
+		Attempts:            len(s.attempts),
+		Outbox:              len(s.outbox),
+		OutputSnapshots:     snapshots,
+		OperatorActions:     len(s.operatorActions),
+		OperatorIdempotency: len(s.operatorIdempotency),
 	}
 }
 
-func (s *Store) Resources() application.ResourceRepository                   { return s }
-func (s *Store) Operations() application.OperationRepository                 { return s }
-func (s *Store) Events() application.EventRepository                         { return s }
-func (s *Store) Executions() application.ExecutionRepository                 { return s }
-func (s *Store) Idempotency() application.IdempotencyRepository              { return s }
-func (s *Store) SubmissionAttempts() application.SubmissionAttemptRepository { return s }
-func (s *Store) Outbox() application.OutboxRepository                        { return s }
-func (s *Store) Outputs() application.ResourceOutputRepository               { return s }
-func (s *Store) Quotas() application.QuotaRepository                         { return s }
+func (s *Store) Resources() application.ResourceRepository                      { return s }
+func (s *Store) Operations() application.OperationRepository                    { return s }
+func (s *Store) Events() application.EventRepository                            { return s }
+func (s *Store) Executions() application.ExecutionRepository                    { return s }
+func (s *Store) Idempotency() application.IdempotencyRepository                 { return s }
+func (s *Store) SubmissionAttempts() application.SubmissionAttemptRepository    { return s }
+func (s *Store) Outbox() application.OutboxRepository                           { return s }
+func (s *Store) Outputs() application.ResourceOutputRepository                  { return s }
+func (s *Store) Quotas() application.QuotaRepository                            { return s }
+func (s *Store) OperatorActions() application.OperatorAuditRepository           { return s }
+func (s *Store) OperatorIdempotency() application.OperatorIdempotencyRepository { return s }
 
 // SaveResourceOutputs is idempotent only for identical provenance and
 // content; contradictory evidence for the same resource/generation pair
@@ -646,6 +699,54 @@ func cloneIdempotency(record application.IdempotencyRecord) application.Idempote
 	return cloned
 }
 
+func (s *Store) GetOperatorAction(_ context.Context, id string) (application.OperatorActionRecord, error) {
+	record, ok := s.operatorActions[id]
+	if !ok {
+		return application.OperatorActionRecord{}, application.ErrResourceNotFound
+	}
+	record.IdempotencyDigest = append([]byte(nil), record.IdempotencyDigest...)
+	return record, nil
+}
+
+func (s *Store) InsertOperatorAction(_ context.Context, record application.OperatorActionRecord) error {
+	if _, exists := s.operatorActions[record.ID]; exists {
+		return application.ErrConcurrencyConflict
+	}
+	if _, exists := s.outbox[record.CreatedWorkID]; !exists {
+		return fmt.Errorf("%w: created operator work does not exist", application.ErrInvalidApplicationCall)
+	}
+	if record.SourceWorkID != "" {
+		if _, exists := s.outbox[record.SourceWorkID]; !exists {
+			return fmt.Errorf("%w: source operator work does not exist", application.ErrInvalidApplicationCall)
+		}
+	}
+	record.IdempotencyDigest = append([]byte(nil), record.IdempotencyDigest...)
+	s.operatorActions[record.ID] = record
+	return nil
+}
+
+func (s *Store) GetOperatorIdempotency(_ context.Context, scope, key string) (application.OperatorIdempotencyRecord, error) {
+	record, ok := s.operatorIdempotency[idempotencyMapKey(scope, key)]
+	if !ok {
+		return application.OperatorIdempotencyRecord{}, application.ErrOperatorIdempotencyNotFound
+	}
+	record.Fingerprint = append([]byte(nil), record.Fingerprint...)
+	return record, nil
+}
+
+func (s *Store) PutOperatorIdempotency(_ context.Context, record application.OperatorIdempotencyRecord) error {
+	mapKey := idempotencyMapKey(record.Scope, record.Key)
+	if _, exists := s.operatorIdempotency[mapKey]; exists {
+		return application.ErrConcurrencyConflict
+	}
+	if _, exists := s.operatorActions[record.OperatorActionID]; !exists {
+		return fmt.Errorf("%w: operator action does not exist", application.ErrInvalidApplicationCall)
+	}
+	record.Fingerprint = append([]byte(nil), record.Fingerprint...)
+	s.operatorIdempotency[mapKey] = record
+	return nil
+}
+
 func attemptKey(operationID domain.OperationID, attempt uint64) string {
 	return fmt.Sprintf("%s:%d", operationID, attempt)
 }
@@ -656,6 +757,20 @@ func (s *Store) GetSubmissionAttempt(_ context.Context, operationID domain.Opera
 		return application.SubmissionAttemptRecord{}, application.ErrResourceNotFound
 	}
 	return record, nil
+}
+
+func (s *Store) SummarizeSubmissionAttempts(_ context.Context, operationID domain.OperationID) (application.AttemptHistorySummary, error) {
+	summary := application.AttemptHistorySummary{}
+	for _, record := range s.attempts {
+		if record.OperationID != operationID {
+			continue
+		}
+		summary.Count++
+		if summary.Count == 1 || record.AttemptNumber > summary.Latest.AttemptNumber {
+			summary.Latest = record
+		}
+	}
+	return summary, nil
 }
 
 func (s *Store) CreateSubmissionAttempt(_ context.Context, record application.SubmissionAttemptRecord) error {
@@ -686,14 +801,26 @@ func (s *Store) SaveSubmissionAttempt(_ context.Context, record application.Subm
 }
 
 func (s *Store) Enqueue(_ context.Context, message application.OutboxMessage) error {
-	if _, exists := s.outbox[message.DedupeKey]; exists {
-		return nil
+	for _, existing := range s.outbox {
+		if existing.DedupeKey == message.DedupeKey {
+			return nil
+		}
+		if existing.Kind != message.Kind || (existing.State != application.OutboxPending && existing.State != application.OutboxLeased) {
+			continue
+		}
+		if message.OperationID != "" && existing.OperationID == message.OperationID ||
+			message.ResourceID != "" && existing.ResourceID == message.ResourceID {
+			return application.ErrConcurrencyConflict
+		}
 	}
 	if message.State == "" {
 		message.State = application.OutboxPending
 	}
 	if message.AvailableAt.IsZero() {
 		message.AvailableAt = time.Now().Add(message.Delay)
+	}
+	if message.CreatedAt.IsZero() {
+		message.CreatedAt = time.Now()
 	}
 	s.outbox[message.ID] = message
 	return nil
@@ -705,6 +832,34 @@ func (s *Store) GetOutbox(_ context.Context, id string) (application.OutboxMessa
 		return application.OutboxMessage{}, application.ErrResourceNotFound
 	}
 	return message, nil
+}
+
+func (s *Store) SummarizeWorkByOperation(_ context.Context, operationID domain.OperationID) (application.WorkHistorySummary, error) {
+	return s.summarizeWork(func(message application.OutboxMessage) bool { return message.OperationID == operationID }), nil
+}
+
+func (s *Store) SummarizeWorkByResource(_ context.Context, resourceID domain.ResourceID) (application.WorkHistorySummary, error) {
+	return s.summarizeWork(func(message application.OutboxMessage) bool { return message.ResourceID == resourceID }), nil
+}
+
+func (s *Store) summarizeWork(include func(application.OutboxMessage) bool) application.WorkHistorySummary {
+	summary := application.WorkHistorySummary{Counts: map[application.OutboxState]int{}}
+	for _, message := range s.outbox {
+		if !include(message) {
+			continue
+		}
+		summary.Counts[message.State]++
+		if message.State == application.OutboxPending || message.State == application.OutboxLeased {
+			summary.Active = append(summary.Active, message)
+		}
+	}
+	sort.Slice(summary.Active, func(i, j int) bool {
+		if summary.Active[i].CreatedAt.Equal(summary.Active[j].CreatedAt) {
+			return summary.Active[i].ID < summary.Active[j].ID
+		}
+		return summary.Active[i].CreatedAt.Before(summary.Active[j].CreatedAt)
+	})
+	return summary
 }
 
 func (s *Store) ClaimOutbox(_ context.Context, token string, lease time.Duration) (application.OutboxMessage, bool, error) {

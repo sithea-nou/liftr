@@ -32,8 +32,21 @@ type SubmissionAttemptRecord struct {
 	Failure         *provisioning.ExecutionFailure
 }
 
+// AttemptHistorySummary is the bounded current view of one Operation's
+// attempt history: an honest total plus only the newest record. Diagnostics
+// and recovery planning never require complete attempt collections
+// (ADR-0021).
+type AttemptHistorySummary struct {
+	Count  uint64
+	Latest SubmissionAttemptRecord // zero value when Count is zero
+}
+
 type SubmissionAttemptRepository interface {
 	GetSubmissionAttempt(context.Context, domain.OperationID, uint64) (SubmissionAttemptRecord, error)
+	// SummarizeSubmissionAttempts returns the total durable attempt count for
+	// one Operation together with its highest-numbered attempt, in one
+	// bounded query. It never loads the full collection.
+	SummarizeSubmissionAttempts(context.Context, domain.OperationID) (AttemptHistorySummary, error)
 	CreateSubmissionAttempt(context.Context, SubmissionAttemptRecord) error
 	SaveSubmissionAttempt(context.Context, SubmissionAttemptRecord, SubmissionAttemptState) error
 }
@@ -70,6 +83,7 @@ type OutboxMessage struct {
 	State           OutboxState
 	Delay           time.Duration
 	AvailableAt     time.Time
+	CreatedAt       time.Time
 	LeaseToken      string
 	LeasedUntil     time.Time
 	AttemptCount    int
@@ -77,9 +91,47 @@ type OutboxMessage struct {
 	TerminalReason  string
 }
 
+// WorkActiveLimit bounds the active set a repository returns per aggregate.
+// The durable schema admits at most one active row per kind via partial
+// unique indexes, so this cap is structurally unreachable today; summaries
+// expose an explicit truncation flag if that ever changes honestly.
+const WorkActiveLimit = 8
+
+// WorkHistorySummary is the bounded current view of one aggregate's outbox
+// work. Active holds every Pending/Leased message — structurally small, since
+// the schema admits at most one active row per kind — while Counts totals the
+// aggregate's complete history by state without loading it (ADR-0021).
+type WorkHistorySummary struct {
+	Active []OutboxMessage
+	Counts map[OutboxState]int
+}
+
+// HasActive reports whether any active row of the given kind exists.
+func (s WorkHistorySummary) HasActive(kind OutboxKind) bool {
+	return s.ActiveID(kind) != ""
+}
+
+// ActiveID returns the oldest active row ID of the given kind, or "".
+func (s WorkHistorySummary) ActiveID(kind OutboxKind) string {
+	for _, message := range s.Active {
+		if message.Kind == kind {
+			return message.ID
+		}
+	}
+	return ""
+}
+
 type OutboxRepository interface {
 	Enqueue(context.Context, OutboxMessage) error
 	GetOutbox(context.Context, string) (OutboxMessage, error)
+	// SummarizeWorkByOperation returns bounded current work facts for one
+	// Operation: its complete active set plus total counts by state. The
+	// queries are LIMIT/GROUP BY-bounded at SQL level and never load the
+	// aggregate's full historical collection.
+	SummarizeWorkByOperation(context.Context, domain.OperationID) (WorkHistorySummary, error)
+	// SummarizeWorkByResource is SummarizeWorkByOperation for Resource-targeted
+	// aggregates.
+	SummarizeWorkByResource(context.Context, domain.ResourceID) (WorkHistorySummary, error)
 	ClaimOutbox(context.Context, string, time.Duration) (OutboxMessage, bool, error)
 	FindExpiredDispatch(context.Context) (OutboxMessage, bool, error)
 	RenewOutbox(context.Context, string, string, time.Duration) error

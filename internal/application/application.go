@@ -285,6 +285,9 @@ type UnitOfWork interface {
 	Outbox() OutboxRepository
 	Outputs() ResourceOutputRepository
 	Quotas() QuotaRepository
+	OperatorActions() OperatorAuditRepository
+	OperatorIdempotency() OperatorIdempotencyRepository
+	OperatorDiagnostics() OperatorDiagnosticRepository
 }
 
 type TransactionRunner interface {
@@ -299,11 +302,26 @@ type Service struct {
 	// Authorizer decides admission-time authorization for exported business
 	// use cases. It is never consulted by worker execution paths (ADR-0012).
 	Authorizer Authorizer
+	// OperatorAuthorizer decides the separate closed platform-administrative
+	// vocabulary for /admin/v1 use cases (ADR-0021). Nil denies every operator
+	// action. It shares no vocabulary with Authorizer.
+	OperatorAuthorizer OperatorAuthorizer
 	// AdmissionPolicy is a restrictive, pure admission overlay. Workers never
-	// consult it.
+	// consult it, and operator recovery never consults it either (ADR-0021):
+	// recovery of admitted state is not new desired intent.
 	AdmissionPolicy AdmissionPolicy
 	Lifecycle       lifecycle.Engine
-	eager           bool
+	// Now supplies read-side wall time for diagnostic ages only. It never
+	// enters lifecycle decisions or ETag revisions.
+	Now   func() time.Time
+	eager bool
+}
+
+func (s *Service) clock() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // EnableEagerExecutionForTesting preserves the Milestone 4 synchronous test

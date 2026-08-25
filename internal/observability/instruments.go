@@ -34,6 +34,9 @@ const (
 	attrPanicPhase     = "liftr.panic.phase"
 	attrPolicyMutation = "liftr.policy.mutation"
 	attrPolicyOutcome  = "liftr.policy.outcome"
+	attrOperatorAction = "liftr.operator.action"
+	attrOperatorResult = "liftr.operator.result"
+	attrRecoveryKind   = "liftr.operator.recovery_kind"
 )
 
 // Panic phases for HTTP request handling.
@@ -75,6 +78,8 @@ type instruments struct {
 	persistenceTxs      metric.Int64Counter
 	persistenceTxMillis metric.Float64Histogram
 	policyAdmissions    metric.Int64Counter
+	operatorRequests    metric.Int64Counter
+	operatorRecoveries  metric.Int64Counter
 
 	poolAcquired   metric.Int64Gauge
 	poolIdle       metric.Int64Gauge
@@ -199,6 +204,16 @@ func newInstruments(meter metric.Meter) (*instruments, error) {
 	if i.policyAdmissions, err = meter.Int64Counter("liftr.policy.admissions",
 		metric.WithDescription("Platform policy decisions by bounded mutation and outcome."),
 		metric.WithUnit("{admission}")); err != nil {
+		return nil, err
+	}
+	if i.operatorRequests, err = meter.Int64Counter("liftr.operator.requests",
+		metric.WithDescription("Operator-plane requests by bounded action and request outcome."),
+		metric.WithUnit("{request}")); err != nil {
+		return nil, err
+	}
+	if i.operatorRecoveries, err = meter.Int64Counter("liftr.operator.recoveries",
+		metric.WithDescription("Accepted/replayed dead-work recoveries by bounded source kind and request outcome."),
+		metric.WithUnit("{recovery}")); err != nil {
 		return nil, err
 	}
 	if i.poolAcquired, err = meter.Int64Gauge("liftr.persistence.pool.acquired",

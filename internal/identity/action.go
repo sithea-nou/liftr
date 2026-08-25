@@ -37,6 +37,72 @@ const (
 // resource:read.
 const ActionSecretResolve Action = "secret:resolve"
 
+// Operator actions form a closed, platform-administrative vocabulary that is
+// deliberately disjoint from every developer Resource action (ADR-0021).
+// Developer permissions never imply operator permissions and operator
+// permissions never imply developer Resource permissions; separate authorizer
+// instances enforce each side.
+const (
+	// ActionOperatorDiagnosticsRead authorizes curated operator diagnostics
+	// reads, including private implementation references that developer
+	// surfaces never disclose.
+	ActionOperatorDiagnosticsRead Action = "operator:diagnostics:read"
+	// ActionOperatorObserveTrigger authorizes scheduling fresh provider-neutral
+	// observation work for existing admitted state.
+	ActionOperatorObserveTrigger Action = "operator:observation:trigger"
+	// ActionOperatorWorkRecover authorizes recovering Dead control-plane work
+	// through new current-state work identities.
+	ActionOperatorWorkRecover Action = "operator:work:recover"
+)
+
+// ValidOperatorAction reports whether action belongs to the closed operator
+// vocabulary. Grant documents are validated against this set at load time so
+// unknown actions can never silently grant authority.
+func ValidOperatorAction(action Action) bool {
+	switch action {
+	case ActionOperatorDiagnosticsRead, ActionOperatorObserveTrigger, ActionOperatorWorkRecover:
+		return true
+	default:
+		return false
+	}
+}
+
+// OperatorTargetKind is the closed set of durable aggregates an operator
+// decision can address.
+type OperatorTargetKind string
+
+const (
+	OperatorTargetResource  OperatorTargetKind = "resource"
+	OperatorTargetOperation OperatorTargetKind = "operation"
+	OperatorTargetWork      OperatorTargetKind = "work"
+)
+
+// ValidOperatorTargetKind reports whether kind belongs to the closed operator
+// target vocabulary.
+func ValidOperatorTargetKind(k OperatorTargetKind) bool {
+	switch k {
+	case OperatorTargetResource, OperatorTargetOperation, OperatorTargetWork:
+		return true
+	default:
+		return false
+	}
+}
+
+// OperatorTarget is the context of one operator authorization decision. The
+// plane holds global platform administrative authority: unlike ResourceTarget,
+// there is no owner membership dimension, and denial never depends on which
+// aggregate is addressed (ADR-0021).
+type OperatorTarget struct {
+	Kind OperatorTargetKind
+	ID   string
+}
+
+// String renders a stable, log-safe description of one operator decision
+// request. It carries no credentials or raw claim data.
+func (t OperatorTarget) String() string {
+	return fmt.Sprintf("operator target=%s id=%s", t.Kind, t.ID)
+}
+
 // ResourceTarget is the context of one authorization decision. For create
 // admissions it carries the requested type and owner with an empty ID; for
 // reads and mutations it carries the stored values. Operation reads authorize

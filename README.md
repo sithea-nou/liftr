@@ -56,6 +56,16 @@ Liftr is in early development. The repository currently implements:
   backend, while qualification of each production HTTPS HTTP backend remains
   the operator's responsibility. The public API is unchanged. Terraform has no
   selected version or support claim.
+- A separate operator diagnostics and safe-recovery control plane
+  ([ADR-0021](docs/adr/0021-operator-diagnostics-and-safe-recovery-control-plane.md)).
+  `LIFTR_ADMIN_ADDR` opt-in enables only curated `/admin/v1` diagnostics and
+  narrowly safe observation/dead-work scheduling against durable PostgreSQL.
+  It uses a distinct required token audience and deny-by-default operator
+  grants, immutable accepted-action audit, principal-scoped idempotency, stable
+  diagnostic ETags, and a pure transactionally revalidated RecoveryPlanner.
+  It never exposes raw specs, secrets, provider diagnostics, payloads, handles,
+  or backend state, and never offers force, cancel, terminal override, database
+  mutation, or replacement Dispatch. Candidate listing remains deferred.
 - Initial tests and continuous integration.
 
 ## Future Direction

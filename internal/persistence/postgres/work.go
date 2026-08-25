@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +13,105 @@ import (
 	"github.com/sithea-nou/liftr/internal/domain"
 	"github.com/sithea-nou/liftr/internal/provisioning"
 )
+
+// SummarizeSubmissionAttempts returns one bounded row: the total attempt
+// count for the Operation plus its highest-numbered record. The primary key
+// (operation_id, attempt_number) serves both the count and the ordered probe.
+func (r *repositories) SummarizeSubmissionAttempts(ctx context.Context, operationID domain.OperationID) (application.AttemptHistorySummary, error) {
+	rows, err := r.tx.Query(ctx, `SELECT count(*) OVER (), operation_id,attempt_number::text,state,dispatch_message_id,claimed_at,resolved_at,
+		failure_kind,failure_reason,failure_message FROM provisioning_submission_attempts
+		WHERE operation_id=$1
+		ORDER BY provisioning_submission_attempts.attempt_number DESC LIMIT 1`, operationID)
+	if err != nil {
+		return application.AttemptHistorySummary{}, translateError(err)
+	}
+	defer rows.Close()
+	summary := application.AttemptHistorySummary{}
+	if rows.Next() {
+		var count int64
+		record, scanErr := scanSubmissionAttemptWithCount(rows, &count)
+		if scanErr != nil {
+			return application.AttemptHistorySummary{}, scanErr
+		}
+		summary.Count, summary.Latest = uint64(count), record
+	}
+	if err := rows.Err(); err != nil {
+		return application.AttemptHistorySummary{}, translateError(err)
+	}
+	return summary, nil
+}
+
+func scanSubmissionAttemptWithCount(row rowScanner, count *int64) (application.SubmissionAttemptRecord, error) {
+	var record application.SubmissionAttemptRecord
+	var attemptText, state string
+	var failureKind, failureReason, failureMessage *string
+	var claimedAt, resolvedAt *time.Time
+	err := row.Scan(count, &record.OperationID, &attemptText, &state, &record.DispatchMessage, &claimedAt, &resolvedAt,
+		&failureKind, &failureReason, &failureMessage)
+	if err != nil {
+		return application.SubmissionAttemptRecord{}, translateError(err)
+	}
+	record.AttemptNumber, err = parseUint64(attemptText)
+	if err != nil {
+		return application.SubmissionAttemptRecord{}, err
+	}
+	record.State = application.SubmissionAttemptState(state)
+	if claimedAt != nil {
+		record.ClaimedAt = *claimedAt
+	}
+	if resolvedAt != nil {
+		record.ResolvedAt = *resolvedAt
+	}
+	if failureKind != nil || failureReason != nil || failureMessage != nil {
+		record.Failure = &provisioning.ExecutionFailure{}
+		if failureKind != nil {
+			record.Failure.Kind = provisioning.ExecutionFailureKind(*failureKind)
+		}
+		if failureReason != nil {
+			record.Failure.Reason = *failureReason
+		}
+		if failureMessage != nil {
+			record.Failure.Message = *failureMessage
+		}
+	}
+	return record, nil
+}
+
+func scanSubmissionAttempt(row rowScanner) (application.SubmissionAttemptRecord, error) {
+	var record application.SubmissionAttemptRecord
+	var attemptText, state string
+	var failureKind, failureReason, failureMessage *string
+	var claimedAt, resolvedAt *time.Time
+	err := row.Scan(&record.OperationID, &attemptText, &state, &record.DispatchMessage, &claimedAt, &resolvedAt,
+		&failureKind, &failureReason, &failureMessage)
+	if err != nil {
+		return application.SubmissionAttemptRecord{}, translateError(err)
+	}
+	record.AttemptNumber, err = parseUint64(attemptText)
+	if err != nil {
+		return application.SubmissionAttemptRecord{}, err
+	}
+	record.State = application.SubmissionAttemptState(state)
+	if claimedAt != nil {
+		record.ClaimedAt = *claimedAt
+	}
+	if resolvedAt != nil {
+		record.ResolvedAt = *resolvedAt
+	}
+	if failureKind != nil || failureReason != nil || failureMessage != nil {
+		record.Failure = &provisioning.ExecutionFailure{}
+		if failureKind != nil {
+			record.Failure.Kind = provisioning.ExecutionFailureKind(*failureKind)
+		}
+		if failureReason != nil {
+			record.Failure.Reason = *failureReason
+		}
+		if failureMessage != nil {
+			record.Failure.Message = *failureMessage
+		}
+	}
+	return record, nil
+}
 
 func (r *repositories) GetSubmissionAttempt(ctx context.Context, operationID domain.OperationID, attempt uint64) (application.SubmissionAttemptRecord, error) {
 	var record application.SubmissionAttemptRecord
@@ -108,6 +208,53 @@ func (r *repositories) Enqueue(ctx context.Context, message application.OutboxMe
 
 func (r *repositories) GetOutbox(ctx context.Context, id string) (application.OutboxMessage, error) {
 	return scanOutbox(r.tx.QueryRow(ctx, outboxSelect+" WHERE id=$1 FOR UPDATE", id))
+}
+
+func (r *repositories) SummarizeWorkByOperation(ctx context.Context, operationID domain.OperationID) (application.WorkHistorySummary, error) {
+	return r.summarizeWork(ctx, `operation_id=$1`, operationID)
+}
+
+func (r *repositories) SummarizeWorkByResource(ctx context.Context, resourceID domain.ResourceID) (application.WorkHistorySummary, error) {
+	return r.summarizeWork(ctx, `resource_id=$1`, resourceID)
+}
+
+func (r *repositories) summarizeWork(ctx context.Context, predicate string, key any) (application.WorkHistorySummary, error) {
+	activeQuery := outboxSelect + " WHERE " + predicate + ` AND state IN ('Pending','Leased')
+		ORDER BY created_at, id LIMIT ` + strconv.Itoa(application.WorkActiveLimit)
+	rows, err := r.tx.Query(ctx, activeQuery, key)
+	if err != nil {
+		return application.WorkHistorySummary{}, translateError(err)
+	}
+	defer rows.Close()
+	summary := application.WorkHistorySummary{Counts: map[application.OutboxState]int{}}
+	for rows.Next() {
+		message, scanErr := scanOutbox(rows)
+		if scanErr != nil {
+			return application.WorkHistorySummary{}, scanErr
+		}
+		summary.Active = append(summary.Active, message)
+	}
+	if err := rows.Err(); err != nil {
+		return application.WorkHistorySummary{}, translateError(err)
+	}
+	countRows, err := r.tx.Query(ctx, `SELECT state, count(*)::bigint FROM outbox_messages
+		WHERE `+predicate+` GROUP BY state`, key)
+	if err != nil {
+		return application.WorkHistorySummary{}, translateError(err)
+	}
+	defer countRows.Close()
+	for countRows.Next() {
+		var state string
+		var count int64
+		if err := countRows.Scan(&state, &count); err != nil {
+			return application.WorkHistorySummary{}, translateError(err)
+		}
+		summary.Counts[application.OutboxState(state)] = int(count)
+	}
+	if err := countRows.Err(); err != nil {
+		return application.WorkHistorySummary{}, translateError(err)
+	}
+	return summary, nil
 }
 
 func (r *repositories) ClaimOutbox(ctx context.Context, token string, lease time.Duration) (application.OutboxMessage, bool, error) {
@@ -247,13 +394,13 @@ func (r *repositories) DeadOutbox(ctx context.Context, id, token, reason string)
 }
 
 const outboxSelect = `SELECT id,kind,operation_id,resource_id,attempt_number::text,dedupe_key,
-	expected_version::text,sequence::text,payload_version,payload,state,available_at,lease_token,leased_until,
+	expected_version::text,sequence::text,payload_version,payload,state,available_at,created_at,lease_token,leased_until,
 	attempt_count,last_error,terminal_reason FROM outbox_messages`
 
 func outboxColumns(alias string) string {
 	return alias + `.id,` + alias + `.kind,` + alias + `.operation_id,` + alias + `.resource_id,` + alias + `.attempt_number::text,` + alias + `.dedupe_key,` +
 		alias + `.expected_version::text,` + alias + `.sequence::text,` + alias + `.payload_version,` + alias + `.payload,` + alias + `.state,` + alias + `.available_at,` +
-		alias + `.lease_token,` + alias + `.leased_until,` + alias + `.attempt_count,` + alias + `.last_error,` + alias + `.terminal_reason`
+		alias + `.created_at,` + alias + `.lease_token,` + alias + `.leased_until,` + alias + `.attempt_count,` + alias + `.last_error,` + alias + `.terminal_reason`
 }
 
 type rowScanner interface{ Scan(...any) error }
@@ -261,11 +408,14 @@ type rowScanner interface{ Scan(...any) error }
 func scanOutbox(row rowScanner) (application.OutboxMessage, error) {
 	var message application.OutboxMessage
 	var operationID, resourceID, attemptText, expectedText, sequenceText, leaseToken, lastError, terminalReason *string
-	var leasedUntil *time.Time
+	var leasedUntil, createdAt *time.Time
 	if err := row.Scan(&message.ID, &message.Kind, &operationID, &resourceID, &attemptText, &message.DedupeKey, &expectedText,
-		&sequenceText, &message.PayloadVersion, &message.Payload, &message.State, &message.AvailableAt, &leaseToken, &leasedUntil,
+		&sequenceText, &message.PayloadVersion, &message.Payload, &message.State, &message.AvailableAt, &createdAt, &leaseToken, &leasedUntil,
 		&message.AttemptCount, &lastError, &terminalReason); err != nil {
 		return application.OutboxMessage{}, translateError(err)
+	}
+	if createdAt != nil {
+		message.CreatedAt = *createdAt
 	}
 	if operationID != nil {
 		message.OperationID = domain.OperationID(*operationID)

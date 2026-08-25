@@ -69,6 +69,11 @@ func (r *repositories) SubmissionAttempts() application.SubmissionAttemptReposit
 func (r *repositories) Outbox() application.OutboxRepository                        { return r }
 func (r *repositories) Outputs() application.ResourceOutputRepository               { return r }
 func (r *repositories) Quotas() application.QuotaRepository                         { return r }
+func (r *repositories) OperatorActions() application.OperatorAuditRepository        { return r }
+func (r *repositories) OperatorIdempotency() application.OperatorIdempotencyRepository {
+	return r
+}
+func (r *repositories) OperatorDiagnostics() application.OperatorDiagnosticRepository { return r }
 
 func translateError(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {

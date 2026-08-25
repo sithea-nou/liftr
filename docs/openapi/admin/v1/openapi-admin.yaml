@@ -1,0 +1,1061 @@
+# Liftr Operator API v1 - handwritten contract.
+# This document describes only the separate admin listener. It is not merged
+# into the public Resource API contract under docs/openapi/v1/openapi.yaml.
+openapi: 3.0.3
+info:
+  title: Liftr Operator API
+  version: "1.0"
+  description: |
+    Curated operator diagnostics and narrowly safe asynchronous recovery.
+
+    This API is served only when LIFTR_ADMIN_ADDR enables the separate admin
+    listener in a full durable PostgreSQL runtime. The public /v1 router and
+    this /admin/v1 router are disjoint. The admin listener's /healthz and
+    /readyz endpoints are unauthenticated.
+
+    Every /admin/v1 endpoint requires an RFC 9068 bearer access token carrying
+    the configured admin audience. Audience validation uses membership
+    semantics. The admin audience must differ from the public audience, but a
+    deliberately dual-audience token can authenticate at both listeners;
+    public and operator authorization remain independent.
+
+    Diagnostics are curated, secret-safe snapshots with Cache-Control:
+    no-store and a stable strong ETag. ETags assist an operator in detecting a
+    stale diagnostic; they are not authorization. Every mutation reauthorizes,
+    locks and reloads durable state, and reruns the pure RecoveryPlanner.
+
+    Mutation requests have no body, require Idempotency-Key of at most 200
+    UTF-8 bytes, and optionally accept If-Match from the corresponding latest
+    diagnostic. A first acceptance and an idempotent replay both return 202.
+    A replay returns the original action and work IDs and adds
+    Idempotency-Replayed: true.
+
+    M20 deliberately defines no candidate-listing endpoint. Candidate IDs come
+    from existing bounded sampler logs and metrics and, where authorized,
+    public Resource and Operation history.
+tags:
+  - name: Health
+    description: Unauthenticated probes on the admin listener.
+  - name: Diagnostics
+    description: Curated read-only durable-state diagnostics.
+  - name: Recovery
+    description: Narrow asynchronous operator mutations.
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: adminHealthz
+      summary: Check admin listener liveness
+      description: This probe is unauthenticated and does not test PostgreSQL.
+      security: []
+      responses:
+        "200":
+          description: The admin listener is live.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: adminReadyz
+      summary: Check admin control-plane readiness
+      description: |
+        This probe is unauthenticated. It verifies that durable operator state
+        is configured and reachable and fails after shutdown begins draining.
+      security: []
+      responses:
+        "200":
+          description: Durable operator state is ready.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: ADMIN_DRAINING or PERSISTENCE_UNAVAILABLE.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /admin/v1/resources/{id}/diagnostics:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      tags: [Diagnostics]
+      operationId: getResourceDiagnostics
+      summary: Read curated diagnostics for one Resource
+      description: |
+        Requires operator:diagnostics:read. The response never contains the
+        ResourceSpec or output values. specDigest, when present, is the full
+        SHA-256 of the exact stored desired-state bytes. stateIdentity, when
+        present, exposes identifiers and only a bounded private state digest
+        prefix; it never exposes backend state bytes or a lineage value.
+      responses:
+        "200":
+          description: The current curated Resource diagnostic.
+          headers:
+            ETag:
+              $ref: "#/components/headers/DiagnosticETag"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceDiagnostic"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/OperatorForbidden"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
+  /admin/v1/operations/{id}/diagnostics:
+    parameters:
+      - $ref: "#/components/parameters/OperationId"
+    get:
+      tags: [Diagnostics]
+      operationId: getOperationDiagnostics
+      summary: Read curated diagnostics for one Operation
+      description: |
+        Requires operator:diagnostics:read. Attempt and work summaries expose
+        bounded state and timing metadata, never handles, outbox payloads,
+        last-error text, raw provider diagnostics, or idempotency keys.
+      responses:
+        "200":
+          description: The current curated Operation diagnostic.
+          headers:
+            ETag:
+              $ref: "#/components/headers/DiagnosticETag"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationDiagnostic"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/OperatorForbidden"
+        "404":
+          $ref: "#/components/responses/OperationNotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
+  /admin/v1/work/{id}/diagnostics:
+    parameters:
+      - $ref: "#/components/parameters/WorkId"
+    get:
+      tags: [Diagnostics]
+      operationId: getWorkDiagnostics
+      summary: Read curated diagnostics for one outbox work item
+      description: |
+        Requires operator:diagnostics:read. The terminal reason is a bounded
+        class. The response never returns payload, lease token, last-error
+        text, credentials, or raw provider diagnostics.
+      responses:
+        "200":
+          description: The current curated work diagnostic.
+          headers:
+            ETag:
+              $ref: "#/components/headers/DiagnosticETag"
+            Cache-Control:
+              $ref: "#/components/headers/CacheControlNoStore"
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkDiagnostic"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/OperatorForbidden"
+        "404":
+          $ref: "#/components/responses/WorkNotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/PersistenceUnavailable"
+  /admin/v1/operations/{id}/observe:
+    parameters:
+      - $ref: "#/components/parameters/OperationId"
+    post:
+      tags: [Recovery]
+      operationId: triggerOperationObservation
+      summary: Schedule a fresh Observe for an active Operation
+      description: |
+        Requires operator:observation:trigger. The request body must be absent
+        or empty. Liftr accepts this only for an observable active execution
+        with no active Observe and an available historical registration. No
+        provider call occurs in the admission transaction.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "202":
+          $ref: "#/components/responses/MutationAccepted"
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/OperatorForbidden"
+        "404":
+          $ref: "#/components/responses/MutationTargetNotFound"
+        "409":
+          $ref: "#/components/responses/MutationConflict"
+        "412":
+          $ref: "#/components/responses/DiagnosticStale"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/AdminUnavailable"
+  /admin/v1/resources/{id}/observe:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    post:
+      tags: [Recovery]
+      operationId: triggerResourcePassiveObservation
+      summary: Schedule a fresh PassiveObserve for a Resource
+      description: |
+        Requires operator:observation:trigger. The request body must be absent
+        or empty. Liftr accepts this only for a current non-Deleted Resource
+        with no active Operation or equivalent work and with an available
+        registration. It creates no Operation and does not change desired
+        state or generation.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "202":
+          $ref: "#/components/responses/MutationAccepted"
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/OperatorForbidden"
+        "404":
+          $ref: "#/components/responses/MutationTargetNotFound"
+        "409":
+          $ref: "#/components/responses/MutationConflict"
+        "412":
+          $ref: "#/components/responses/DiagnosticStale"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/AdminUnavailable"
+  /admin/v1/work/{id}/recover:
+    parameters:
+      - $ref: "#/components/parameters/WorkId"
+    post:
+      tags: [Recovery]
+      operationId: recoverDeadWork
+      summary: Safely recover one Dead work item
+      description: |
+        Requires operator:work:recover. The request body must be absent or
+        empty. Liftr never revives the Dead row and never recreates Dispatch.
+        It derives one new canonical work item from current locked aggregate
+        state: Observe for safely observable dead Dispatch/Observe,
+        PassiveObserve for dead PassiveObserve, or Drive with an empty object
+        payload for dead Drive. Unsafe, terminal, superseded, unregistered,
+        missing-execution, or already-active cases are refused.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "202":
+          $ref: "#/components/responses/MutationAccepted"
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/OperatorForbidden"
+        "404":
+          $ref: "#/components/responses/WorkNotFound"
+        "409":
+          $ref: "#/components/responses/MutationConflict"
+        "412":
+          $ref: "#/components/responses/DiagnosticStale"
+        "428":
+          $ref: "#/components/responses/PreconditionRequired"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/AdminUnavailable"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        RFC 9068 JWT access token carrying the configured admin audience.
+        Operator grants are independent from public Resource authorization.
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      description: Durable Resource ID.
+      schema:
+        type: string
+        minLength: 1
+    OperationId:
+      name: id
+      in: path
+      required: true
+      description: Durable Operation ID.
+      schema:
+        type: string
+        minLength: 1
+    WorkId:
+      name: id
+      in: path
+      required: true
+      description: Durable outbox work ID.
+      schema:
+        type: string
+        minLength: 1
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Non-blank key scoped to the authenticated operator principal. The
+        UTF-8 encoded header value must not exceed 200 bytes. A rejected
+        action does not bind the key.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        Optional latest strong ETag from the corresponding diagnostic. Weak or
+        stale values fail with DIAGNOSTIC_STALE. Omission does not bypass
+        transactional revalidation.
+      schema:
+        type: string
+      example: '"diag_v1_4f6f0a..."'
+  headers:
+    XRequestId:
+      description: Liftr-generated request identifier.
+      schema:
+        type: string
+    CacheControlNoStore:
+      description: This representation must not be stored by caches.
+      schema:
+        type: string
+        enum: [no-store]
+    DiagnosticETag:
+      description: Stable quoted strong validator for this diagnostic snapshot.
+      schema:
+        type: string
+      example: '"diag_v1_4f6f0a..."'
+    IdempotencyReplayed:
+      description: Present with value true only for an idempotent replay.
+      schema:
+        type: string
+        enum: ["true"]
+    WWWAuthenticate:
+      description: Bearer challenge for the operator realm.
+      schema:
+        type: string
+  responses:
+    MutationAccepted:
+      description: |
+        One operator action and one work item were accepted, or the original
+        accepted result was replayed without a durable change.
+      headers:
+        Idempotency-Replayed:
+          $ref: "#/components/headers/IdempotencyReplayed"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MutationResult"
+          examples:
+            applied:
+              value:
+                result: applied
+                action: trigger_observe
+                targetKind: operation
+                targetId: op-123
+                operatorActionId: opact_0123456789abcdef0123456789abcdef
+                createdWorkId: observe:op-123:4
+            replayed:
+              value:
+                result: replayed
+                action: recover_dead_work
+                targetKind: work
+                targetId: dispatch:op-123:1
+                operatorActionId: opact_0123456789abcdef0123456789abcdef
+                createdWorkId: observe:op-123:4
+    Unauthenticated:
+      description: UNAUTHENTICATED - bearer credentials are absent or invalid.
+      headers:
+        WWW-Authenticate:
+          $ref: "#/components/headers/WWWAuthenticate"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    OperatorForbidden:
+      description: OPERATOR_FORBIDDEN - the operator permission is not granted.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ResourceNotFound:
+      description: RESOURCE_NOT_FOUND - no durable Resource has this ID.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    OperationNotFound:
+      description: OPERATION_NOT_FOUND - no durable Operation has this ID.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    WorkNotFound:
+      description: WORK_NOT_FOUND - no durable work item has this ID.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    MutationTargetNotFound:
+      description: |
+        WORK_NOT_FOUND - no durable mutation target has this ID. The current
+        mutation error mapper uses this code for missing Resource, Operation,
+        and work targets; diagnostic reads use their target-specific codes.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    InvalidArgument:
+      description: INVALID_ARGUMENT - the request is malformed or has a body.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PreconditionRequired:
+      description: PRECONDITION_REQUIRED - Idempotency-Key is missing or blank.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    DiagnosticStale:
+      description: DIAGNOSTIC_STALE - If-Match no longer matches durable state.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    MutationConflict:
+      description: |
+        OPERATOR_IDEMPOTENCY_CONFLICT, RECOVERY_ALREADY_ACTIVE,
+        ACTION_NOT_APPLICABLE, or RECOVERY_UNSAFE. RECOVERY_ALREADY_ACTIVE may
+        include existingWorkId.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PersistenceUnavailable:
+      description: PERSISTENCE_UNAVAILABLE - durable state cannot be reached.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    AdminUnavailable:
+      description: ADMIN_DRAINING or PERSISTENCE_UNAVAILABLE.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Internal:
+      description: INTERNAL - an unexpected internal error occurred.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/CacheControlNoStore"
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    RecoveryAssessment:
+      type: object
+      additionalProperties: false
+      required: [state, reasons, allowedActions]
+      properties:
+        state:
+          type: string
+          enum:
+            - no_action_needed
+            - safe_observe
+            - safe_passive_observe
+            - safe_recover_dead_work
+            - user_retry_available
+            - ambiguous_waiting_for_evidence
+            - manual_intervention_required
+            - unsupported_repair
+            - terminal
+            - superseded
+        reasons:
+          type: array
+          items:
+            type: string
+            enum:
+              - OPERATION_TERMINAL
+              - EXECUTION_RECORD_MISSING
+              - EXECUTION_NOT_OBSERVABLE
+              - EXECUTION_TERMINAL_EVIDENCE_PENDING
+              - AMBIGUOUS_EXECUTION
+              - OBSERVATION_IN_FLIGHT
+              - USER_RETRY_AVAILABLE
+              - RESOURCE_DELETED
+              - ACTIVE_OPERATION_PRESENT
+              - DEAD_DISPATCH_PRE_SUBMIT
+              - DEAD_DISPATCH_RECOVERY_VIA_OBSERVE
+              - HISTORICAL_REGISTRATION_MISSING
+              - EQUIVALENT_WORK_ALREADY_ACTIVE
+              - WORK_NOT_DEAD
+              - OUTPUT_RESOLUTION_PENDING
+              - MANUAL_INTERVENTION_REQUIRED
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [trigger_observe, trigger_passive_observe, recover_dead_work]
+    OperationRef:
+      type: object
+      additionalProperties: false
+      required: [id, capability, state, phase, targetGeneration]
+      properties:
+        id:
+          type: string
+        capability:
+          $ref: "#/components/schemas/Capability"
+        state:
+          $ref: "#/components/schemas/OperationState"
+        phase:
+          $ref: "#/components/schemas/OperationPhase"
+        targetGeneration:
+          type: integer
+          format: int64
+          minimum: 0
+    ResourceDiagnostic:
+      type: object
+      additionalProperties: false
+      required:
+        - resourceId
+        - resourceType
+        - resourceVersion
+        - ownerKind
+        - ownerId
+        - generation
+        - observedGeneration
+        - state
+        - statusUpdatedAt
+        - operationAgeSeconds
+        - reconciliationSilenceAgeSeconds
+        - outputResolution
+        - provisionerRef
+        - registrationAvailable
+        - recovery
+      properties:
+        resourceId:
+          type: string
+        resourceType:
+          type: string
+        resourceVersion:
+          type: string
+        ownerKind:
+          type: string
+        ownerId:
+          type: string
+        generation:
+          type: integer
+          format: int64
+          minimum: 0
+        observedGeneration:
+          type: integer
+          format: int64
+          minimum: 0
+        state:
+          type: string
+          enum: [Unknown, Pending, Ready, Deleting, Deleted, Failed]
+        statusUpdatedAt:
+          type: string
+          format: date-time
+        activeOperation:
+          $ref: "#/components/schemas/OperationRef"
+        latestOperation:
+          $ref: "#/components/schemas/OperationRef"
+        operationAgeSeconds:
+          type: number
+          format: double
+          minimum: 0
+        reconciliationSilenceAgeSeconds:
+          type: number
+          format: double
+          minimum: 0
+        outputResolution:
+          $ref: "#/components/schemas/OutputResolution"
+        provisionerKind:
+          type: string
+          description: Bounded implementation kind, when known.
+        provisionerRef:
+          type: string
+        registrationAvailable:
+          type: boolean
+        stateIdentity:
+          $ref: "#/components/schemas/StateIdentity"
+        specDigest:
+          type: string
+          description: SHA-256 of the exact stored desired-state bytes.
+          pattern: "^[0-9a-f]{64}$"
+        recovery:
+          $ref: "#/components/schemas/RecoveryAssessment"
+    StateIdentity:
+      type: object
+      additionalProperties: false
+      description: |
+        Curated private control-state identity. Backend state bytes, lineage value, and
+        full private state digest are never returned.
+      required:
+        - provisionerRef
+        - engine
+        - program
+        - backend
+        - stateKey
+        - lineagePresent
+        - serial
+        - version
+      properties:
+        provisionerRef:
+          type: string
+        engine:
+          type: string
+        program:
+          type: string
+        backend:
+          type: string
+        stateKey:
+          type: string
+        lineagePresent:
+          type: boolean
+          description: Whether a lineage value is bound; the value is not exposed.
+        serial:
+          type: integer
+          format: int64
+          minimum: 0
+        digestPrefix:
+          type: string
+          description: First eight bytes of the private SHA-256 digest as hex.
+          pattern: "^$|^[0-9a-f]{16}$"
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+    OperationDiagnostic:
+      type: object
+      additionalProperties: false
+      description: |
+        Bounded current-state snapshot. Complete attempt and work histories are
+        deliberately not returned as arrays: the response carries only the
+        latest attempt, the structurally small active work set, and honest
+        total counts, so response size stays bounded regardless of Operation
+        lifetime.
+      required:
+        - operationId
+        - resourceId
+        - capability
+        - targetGeneration
+        - state
+        - phase
+        - requestedAt
+        - operationAgeSeconds
+        - attemptCount
+        - activeWork
+        - activeWorkTruncated
+        - workCount
+        - registrationAvailable
+        - recovery
+      properties:
+        operationId:
+          type: string
+        resourceId:
+          type: string
+        capability:
+          $ref: "#/components/schemas/Capability"
+        targetGeneration:
+          type: integer
+          format: int64
+          minimum: 0
+        state:
+          $ref: "#/components/schemas/OperationState"
+        phase:
+          $ref: "#/components/schemas/OperationPhase"
+        retryOf:
+          type: string
+        requestedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        operationAgeSeconds:
+          type: number
+          format: double
+          minimum: 0
+        execution:
+          $ref: "#/components/schemas/ExecutionDiagnostic"
+        latestAttempt:
+          allOf:
+            - $ref: "#/components/schemas/SubmissionAttemptDiagnostic"
+          description: The highest-numbered submission attempt; absent when none exist.
+        attemptCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total durable attempts for this Operation.
+        activeWork:
+          type: array
+          maxItems: 8
+          description: Every Pending/Leased work row; schema uniqueness bounds one per kind.
+          items:
+            $ref: "#/components/schemas/WorkRef"
+        activeWorkTruncated:
+          type: boolean
+          description: True if more active rows existed than could be returned.
+        workCount:
+          type: integer
+          minimum: 0
+          description: Total outbox rows, active and historical. Counts never enter the ETag.
+        provisionerRef:
+          type: string
+        registrationAvailable:
+          type: boolean
+        recovery:
+          $ref: "#/components/schemas/RecoveryAssessment"
+    ExecutionDiagnostic:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - correlation
+        - acceptanceConfirmed
+        - handlePresent
+        - outputRecovery
+        - outputResolution
+        - currentAttempt
+        - nextObservationSequence
+      properties:
+        state:
+          type: string
+          enum: [Pending, Dispatching, Accepted, Succeeded, Failed, Unknown]
+        correlation:
+          type: string
+          enum: [Found, NotFound, Unknown]
+        acceptanceConfirmed:
+          type: boolean
+        handlePresent:
+          type: boolean
+          description: Presence only; the handle is never returned.
+        outputRecovery:
+          type: boolean
+        outputResolution:
+          $ref: "#/components/schemas/OutputResolution"
+        outputFailureKind:
+          type: string
+          description: Bounded provider-neutral kind, never free-form text.
+        currentAttempt:
+          type: integer
+          format: int64
+          minimum: 0
+        nextObservationSequence:
+          type: integer
+          format: int64
+          minimum: 0
+    SubmissionAttemptDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [number, state, submissionBoundaryCrossed]
+      properties:
+        number:
+          type: integer
+          format: int64
+          minimum: 0
+        state:
+          type: string
+          enum: [Pending, Leased, Accepted, Rejected, NotFound, Unknown]
+        submissionBoundaryCrossed:
+          type: boolean
+        claimedAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+        failureKind:
+          type: string
+          description: Bounded provider-neutral kind, never free-form text.
+    WorkRef:
+      type: object
+      additionalProperties: false
+      required: [id, kind, state, createdAt, availableAt, attemptCount]
+      properties:
+        id:
+          type: string
+        kind:
+          $ref: "#/components/schemas/WorkKind"
+        state:
+          $ref: "#/components/schemas/WorkState"
+        createdAt:
+          type: string
+          format: date-time
+        availableAt:
+          type: string
+          format: date-time
+        attemptCount:
+          type: integer
+          minimum: 0
+    WorkDiagnostic:
+      type: object
+      additionalProperties: false
+      required:
+        - workId
+        - kind
+        - state
+        - createdAt
+        - availableAt
+        - attemptCount
+        - leaseActive
+        - leaseExpired
+        - targetTerminal
+        - activeEquivalentWork
+        - superseded
+        - recovery
+      properties:
+        workId:
+          type: string
+        kind:
+          $ref: "#/components/schemas/WorkKind"
+        state:
+          $ref: "#/components/schemas/WorkState"
+        operationId:
+          type: string
+        resourceId:
+          type: string
+        attemptNumber:
+          type: integer
+          format: int64
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        availableAt:
+          type: string
+          format: date-time
+        attemptCount:
+          type: integer
+          minimum: 0
+        leaseActive:
+          type: boolean
+        leaseExpired:
+          type: boolean
+        terminalReasonClass:
+          type: string
+          description: Bounded terminal reason or UNCLASSIFIED, never raw error text.
+        targetTerminal:
+          type: boolean
+        activeEquivalentWork:
+          type: boolean
+        superseded:
+          type: boolean
+        recovery:
+          $ref: "#/components/schemas/RecoveryAssessment"
+    MutationResult:
+      type: object
+      additionalProperties: false
+      required: [result, action, targetKind, targetId, operatorActionId, createdWorkId]
+      properties:
+        result:
+          type: string
+          enum: [applied, replayed]
+        action:
+          type: string
+          enum: [trigger_observe, trigger_passive_observe, recover_dead_work]
+        targetKind:
+          type: string
+          enum: [operation, resource, work]
+        targetId:
+          type: string
+        operatorActionId:
+          type: string
+        createdWorkId:
+          type: string
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, requestId]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+            - OPERATOR_FORBIDDEN
+            - RESOURCE_NOT_FOUND
+            - OPERATION_NOT_FOUND
+            - WORK_NOT_FOUND
+            - INVALID_ARGUMENT
+            - PRECONDITION_REQUIRED
+            - OPERATOR_IDEMPOTENCY_CONFLICT
+            - DIAGNOSTIC_STALE
+            - RECOVERY_ALREADY_ACTIVE
+            - ACTION_NOT_APPLICABLE
+            - RECOVERY_UNSAFE
+            - ADMIN_DRAINING
+            - PERSISTENCE_UNAVAILABLE
+            - INTERNAL
+        requestId:
+          type: string
+        existingWorkId:
+          type: string
+          description: Present only when RECOVERY_ALREADY_ACTIVE identifies it.
+    Capability:
+      type: string
+      enum: [create, update, delete, observe]
+    OperationState:
+      type: string
+      enum: [Pending, Running, Succeeded, Failed, Canceled]
+    OperationPhase:
+      type: string
+      enum: [Requested, Validating, Planning, Applying, Destroying]
+    OutputResolution:
+      type: string
+      enum: [None, Pending, Published, Rejected]
+    WorkKind:
+      type: string
+      enum: [Drive, Dispatch, Observe, PassiveObserve]
+    WorkState:
+      type: string
+      enum: [Pending, Leased, Completed, Dead]

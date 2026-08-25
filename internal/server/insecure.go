@@ -48,6 +48,12 @@ func (insecureAuthenticator) AllowsAnonymous() bool { return true }
 // explicit insecure composition (ADR-0012).
 type allowAllAuthorizer struct{}
 
+type allowAllOperatorAuthorizer struct{}
+
+func (allowAllOperatorAuthorizer) AuthorizeOperator(context.Context, identity.Principal, identity.Action, identity.OperatorTarget) error {
+	return nil
+}
+
 // Authorize allows everything; it must never be reachable from secured runs.
 func (allowAllAuthorizer) Authorize(context.Context, identity.Principal, identity.Action, identity.ResourceTarget) error {
 	return nil
