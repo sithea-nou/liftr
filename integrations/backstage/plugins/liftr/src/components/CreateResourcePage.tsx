@@ -4,7 +4,7 @@
  * verbatim; the server's 422 remains authoritative).
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Grid, MenuItem, TextField, Typography } from '@material-ui/core';
 import { InfoCard } from '@backstage/core-components';
@@ -37,6 +37,7 @@ export const CreateResourcePage: React.FC = () => {
   const [ownerKind, setOwnerKind] = useState('team');
   const [ownerId, setOwnerId] = useState('');
   const [specText, setSpecText] = useState('{\n  \n}');
+  const [referencesText, setReferencesText] = useState('{}');
   const [error, setError] = useState<(LiftrApiError & { outcomeUnknown?: boolean }) | null>(null);
   const [admittedMonitorId, setAdmittedMonitorId] = useState<string | null>(null);
   const [bodyDraft, setBodyDraft] = useState<string | null>(null);
@@ -82,22 +83,11 @@ export const CreateResourcePage: React.FC = () => {
 
   const versionsForType = types.filter(t => t.name === typeName).map(t => t.version);
 
-  const submit = async (key: string) => {
-    const built = buildCreateResourceBody({
-      id: resourceId.trim(),
-      typeName,
-      typeVersion,
-      ownerKind: ownerKind.trim(),
-      ownerId: ownerId.trim(),
-      specText,
-    });
-    if (!built.ok) {
-      setError(new LiftrApiError(null, { code: 'LIFTR_REQUEST_INVALID', title: 'Invalid input', detail: built.error }, 400));
-      return;
-    }
-    setBodyDraft(built.bodyText);
+  const submit = async (key: string, bodyText: string) => {
+    setBodyDraft(bodyText);
+    setError(null);
     try {
-      const env = await client.create({ bodyText: built.bodyText, idempotencyKey: key });
+      const env = await client.create({ bodyText, idempotencyKey: key });
       action.markAdmitted();
       setAdmittedMonitorId(env.monitorOperationId);
       navigate(`/liftr/resources/${encodeURIComponent(resourceId.trim())}`, {
@@ -109,6 +99,23 @@ export const CreateResourcePage: React.FC = () => {
       if (err.outcomeUnknown) action.markUnknownOutcome();
       else action.markFailed();
     }
+  };
+
+  const beginCreate = () => {
+    const built = buildCreateResourceBody({
+      id: resourceId.trim(),
+      typeName,
+      typeVersion,
+      ownerKind: ownerKind.trim(),
+      ownerId: ownerId.trim(),
+      specText,
+      referencesText,
+    });
+    if (!built.ok) {
+      setError(new LiftrApiError(null, { code: 'LIFTR_REQUEST_INVALID', title: 'Invalid input', detail: built.error }, 400));
+      return;
+    }
+    void submit(action.begin(), built.bodyText);
   };
 
   return (
@@ -159,12 +166,13 @@ export const CreateResourcePage: React.FC = () => {
               </Typography>
             )}
             <SpecEditor value={specText} onChange={setSpecText} />
+            <ReferencesEditor value={referencesText} onChange={setReferencesText} />
             <div style={{ display: 'flex', gap: 8 }}>
               <Button
                 variant="contained"
                 color="primary"
                 disabled={action.phase === 'running'}
-                onClick={() => submit(action.begin())}
+                onClick={beginCreate}
               >
                 Create resource
               </Button>
@@ -172,7 +180,7 @@ export const CreateResourcePage: React.FC = () => {
                 <>
                   <Button
                     variant="outlined"
-                    onClick={() => bodyDraft && submit(action.currentKey!)} // SAME key replay
+                    onClick={() => bodyDraft && action.currentKey && submit(action.currentKey, bodyDraft)}
                   >
                     Replay same action (same key)
                   </Button>
@@ -246,10 +254,33 @@ export const SpecEditor: React.FC<{ value: string; onChange: (v: string) => void
   );
 };
 
+export const ReferencesEditor: React.FC<{ value: string; onChange: (v: string) => void }> = ({
+  value,
+  onChange,
+}) => (
+  <div>
+    <Typography variant="subtitle2">Desired references (raw JSON)</Typography>
+    <textarea
+      aria-label="references json"
+      spellCheck={false}
+      style={{ width: '100%', minHeight: 90, fontFamily: 'monospace', fontSize: 13 }}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+    />
+    <Typography variant="caption" display="block">
+      Map contract slot names to Resource ID arrays, for example {`{"database":["db-a"]}`}.
+      Liftr validates target visibility, type, cardinality, and cycles.
+    </Typography>
+  </div>
+);
+
 // ---------------------------------------------------------------------------
 // Update + delete (used from ResourceDetail actions)
 // ---------------------------------------------------------------------------
 
-export function buildUpdateFromEditor(specText: string): { ok: true; bodyText: string } | { ok: false; error: string } {
-  return buildUpdateResourceBody(specText);
+export function buildUpdateFromEditor(
+  specText: string,
+  referencesText?: string,
+): { ok: true; bodyText: string } | { ok: false; error: string } {
+  return buildUpdateResourceBody(specText, referencesText);
 }

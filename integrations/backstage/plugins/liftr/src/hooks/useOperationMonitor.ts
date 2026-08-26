@@ -29,8 +29,8 @@ export function useOperationMonitor(
   const hiddenRef = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const fetchOnce = useCallback(async () => {
-    if (!monitorOperationId) return;
+  const fetchOnce = useCallback(async (): Promise<boolean> => {
+    if (!monitorOperationId) return true;
     try {
       const op = await client.pollMonitor(monitorOperationId);
       setOperation(op);
@@ -39,9 +39,11 @@ export function useOperationMonitor(
       else if (op.state === 'Failed') setStatus('failed');
       else if (op.state === 'Canceled') setStatus('canceled');
       else setStatus('polling');
+      return ['Succeeded', 'Failed', 'Canceled'].includes(op.state);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setStatus('error');
+      return true;
     }
   }, [client, monitorOperationId]);
 
@@ -69,8 +71,9 @@ export function useOperationMonitor(
         return;
       }
       pollCount.current += 1;
-      await fetchOnce();
+      const terminal = await fetchOnce();
       if (disposed) return;
+      if (terminal) return;
       if (pollCount.current >= AUTO_STOP_AFTER_POLLS) {
         // Stop auto-polling; manual refresh remains available.
         return;

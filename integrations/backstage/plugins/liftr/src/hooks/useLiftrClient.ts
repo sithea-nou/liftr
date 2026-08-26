@@ -6,6 +6,7 @@
 
 import {
   configApiRef,
+  discoveryApiRef,
   fetchApiRef,
   useApi,
 } from '@backstage/core-plugin-api';
@@ -15,6 +16,7 @@ import { liftrAuthApiRef } from '../api/auth';
 
 export function useLiftrClient(): LiftrFrontendClient {
   const fetchApi = useApi(fetchApiRef);
+  const discoveryApi = useApi(discoveryApiRef);
   const configApi = useApi(configApiRef);
   const mode = configApi.getOptionalString('liftr.auth.mode') ?? 'delegated';
   // In insecure development the BFF needs no delegation; skip the lookup so
@@ -27,10 +29,11 @@ export function useLiftrClient(): LiftrFrontendClient {
   return useMemo(
     () =>
       new LiftrFrontendClient(fetchApi, {
+        getBaseUrl: () => discoveryApi.getBaseUrl('liftr'),
         getDelegationAssertion: auth
           ? () => auth.getDelegationAssertion()
           : undefined,
       }),
-    [fetchApi, auth],
+    [fetchApi, discoveryApi, auth],
   );
 }

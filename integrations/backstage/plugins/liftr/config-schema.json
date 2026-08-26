@@ -11,13 +11,15 @@
           "properties": {
             "mode": {
               "enum": ["delegated", "passthrough", "insecure-development"],
-              "description": "insecure-development suppresses the delegation header for loopback guest sessions."
+              "description": "insecure-development suppresses the delegation header for loopback guest sessions.",
+              "visibility": "frontend"
             }
           }
         },
         "ownerDisplay": {
           "type": "object",
           "description": "Presentation-only mapping of Liftr OwnerRef kinds to Backstage entity refs. Never affects authorization.",
+          "visibility": "frontend",
           "additionalProperties": {
             "type": "object",
             "properties": {

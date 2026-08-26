@@ -34,7 +34,7 @@ import {
   parseResourceDetail,
   parseResourceList,
   parseResourceTypeDetail,
-  parseResourceTypeSummary,
+  parseResourceTypeList,
 } from '@liftr/plugin-liftr-common';
 
 export class LiftrApiError extends Error {
@@ -61,6 +61,7 @@ export class LiftrFrontendClient {
       /** Supplies the delegation assertion per request (bound-user mode). */
       getDelegationAssertion?: () => Promise<string>;
       baseUrl?: string; // default /api/liftr
+      getBaseUrl?: () => Promise<string>;
     },
   ) {}
 
@@ -81,7 +82,10 @@ export class LiftrFrontendClient {
     if (init.generation !== undefined) headers['If-Liftr-Generation'] = init.generation;
     if (init.bodyText !== undefined) headers['Content-Type'] = 'application/json';
 
-    const res = await this.fetchApi.fetch(`${this.options.baseUrl ?? '/api/liftr'}${pathWithQuery}`, {
+    const baseUrl = this.options.getBaseUrl
+      ? await this.options.getBaseUrl()
+      : this.options.baseUrl ?? '/api/liftr';
+    const res = await this.fetchApi.fetch(`${baseUrl}${pathWithQuery}`, {
       method,
       headers,
       ...(init.bodyText !== undefined ? { body: init.bodyText } : {}),
@@ -150,14 +154,9 @@ export class LiftrFrontendClient {
 
   async listResourceTypes(): Promise<ListResult<ResourceTypeSummary>> {
     const r = await this.request('GET', '/v1/resource-types');
-    const parsed = parseLosslessJson(r.text);
-    const arr = Array.isArray(parsed) ? parsed : [];
-    const items: ResourceTypeSummary[] = [];
-    for (const raw of arr) {
-      const g = parseResourceTypeSummary(raw);
-      if (g.ok) items.push(g.value);
-    }
-    return { items };
+    const g = parseResourceTypeList(parseLosslessJson(r.text));
+    if (!g.ok) throw new LiftrApiError(null, null, r.status);
+    return { items: g.value.items };
   }
 
   async getResourceType(name: string, version: string): Promise<ResourceTypeDetail> {
@@ -200,7 +199,7 @@ export class LiftrFrontendClient {
     if (limit !== undefined) sp.set('limit', String(limit));
     if (cursor !== undefined) sp.set('cursor', cursor);
     const qs = sp.toString();
-    const r = await this.request('GET', `/v1/resources/${encodeURIComponent(resourceId)}${qs ? `?${qs}` : ''}/operations`);
+    const r = await this.request('GET', `/v1/resources/${encodeURIComponent(resourceId)}/operations${qs ? `?${qs}` : ''}`);
     const g = parseOperationList(parseLosslessJson(r.text));
     if (!g.ok) throw new LiftrApiError(null, null, r.status);
     return { items: g.value.items, ...(g.value.nextCursor !== undefined ? { nextCursor: g.value.nextCursor } : {}) };

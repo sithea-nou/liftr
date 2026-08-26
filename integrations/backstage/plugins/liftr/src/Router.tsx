@@ -3,7 +3,7 @@ import { Route, Routes, useParams } from 'react-router-dom';
 import { InventoryPage } from './components/InventoryPage';
 import { ResourceDetailPage } from './components/ResourceDetailPage';
 import { CreateResourcePage } from './components/CreateResourcePage';
-import { ResourceTypeDetailPage } from './components/ResourceTypesPage';
+import { ResourceTypeDetailPage, ResourceTypesPage } from './components/ResourceTypesPage';
 import { OperationPage } from './components/OperationPage';
 
 const ResourceDetailBridge: React.FC = () => {
@@ -24,7 +24,7 @@ const LiftrRouterView = (): JSX.Element => (
     <Route path="/" element={<InventoryPage />} />
     <Route path="/create" element={<CreateResourcePage />} />
     <Route path="/resources/:id" element={<ResourceDetailBridge />} />
-    <Route path="/resource-types" element={<ResourceTypeDetailBridge />} />
+    <Route path="/resource-types" element={<ResourceTypesPage />} />
     <Route path="/resource-types/:name/:version" element={<ResourceTypeDetailBridge />} />
     <Route path="/operations/:id" element={<OperationPage />} />
   </Routes>

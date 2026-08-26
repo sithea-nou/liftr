@@ -133,9 +133,18 @@ describe('mutation bodies preserve numeric representation (adversarial 13)', () 
   });
 
   it('update wraps full replacement spec verbatim', () => {
-    const r = buildUpdateResourceBody('{"storageGB":50}');
+    const r = buildUpdateResourceBody('{"storageGB":50}', '{"database":["db-b"]}');
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.bodyText).toBe('{"spec":{"storageGB":50}}');
+    if (r.ok) expect(r.bodyText).toBe('{"spec":{"storageGB":50},"references":{"database":["db-b"]}}');
+  });
+
+  it('create carries references without normalizing spec numbers', () => {
+    const r = buildCreateResourceBody({
+      id: 'app', typeName: 'App', typeVersion: 'v1', ownerKind: 'team', ownerId: 'demo',
+      specText: '{"weight":20.0}', referencesText: '{"database":["db-a"]}',
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.bodyText).toBe('{"id":"app","type":{"name":"App","version":"v1"},"owner":{"kind":"team","id":"demo"},"spec":{"weight":20.0},"references":{"database":["db-a"]}}');
   });
 
   it('rejects non-object specs and unsafe identifiers before any network call', () => {

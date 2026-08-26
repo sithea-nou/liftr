@@ -37,7 +37,7 @@ release.
 | @backstage/errors | 1.3.1 |
 | @backstage/core-plugin-api | 1.12.9 |
 | @backstage/core-components | 0.16.4 |
-| @backstage/frontend-plugin-api | 0.9.5 |
+| @backstage/frontend-plugin-api | 0.18.0 |
 | @backstage/frontend-defaults | ^0.5 line (resolved in yarn.lock) |
 | @backstage/integration-react | 1.2.21 |
 | @backstage/cli | ^0.32 line (dist-workspace model) |
@@ -81,9 +81,11 @@ immutable workspace install; frontend plugin feature registration under the
 New Frontend System; backend plugin registration via `createBackend().add`;
 host typecheck; frontend package build (webpack bundle); backend dist-workspace
 packaging; and that operator configuration loads against both plugins'
-`config-schema.json`. Run it with `yarn verify:host`. Runtime startup of a
-complete portal (auth-backend wiring, databases) remains an adopting-app
-concern and is intentionally out of scope for the fixture.
+`config-schema.json`. Run it with `yarn verify:host`. For M21.6 only, the same
+fixture is runnable on loopback with Backstage's guest user provider, an
+in-memory SQLite database, and explicit Liftr `insecure-development` mode via
+`make demo-backstage-up`. This does not define a production auth composition;
+adopters still provide their own identity, database, and deployment wiring.
 
 Configuration reference: [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) and
 [examples/app-config.liftr.example.yaml](examples/app-config.liftr.example.yaml).

@@ -32,6 +32,15 @@ make demo        # runs the 8-step guided walkthrough (~30 seconds)
 make demo-down   # removes the server, drops the liftr_demo database
 ```
 
+For the Backstage developer-plane proof, use
+[`examples/demo/backstage.md`](backstage.md):
+
+```bash
+make demo-down
+make demo-backstage-up
+make demo-backstage
+```
+
 The server runs as a Docker Compose service (`compose.yaml`, profile `demo`)
 by default: `DEMO_RUNTIME=docker make demo-up`. To build and run the server as
 a native host process instead: `DEMO_RUNTIME=native make demo-up`. Both modes

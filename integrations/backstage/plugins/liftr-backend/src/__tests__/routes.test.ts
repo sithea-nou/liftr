@@ -14,7 +14,7 @@ import {
 } from '../credentials/provider';
 import { LiftrBackendConfig } from '../config';
 import { UpstreamForwarder } from '../forwarder';
-import { RouteDeps, handleLiftrProxyRequest, IncomingRequest } from '../routes';
+import { RouteDeps, ROUTES, handleLiftrProxyRequest, IncomingRequest } from '../routes';
 import { TokenExchangeCredentialProvider } from '../credentials/tokenExchange';
 import { PassthroughCredentialProvider } from '../credentials/passthrough';
 import { InsecureDevelopmentCredentialProvider } from '../credentials/insecureDev';
@@ -404,6 +404,29 @@ describe('Correction 3 — idempotency keys stay opaque byte-for-byte', () => {
       await h.close();
     }
   });
+
+  it('forwards reference replacement bytes with the original key and generation', async () => {
+    const body = '{"spec":{"image":"demo:v2","weight":20.0},"references":{"database":["db-b"]}}';
+    const h = await startHarness({
+      mode: 'insecure-development',
+      liftrHandler: (req, respond) => {
+        expect(req.body).toBe(body);
+        expect(req.headers['idempotency-key']).toBe('reference-update-key');
+        expect(req.headers['if-liftr-generation']).toBe('7');
+        respond(202, { 'Content-Type': 'application/json', Link: '</v1/operations/op-ref>; rel="monitor"' }, '{}');
+      },
+    });
+    try {
+      const result = await handleLiftrProxyRequest(h.deps, h.incoming('PUT', '/v1/resources/app', {
+        headers: { 'Idempotency-Key': 'reference-update-key', 'If-Liftr-Generation': '7' },
+        body,
+      }));
+      expect(result.status).toBe(202);
+      expect(JSON.parse(result.bodyText).monitorOperationId).toBe('op-ref');
+    } finally {
+      await h.close();
+    }
+  });
 });
 
 describe('Correction 4 — asymmetric 401 policy', () => {
@@ -581,6 +604,28 @@ describe('Correction 1 — delegation subject binding', () => {
 });
 
 describe('adversarial hardening', () => {
+  it('passes the real platform request to Backstage httpAuth glue', async () => {
+    const h = await startHarness({
+      mode: 'insecure-development',
+      liftrHandler: (_req, respond) => respond(200, { 'Content-Type': 'application/json' }, '{"items":[]}'),
+    });
+    const marker = { platform: 'request' };
+    let seen: unknown;
+    h.deps.authenticator = {
+      authenticate: async raw => {
+        seen = raw;
+        return { ok: true, userEntityRef: ALICE_REF };
+      },
+    };
+    try {
+      const result = await handleLiftrProxyRequest(h.deps, h.incoming('GET', '/v1/resources'), marker);
+      expect(result.status).toBe(200);
+      expect(seen).toBe(marker);
+    } finally {
+      await h.close();
+    }
+  });
+
   it('3: service principals are rejected before any upstream traffic', async () => {
     const h = await startHarness({
       liftrHandler: () => {
@@ -601,7 +646,7 @@ describe('adversarial hardening', () => {
   it('10: non-mirrored paths and injected queries never reach upstream (SSRF)', async () => {
     const h = await startHarness({ liftrHandler: () => {} });
     try {
-      for (const attempt of ['GET /v1/admin', 'GET /etc/passwd', 'GET //evil.com/v1/resources']) {
+      for (const attempt of ['GET /v1/admin', 'GET /admin/v1/resources', 'GET /proxy', 'GET /etc/passwd', 'GET //evil.com/v1/resources']) {
         const [method, path] = attempt.split(' ');
         const r = await handleLiftrProxyRequest(h.deps, h.incoming(method!, path!));
         expect([400, 404]).toContain(r.status);
@@ -609,6 +654,38 @@ describe('adversarial hardening', () => {
       const q = await handleLiftrProxyRequest(h.deps, h.incoming('GET', '/v1/resources?search=x&limit=5'));
       expect(q.status).toBe(400);
       expect(h.liftr.requests).toHaveLength(0);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('contains only the explicit public v1 route allowlist', () => {
+    expect(ROUTES).toHaveLength(10);
+    for (const route of ROUTES) {
+      expect(route.pattern.source.startsWith('^\\/v1\\/')).toBe(true);
+      expect(route.pattern.source).not.toContain('.*');
+      expect(route.pattern.source).not.toContain('admin');
+    }
+  });
+
+  it('serializes a generation conflict without leaking or truncating uint64', async () => {
+    const h = await startHarness({
+      mode: 'insecure-development',
+      liftrHandler: (_req, respond) => respond(
+        409,
+        { 'Content-Type': 'application/problem+json' },
+        '{"status":409,"code":"GENERATION_CONFLICT","title":"Generation conflict","currentGeneration":"18446744073709551615"}',
+      ),
+    });
+    try {
+      const result = await handleLiftrProxyRequest(h.deps, h.incoming('DELETE', '/v1/resources/x', {
+        headers: { 'Idempotency-Key': 'delete-key', 'If-Liftr-Generation': '1' },
+      }));
+      expect(result.status).toBe(409);
+      expect(JSON.parse(result.bodyText)).toMatchObject({
+        code: 'GENERATION_CONFLICT',
+        currentGeneration: '18446744073709551615',
+      });
     } finally {
       await h.close();
     }

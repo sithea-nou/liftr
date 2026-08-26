@@ -15,14 +15,15 @@
  * @vitest-environment jsdom
  */
 import React from 'react';
-import { configApiRef, fetchApiRef, identityApiRef } from '@backstage/core-plugin-api';
+import { configApiRef, discoveryApiRef, fetchApiRef, identityApiRef } from '@backstage/core-plugin-api';
 import { ApiProvider } from '@backstage/core-app-api';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
 import { InventoryPage } from '../components/InventoryPage';
 import { ResourceDetailPage } from '../components/ResourceDetailPage';
 import { liftrAuthApiRef } from '../api/auth';
-import { LiftrFrontendClient } from '../api/client';
+import { LiftrApiError, LiftrFrontendClient } from '../api/client';
+import { ProblemView } from '../components/common';
 
 function json(body: unknown, contentType = 'application/json'): Response {
   return new Response(JSON.stringify(body), {
@@ -41,6 +42,7 @@ function makeRegistry(fetchImpl: (url: string, init?: RequestInit) => Promise<Re
   // Structural ApiHolder: ApiProvider only calls .get(apiRef).
   const impls = new Map<unknown, unknown>([
     [fetchApiRef, { fetch: fetchImpl }],
+    [discoveryApiRef, { getBaseUrl: async () => '/api/liftr' }],
     [configApiRef, config],
     [
       identityApiRef,
@@ -125,10 +127,39 @@ async function waitForPredicate(predicate: () => void, timeoutMs = 15000): Promi
 }
 
 describe('frontend wiring smoke', () => {
+  it('renders bounded developer guidance for lifecycle and admission Problems', () => {
+    const cases = [
+      ['RESOURCE_IN_USE', 'Remove the desired reference'],
+      ['REFERENCE_INVALID', 'Review the ResourceType reference contract'],
+      ['DEPENDENCY_CYCLE', 'do not create a dependency cycle'],
+      ['POLICY_DENIED', 'satisfy platform admission policy'],
+      ['QUOTA_EXCEEDED', 'request a quota change'],
+      ['GENERATION_CONFLICT', 'Refresh and review the current generation'],
+    ];
+    for (const [code, guidance] of cases) {
+      const error = new LiftrApiError(
+        {
+          status: 409,
+          code,
+          title: 'Request refused',
+          detail: 'curated public detail',
+          ...(code === 'GENERATION_CONFLICT' ? { currentGeneration: 9n } : {}),
+        },
+        null,
+        409,
+      );
+      const view = render(<ProblemView error={error} />);
+      expect(view.baseElement.textContent).toContain(code);
+      expect(view.baseElement.textContent).toContain(guidance);
+      if (code === 'GENERATION_CONFLICT') expect(view.baseElement.textContent).toContain('9');
+      view.unmount();
+    }
+  });
+
   it('renders inventory from GET /v1/resources, then renders detail on selection', async () => {
     const fetchImpl = jest.fn(async (url: string) => {
       if (/^\/api\/liftr\/v1\/resources(\?.*)?$/.test(url)) return json(SUMMARY_FIXTURE);
-      if (url.startsWith('/api/liftr/v1/resource-types')) return json([]);
+      if (url.startsWith('/api/liftr/v1/resource-types')) return json({ items: [] });
       if (/^\/api\/liftr\/v1\/resources\/orders-db$/.test(url)) return json(DETAIL_FIXTURE);
       throw new Error(`unexpected fetch ${url}`);
     });

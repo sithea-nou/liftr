@@ -45,9 +45,23 @@ export interface OutputContract {
   fields: OutputFieldDescriptor[];
 }
 
+export interface ReferenceSlotDescriptor {
+  name: string;
+  allowedTargetTypes: ResourceTypeRef[];
+  minItems: number;
+  maxItems: number;
+}
+
+export interface ReferenceContract {
+  slots: ReferenceSlotDescriptor[];
+}
+
+export type ResourceReferences = Record<string, string[]>;
+
 export interface ResourceTypeDetail extends ResourceTypeSummary {
   specSchema: JsonValue;
   outputContract?: OutputContract;
+  referenceContract?: ReferenceContract;
 }
 
 export type ResourceState =
@@ -112,6 +126,7 @@ export interface ResourceSummary {
 
 export interface Resource extends Omit<ResourceSummary, 'status'> {
   spec: JsonValue;
+  references?: ResourceReferences;
   status: ResourceStatus;
   outputs?: ResourceOutputs;
 }
@@ -137,6 +152,10 @@ export interface Operation {
 export interface ResourceList {
   items: ResourceSummary[];
   nextCursor?: string;
+}
+
+export interface ResourceTypeList {
+  items: ResourceTypeSummary[];
 }
 
 export interface OperationList {
@@ -190,6 +209,20 @@ function losslessInt(
   return { ok: true, value: v };
 }
 
+function smallUint(
+  o: JsonObject,
+  key: string,
+  path: string,
+): { ok: true; value: number } | GuardFailure {
+  const parsed = losslessInt(o, key, path);
+  if (!parsed.ok) return parsed;
+  const value = parsed.value.toBigInt();
+  if (value === undefined || value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return fail(`${path}.${key}`, 'non-negative safe integer');
+  }
+  return { ok: true, value: Number(value) };
+}
+
 function joinItemPath(index: number, innerPath: string): string {
   const base = `$.items[${index}]`;
   return innerPath === '$' ? base : `${base}.${innerPath.slice(2)}`;
@@ -234,6 +267,19 @@ export function parseResourceTypeSummary(v: JsonValue): GuardResult<ResourceType
   };
 }
 
+export function parseResourceTypeList(v: JsonValue): GuardResult<ResourceTypeList> {
+  if (!asObject(v)) return fail('$', 'object');
+  const itemsRaw = v['items'];
+  if (!Array.isArray(itemsRaw)) return fail('$.items', 'array');
+  const items: ResourceTypeSummary[] = [];
+  for (let i = 0; i < itemsRaw.length; i++) {
+    const item = parseResourceTypeSummary(itemsRaw[i]);
+    if (!item.ok) return { ...item, path: joinItemPath(i, item.path) };
+    items.push(item.value);
+  }
+  return { ok: true, value: { items } };
+}
+
 export function parseResourceTypeDetail(v: JsonValue): GuardResult<ResourceTypeDetail> {
   const summary = parseResourceTypeSummary(v);
   if (!summary.ok) return summary;
@@ -264,7 +310,44 @@ export function parseResourceTypeDetail(v: JsonValue): GuardResult<ResourceTypeD
     }
     outputContract = { fields: out };
   }
-  return { ok: true, value: { ...summary.value, specSchema: obj['specSchema'], outputContract } };
+  let referenceContract: ReferenceContract | undefined;
+  const rc = obj['referenceContract'];
+  if (rc !== undefined && rc !== null) {
+    if (!asObject(rc)) return fail('$.referenceContract', 'object');
+    const slots = rc['slots'];
+    if (!Array.isArray(slots)) return fail('$.referenceContract.slots', 'array');
+    const parsedSlots: ReferenceSlotDescriptor[] = [];
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i];
+      const path = `$.referenceContract.slots[${i}]`;
+      if (!asObject(slot)) return fail(path, 'object');
+      const name = str(slot, 'name', path);
+      if (!name.ok) return name;
+      const allowedRaw = slot['allowedTargetTypes'];
+      if (!Array.isArray(allowedRaw)) return fail(`${path}.allowedTargetTypes`, 'array');
+      const allowedTargetTypes: ResourceTypeRef[] = [];
+      for (let j = 0; j < allowedRaw.length; j++) {
+        const target = parseResourceTypeRef(allowedRaw[j], `${path}.allowedTargetTypes[${j}]`);
+        if (!target.ok) return target;
+        allowedTargetTypes.push(target.value);
+      }
+      const minItems = smallUint(slot, 'minItems', path);
+      if (!minItems.ok) return minItems;
+      const maxItems = smallUint(slot, 'maxItems', path);
+      if (!maxItems.ok) return maxItems;
+      parsedSlots.push({ name: name.value, allowedTargetTypes, minItems: minItems.value, maxItems: maxItems.value });
+    }
+    referenceContract = { slots: parsedSlots };
+  }
+  return {
+    ok: true,
+    value: {
+      ...summary.value,
+      specSchema: obj['specSchema'],
+      ...(outputContract ? { outputContract } : {}),
+      ...(referenceContract ? { referenceContract } : {}),
+    },
+  };
 }
 
 function parseLatestOperationRef(v: JsonValue): GuardResult<LatestOperationRef> {
@@ -439,6 +522,23 @@ export function parseResourceDetail(v: JsonValue): GuardResult<Resource> {
     }
     outputs = { observedGeneration: og.value, values };
   }
+  let references: ResourceReferences | undefined;
+  const refsRaw = obj['references'];
+  if (refsRaw !== undefined && refsRaw !== null) {
+    if (!asObject(refsRaw)) return fail('$.references', 'object');
+    references = {};
+    for (const slot of Object.keys(refsRaw)) {
+      const targets = refsRaw[slot];
+      if (!Array.isArray(targets)) return fail(`$.references.${slot}`, 'array');
+      const parsedTargets: string[] = [];
+      for (let i = 0; i < targets.length; i++) {
+        const target = targets[i];
+        if (typeof target !== 'string') return fail(`$.references.${slot}[${i}]`, 'string');
+        parsedTargets.push(target);
+      }
+      references[slot] = parsedTargets;
+    }
+  }
   return {
     ok: true,
     value: {
@@ -450,6 +550,7 @@ export function parseResourceDetail(v: JsonValue): GuardResult<Resource> {
         updatedAt: summary.value.status.updatedAt,
       },
       spec: obj['spec'],
+      ...(references ? { references } : {}),
       ...(outputs ? { outputs } : {}),
     },
   };

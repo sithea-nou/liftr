@@ -238,7 +238,7 @@ async function pipeline(
   }
 
   // 2. Backstage authentication — user principals only.
-  const auth = await deps.authenticator.authenticate(req);
+  const auth = await deps.authenticator.authenticate(rawPlatformRequest);
   if (!auth.ok) {
     if (auth.kind === 'unauthenticated') {
       throw new BffError({
@@ -494,7 +494,7 @@ async function pipeline(
     return {
       status: upstream.status,
       contentType: `${PROBLEM_MEDIA_TYPE}; charset=utf-8`,
-      bodyText: JSON.stringify(doc),
+      bodyText: JSON.stringify(doc, (_key, value) => typeof value === 'bigint' ? value.toString() : value),
       headers: baseHeaders,
     };
   }

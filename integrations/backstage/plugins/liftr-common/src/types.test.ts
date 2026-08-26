@@ -6,6 +6,7 @@ import {
   parseResourceDetail,
   parseResourceList,
   parseResourceTypeDetail,
+  parseResourceTypeList,
   parseResourceTypeSummary,
   parseResourceSummary,
 } from './types';
@@ -51,11 +52,22 @@ describe('DTO guards accept documented shapes', () => {
       "outputContract": {"fields": [
         {"name": "hostname", "jsonType": "string", "requiredWhenReady": true},
         {"name": "port", "jsonType": "integer", "requiredWhenReady": true}
-      ]}
+      ]},
+      "referenceContract": {"slots": [{
+        "name": "database",
+        "allowedTargetTypes": [{"name": "DependencyAnchor", "version": "v1"}],
+        "minItems": 1,
+        "maxItems": 1
+      }]}
     }`);
     const d = parseResourceTypeDetail(parseLosslessJson(detailText));
     expect(d.ok).toBe(true);
-    if (d.ok) expect(d.value.outputContract!.fields).toHaveLength(2);
+    if (d.ok) {
+      expect(d.value.outputContract!.fields).toHaveLength(2);
+      expect(d.value.referenceContract!.slots[0]).toMatchObject({ name: 'database', minItems: 1, maxItems: 1 });
+    }
+    const list = parseResourceTypeList(parseLosslessJson(`{"items":[${SUMMARY_FIXTURE}]}`));
+    expect(list.ok).toBe(true);
   });
 
   it('resource list with cursor', () => {
@@ -76,6 +88,7 @@ describe('DTO guards accept documented shapes', () => {
       "owner": {"kind": "team", "id": "payments"},
       "generation": 5,
       "spec": {"storageGB": 20},
+      "references": {"database": ["db-a"]},
       "status": {"state": "Ready", "observedGeneration": 4, "updatedAt": "u",
         "conditions": [{"type": "Reconciled", "status": "True", "reason": "ok", "observedGeneration": 4}]},
       "outputs": {"observedGeneration": 4, "values": {"hostname": "db.example.com", "port": 5432}},
@@ -86,6 +99,7 @@ describe('DTO guards accept documented shapes', () => {
     if (detail.ok) {
       expect(detail.value.outputs!.values['port']!.toString()).toBe('5432');
       expect(detail.value.status.conditions).toHaveLength(1);
+      expect(detail.value.references).toEqual({ database: ['db-a'] });
     }
   });
 

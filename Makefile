@@ -1,6 +1,6 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build fmt fmt-check test test-race test-integration test-opentofu build-programs test-acceptance-azure vet verify verify-backstage demo-build demo-up demo demo-down
+.PHONY: build fmt fmt-check test test-race test-integration test-opentofu build-programs test-acceptance-azure vet verify verify-backstage demo-build demo-up demo demo-backstage-up demo-backstage demo-backstage-test demo-down
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" ./cmd/...
@@ -51,6 +51,10 @@ DEMO_DIR := .demo
 DEMO_BINDIR := $(DEMO_DIR)/bin
 DEMO_LOG := $(DEMO_DIR)/server.log
 DEMO_PID := $(DEMO_DIR)/server.pid
+DEMO_BACKSTAGE_APP_PID := $(DEMO_DIR)/backstage-app.pid
+DEMO_BACKSTAGE_BACKEND_PID := $(DEMO_DIR)/backstage-backend.pid
+DEMO_BACKSTAGE_APP_LOG := $(DEMO_DIR)/backstage-app.log
+DEMO_BACKSTAGE_BACKEND_LOG := $(DEMO_DIR)/backstage-backend.log
 DEMO_DB ?= liftr_demo
 DEMO_DATABASE_URL ?= postgres://liftr:liftr@127.0.0.1:55432/$(DEMO_DB)?sslmode=disable
 # docker (default) runs the demo server as a compose service; native builds
@@ -101,10 +105,52 @@ demo-up:
 demo:
 	@bash examples/demo/demo.sh
 
+demo-backstage-up: demo-up
+	@for pidfile in $(DEMO_BACKSTAGE_APP_PID) $(DEMO_BACKSTAGE_BACKEND_PID); do \
+		if [ -f "$$pidfile" ] && kill -0 "$$(cat $$pidfile)" 2>/dev/null; then \
+			echo "Backstage process already running (pid $$(cat $$pidfile)); run make demo-down first"; exit 1; \
+		fi; \
+	done
+	@cd integrations/backstage && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn@4.9.2 install --immutable
+	@cd integrations/backstage && { \
+		nohup corepack yarn@4.9.2 workspace @liftr/testhost-backend start > ../../$(DEMO_BACKSTAGE_BACKEND_LOG) 2>&1 & \
+		echo $$! > ../../$(DEMO_BACKSTAGE_BACKEND_PID); \
+	}
+	@for i in $$(seq 1 120); do \
+		if curl -fsS http://127.0.0.1:7007/.backstage/health/v1/readiness >/dev/null 2>&1; then break; fi; \
+		[ $$i -eq 120 ] && { echo "Backstage backend did not become ready; see $(DEMO_BACKSTAGE_BACKEND_LOG)"; exit 1; }; \
+		sleep 0.5; \
+	done
+	@cd integrations/backstage && { \
+		nohup corepack yarn@4.9.2 workspace @liftr/testhost-app start > ../../$(DEMO_BACKSTAGE_APP_LOG) 2>&1 & \
+		echo $$! > ../../$(DEMO_BACKSTAGE_APP_PID); \
+	}
+	@for i in $$(seq 1 180); do \
+		if curl -fsS http://localhost:3000/liftr >/dev/null 2>&1; then \
+			echo "Backstage demo ready on http://localhost:3000/liftr"; exit 0; fi; \
+		sleep 0.5; \
+	done; \
+	echo "Backstage frontend did not become ready; see $(DEMO_BACKSTAGE_APP_LOG)"; exit 1
+
+demo-backstage:
+	@echo "Backstage developer plane: http://localhost:3000/liftr"
+	@echo "Release a held demo Resource outside Backstage: curl -fsS -X POST http://127.0.0.1:18099/release/RESOURCE_ID"
+	@echo "Walkthrough: examples/demo/backstage.md"
+
+demo-backstage-test:
+	@cd integrations/backstage && \
+		LIFTR_BACKSTAGE_DEMO_BASE_URL=http://127.0.0.1:18080 \
+		LIFTR_BACKSTAGE_DEMO_CONTROL_URL=http://127.0.0.1:18099 \
+		COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack yarn@4.9.2 vitest run plugins/liftr-backend/src/__tests__/demo.integration.test.ts
+
 demo-opentofu:
 	@bash examples/demo/demo-opentofu.sh
 
 demo-down:
+	@for pidfile in $(DEMO_BACKSTAGE_APP_PID) $(DEMO_BACKSTAGE_BACKEND_PID); do \
+		if [ -f "$$pidfile" ] && kill -0 "$$(cat $$pidfile)" 2>/dev/null; then kill "$$(cat $$pidfile)" 2>/dev/null || true; fi; \
+		rm -f "$$pidfile"; \
+	done
 	@rm -f $(DEMO_PID)
 	@docker compose --profile demo rm -sf demo-server swagger-ui >/dev/null 2>&1 && echo "demo containers removed" || true
 	@if [ -f "$(DEMO_PID).old" ]; then rm -f "$(DEMO_PID).old"; fi

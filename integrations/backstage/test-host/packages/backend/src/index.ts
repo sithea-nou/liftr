@@ -1,18 +1,16 @@
 /**
  * Disposable host-backend compatibility fixture.
  *
- * Proves the Liftr BFF plugin registers through the standard backend system
- * (createBackend + backend.add) with current wiring types. Runtime startup is
- * intentionally not exercised here: a runnable host would also require the
- * auth-backend and database wiring that belongs to the adopting deployment,
- * not to this compile/build fixture. That boundary is documented in
- * integrations/backstage/README.md.
+ * The fixture also supports the loopback-only M21.6 demo with Backstage's
+ * guest user provider. Production adopters supply their own auth composition.
  */
 
 import { createBackend } from '@backstage/backend-defaults';
 import { liftrPlugin } from '@liftr/plugin-liftr-backend';
 
 const backend = createBackend();
+backend.add(import('@backstage/plugin-auth-backend'));
+backend.add(import('@backstage/plugin-auth-backend-module-guest-provider'));
 backend.add(liftrPlugin);
 
 void backend.start().catch(error => {

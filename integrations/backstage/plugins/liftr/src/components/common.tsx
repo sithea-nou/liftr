@@ -108,7 +108,7 @@ export function OutputsFreshness({
         generationGte(outputsGeneration, desiredGeneration)
       : generationGte(outputsGeneration, desiredGeneration);
   return (
-    <Typography variant="body2">
+    <Typography component="div" variant="body2">
       {fresh ? (
         <>
           <Chip size="small" label="Fresh" color="primary" variant="outlined" />{' '}
@@ -138,6 +138,7 @@ export function ProblemView({
 }) {
   const problem = error.problem as LiftrProblem | undefined;
   const bff = error.bff as BffErrorBody | undefined;
+  const guidance = problem?.code ? PROBLEM_GUIDANCE[problem.code] : undefined;
   return (
     <div role="alert" style={{ border: '1px solid #d32f2f', borderRadius: 4, padding: 12 }}>
       <Typography variant="subtitle2" style={{ color: '#d32f2f' }}>
@@ -151,6 +152,7 @@ export function ProblemView({
           Code: {problem.code}
         </Typography>
       )}
+      {guidance && <Typography variant="body2">{guidance}</Typography>}
       {problem?.currentGeneration !== undefined && (
         <Typography variant="body2">
           Current generation on the server: {problem.currentGeneration.toString()} — review and reload
@@ -194,3 +196,12 @@ export function ProblemView({
     </div>
   );
 }
+
+const PROBLEM_GUIDANCE: Record<string, string> = {
+  RESOURCE_IN_USE: 'Remove the desired reference and wait for the referencing Resource to finish deletion before retrying.',
+  REFERENCE_INVALID: 'Review the ResourceType reference contract and choose a visible Resource with an allowed type.',
+  DEPENDENCY_CYCLE: 'Choose reference targets that do not create a dependency cycle.',
+  POLICY_DENIED: 'Adjust the requested Resource to satisfy platform admission policy.',
+  QUOTA_EXCEEDED: 'Delete unused Resources or request a quota change before retrying.',
+  GENERATION_CONFLICT: 'The Resource changed after this page loaded. Refresh and review the current generation before retrying.',
+};

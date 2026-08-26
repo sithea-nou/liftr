@@ -6,7 +6,7 @@
  * client-side global search, no counts, and no persisted state.
  */
 
-import { Grid, Typography } from '@material-ui/core';
+import { Button, Grid, Typography } from '@material-ui/core';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -101,6 +101,15 @@ export const InventoryPage: React.FC = () => {
     <Grid container spacing={3}>
       <Grid item xs={12}>
         <InfoCard title="Liftr Resources" subheader="Authorized inventory served live from Liftr (GET /v1/resources)">
+          <Button
+            variant="contained"
+            color="primary"
+            size="small"
+            style={{ marginBottom: 12 }}
+            onClick={() => navigate('/liftr/create')}
+          >
+            Create Resource
+          </Button>
           <InventoryFilters value={query} onChange={applyFilter} />
           {error === null && items.length === 0 && !loading && (
             <Typography variant="body2" color="textSecondary">

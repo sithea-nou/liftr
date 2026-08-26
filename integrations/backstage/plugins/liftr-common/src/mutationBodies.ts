@@ -50,6 +50,8 @@ export function buildCreateResourceBody(input: {
   ownerId: string;
   /** Raw spec JSON text exactly as the developer wrote it. */
   specText: string;
+  /** Raw desired-reference object. Omitted and {} are equivalent on create. */
+  referencesText?: string;
 }): { ok: true; bodyText: string } | { ok: false; error: string } {
   if (!isValidResourceTransportId(input.id)) {
     return { ok: false, error: 'resource id must be a single URL-segment-safe string' };
@@ -61,9 +63,13 @@ export function buildCreateResourceBody(input: {
     return { ok: false, error: 'invalid owner reference' };
   }
   let spec: string;
+  let references: string | undefined;
   try {
     const obj = requirePlainObject(input.specText, 'spec');
     spec = stringifySpecVerbatim(obj);
+    if (input.referencesText !== undefined) {
+      references = stringifySpecVerbatim(requirePlainObject(input.referencesText, 'references'));
+    }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : 'invalid spec' };
   }
@@ -77,6 +83,7 @@ export function buildCreateResourceBody(input: {
     `"kind":${quoteString(input.ownerKind)},"id":${quoteString(input.ownerId)}` +
     '},' +
     `"spec":${spec}` +
+    (references !== undefined ? `,"references":${references}` : '') +
     '}';
   // Round-trip sanity: the assembled document must itself parse.
   try {
@@ -91,10 +98,16 @@ export function buildCreateResourceBody(input: {
  * Build the PUT /v1/resources/{id} body: full replacement, `{spec: ...}`,
  * with the same verbatim-splice guarantee.
  */
-export function buildUpdateResourceBody(specText: string): { ok: true; bodyText: string } | { ok: false; error: string } {
+export function buildUpdateResourceBody(
+  specText: string,
+  referencesText?: string,
+): { ok: true; bodyText: string } | { ok: false; error: string } {
   try {
     const obj = requirePlainObject(specText, 'spec');
-    const body = `{"spec":${stringifySpecVerbatim(obj)}}`;
+    const references = referencesText === undefined
+      ? ''
+      : `,"references":${stringifySpecVerbatim(requirePlainObject(referencesText, 'references'))}`;
+    const body = `{"spec":${stringifySpecVerbatim(obj)}${references}}`;
     parseLosslessJson(body);
     return { ok: true, bodyText: body };
   } catch (e) {

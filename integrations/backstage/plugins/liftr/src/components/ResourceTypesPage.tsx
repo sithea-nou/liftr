@@ -5,7 +5,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { Grid, Typography, List, ListItem, ListItemText } from '@material-ui/core';
-import { InfoCard } from '@backstage/core-components';
+import { InfoCard, Link } from '@backstage/core-components';
 import { ResourceTypeDetail, ResourceTypeSummary } from '@liftr/plugin-liftr-common';
 import {
   stringifyLosslessJson,
@@ -38,8 +38,12 @@ export const ResourceTypesPage: React.FC = () => {
           {(items ?? []).map(t => (
             <ListItem key={`${t.name}/${t.version}`}>
               <ListItemText
-                primary={`${t.name} / ${t.version}`}
-                secondary={`${t.displayName} — ${t.description} · capabilities: ${t.capabilities.join(', ')}`}
+                primary={(
+                  <Link to={`/liftr/resource-types/${encodeURIComponent(t.name)}/${encodeURIComponent(t.version)}`}>
+                    {t.name} / {t.version}
+                  </Link>
+                )}
+                secondary={`${t.displayName} - ${t.description} · capabilities: ${t.capabilities.join(', ')}`}
               />
             </ListItem>
           ))}
@@ -83,6 +87,21 @@ export const ResourceTypeDetailPage: React.FC<{ name: string; version: string }>
           subheader={detail.description}
         >
           <Typography variant="body2">Capabilities: {detail.capabilities.join(', ')}</Typography>
+          {detail.referenceContract && (
+            <>
+              <Typography variant="subtitle2" style={{ marginTop: 12 }}>
+                Reference contract
+              </Typography>
+              <ul>
+                {detail.referenceContract.slots.map(slot => (
+                  <li key={slot.name}>
+                    <code>{slot.name}</code>: {slot.minItems}..{slot.maxItems} target(s) of type{' '}
+                    {slot.allowedTargetTypes.map(target => `${target.name}/${target.version}`).join(', ')}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           {detail.outputContract && (
             <>
               <Typography variant="subtitle2" style={{ marginTop: 12 }}>

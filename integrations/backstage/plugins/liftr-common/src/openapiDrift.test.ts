@@ -62,6 +62,13 @@ describe('OpenAPI drift protection', () => {
     const r = schema('Resource');
     expect(new Set(Object.keys(r.properties ?? {})).has('spec')).toBe(true);
     expect(new Set(Object.keys(r.properties ?? {})).has('outputs')).toBe(true);
+    expect(new Set(Object.keys(r.properties ?? {})).has('references')).toBe(true);
+    const type = schema('ResourceType');
+    expect(new Set(Object.keys(type.properties ?? {})).has('referenceContract')).toBe(true);
+    expect(schema('ResourceTypeReferenceContract')).toBeDefined();
+    expect(schema('ResourceTypeReferenceSlot')).toBeDefined();
+    expect(schema('CreateResourceRequest').properties).toHaveProperty('references');
+    expect(schema('UpdateResourceRequest').properties).toHaveProperty('references');
   });
 
   it('Operation documents retryOf as an optional string field', () => {
