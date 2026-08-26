@@ -14,9 +14,13 @@ import (
 
 const ownerQuotaLockNamespace = "liftr/quota-owner/v1"
 
-// LockOwnerQuota acquires the one M18 quota lock for the actual authorized
-// owner. PostgreSQL's two-int32 advisory namespace is disjoint from existing
-// single-bigint Resource and idempotency locks.
+// LockOwnerQuota acquires the one M18 owner admission lock for the actual
+// authorized owner. M21 widens its USE to every graph-mutating admission
+// (relationship-bearing creates, reference-bearing updates, target-delete
+// protection) while keeping the SQL and key derivation byte-identical; it is
+// always acquired before any Resource row lock and is never taken by worker
+// paths (ADR-0019/0022). PostgreSQL's two-int32 advisory namespace is disjoint
+// from existing single-bigint Resource and idempotency locks.
 func (r *repositories) LockOwnerQuota(ctx context.Context, owner domain.OwnerRef) error {
 	first, second := ownerQuotaLockKey(owner)
 	if _, err := r.tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::integer,$2::integer)`, first, second); err != nil {

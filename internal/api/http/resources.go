@@ -3,10 +3,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -24,10 +26,18 @@ type createResourceEnvelope struct {
 	Type  resourceTypeDTO `json:"type"`
 	Owner ownerDTO        `json:"owner"`
 	Spec  json.RawMessage `json:"spec"`
+	// References is the optional desired dependency binding. Absent and empty
+	// mean the same thing on create: no references.
+	References map[string][]string `json:"references,omitempty"`
 }
 
+// updateResourceEnvelope tracks references PRESENCE explicitly: an absent
+// field preserves the stored desired references (old-client compatibility), an
+// explicitly present field — including {} — fully replaces them. A JSON null
+// is rejected as ambiguous.
 type updateResourceEnvelope struct {
-	Spec json.RawMessage `json:"spec"`
+	Spec       json.RawMessage `json:"spec"`
+	References json.RawMessage `json:"references,omitempty"`
 }
 
 // requirePrincipal returns the authenticated principal assigned by the
@@ -108,6 +118,10 @@ func (h *handler) createResource(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, CodeInvalidArgument, "spec is not a valid resource specification", nil)
 		return
 	}
+	if rerr := validateReferencesEnvelope(env.References); rerr != nil {
+		writeProblem(w, r, rerr.code, rerr.detail, nil)
+		return
+	}
 	id := domain.ResourceID(env.ID)
 
 	operationID, eventID, ok := mintLifecycleIDs()
@@ -121,6 +135,7 @@ func (h *handler) createResource(w http.ResponseWriter, r *http.Request) {
 		Type:           domain.ResourceTypeRef{Name: env.Type.Name, Version: env.Type.Version},
 		Owner:          domain.OwnerRef{Kind: env.Owner.Kind, ID: env.Owner.ID},
 		Spec:           spec,
+		References:     env.References,
 		OperationID:    operationID,
 		EventID:        eventID,
 		RequestedAt:    nowUTC(),
@@ -164,7 +179,7 @@ func (h *handler) getResource(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Liftr-Generation", strconv.FormatUint(view.Resource.Resource.Generation(), 10))
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(newResourceDTO(view.Resource, view.Latest, view.Outputs))
+	_ = json.NewEncoder(w).Encode(newResourceDTO(view.Resource, view.Latest, view.Outputs, view.References))
 }
 
 // updateResource admits an asynchronous spec revision for a principal
@@ -198,6 +213,11 @@ func (h *handler) updateResource(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, CodeInvalidArgument, "spec is not a valid resource specification", nil)
 		return
 	}
+	references, present, rerr := decodeUpdateReferences(env.References)
+	if rerr != nil {
+		writeProblem(w, r, rerr.code, rerr.detail, nil)
+		return
+	}
 	target, key, expectedGeneration, ok := h.requireAuthorizedMutation(w, r, principal, identity.ActionResourceUpdate)
 	if !ok {
 		return
@@ -212,6 +232,8 @@ func (h *handler) updateResource(w http.ResponseWriter, r *http.Request) {
 		ID:                 target.resourceID,
 		ExpectedGeneration: expectedGeneration,
 		Spec:               spec,
+		ReferencesPresent:  present,
+		References:         references,
 		OperationID:        operationID,
 		EventID:            eventID,
 		RequestedAt:        nowUTC(),
@@ -373,7 +395,7 @@ func (h *handler) writeMutationResponse(w http.ResponseWriter, r *http.Request, 
 		view.Latest = &latest
 	}
 
-	body := newResourceDTO(view.Resource, view.Latest, view.Outputs)
+	body := newResourceDTO(view.Resource, view.Latest, view.Outputs, view.References)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Liftr-Generation", strconv.FormatUint(body.Generation, 10))
@@ -396,6 +418,46 @@ func requireIdempotencyKey(r *http.Request) (string, *requestError) {
 		return "", &requestError{code: CodeInvalidArgument, detail: "the Idempotency-Key header is required"}
 	}
 	return key, nil
+}
+
+// validateReferencesEnvelope applies transport-level shape rules to the
+// create references binding: slot names must be non-empty and target IDs must
+// be non-empty strings. Contract-level semantics live in the application.
+func validateReferencesEnvelope(references map[string][]string) *requestError {
+	for slot, targets := range references {
+		if strings.TrimSpace(slot) == "" {
+			return badRequest("reference slot names must be non-empty")
+		}
+		for _, target := range targets {
+			if err := validateTransportID(target); err != nil {
+				return badRequest(fmt.Sprintf("reference target in slot %q %s", slot, err.Error()))
+			}
+		}
+	}
+	return nil
+}
+
+// decodeUpdateReferences distinguishes an absent references field from an
+// explicitly present one. Absent preserves stored relationships; present —
+// including {} — replaces them. JSON null is rejected as ambiguous rather
+// than silently treated as either.
+func decodeUpdateReferences(raw json.RawMessage) (map[string][]string, bool, *requestError) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, false, nil
+	}
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return nil, false, badRequest("references cannot be null; omit the field to preserve existing references or supply an object")
+	}
+	var decoded map[string][]string
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, false, badRequest("references must be an object mapping slot names to arrays of resource IDs")
+	}
+	if rerr := validateReferencesEnvelope(decoded); rerr != nil {
+		return nil, false, rerr
+	}
+	return decoded, true, nil
 }
 
 // parseGenerationPrecondition accepts only a concrete unsigned 64-bit decimal

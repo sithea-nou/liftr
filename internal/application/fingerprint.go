@@ -39,12 +39,36 @@ func canonicalSpec(spec domain.ResourceSpec) (string, error) {
 	return string(encoded), nil
 }
 
+// canonicalReferenceEdges renders a canonical reference set into a
+// deterministic byte string. Canonicalization already sorts slots and targets;
+// the encoding is length-framed and versioned so no delimiter can collide and
+// future shapes cannot alias older ones.
+func canonicalReferenceEdges(edges []ReferenceEdge) string {
+	hasher := sha256.New()
+	writeFramedPart(hasher, "refs-v1")
+	writeFramedPart(hasher, strconv.Itoa(len(edges)))
+	for _, edge := range edges {
+		writeFramedPart(hasher, edge.Slot)
+		writeFramedPart(hasher, string(edge.TargetID))
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func writeFramedPart(hasher interface{ Write([]byte) (int, error) }, part string) {
+	hasher.Write([]byte(fmt.Sprintf("%08x", len(part))))
+	hasher.Write([]byte(part))
+}
+
 func createCommandFingerprint(cmd CreateResourceCommand) (string, error) {
 	spec, err := canonicalSpec(cmd.Spec)
 	if err != nil {
 		return "", err
 	}
-	return fingerprintHash("create", string(cmd.ID), cmd.Type.Name, cmd.Type.Version, cmd.Owner.Kind, cmd.Owner.ID, spec), nil
+	edges, err := CanonicalizeReferences(cmd.References)
+	if err != nil {
+		return "", err
+	}
+	return fingerprintHash("create", string(cmd.ID), cmd.Type.Name, cmd.Type.Version, cmd.Owner.Kind, cmd.Owner.ID, spec, canonicalReferenceEdges(edges)), nil
 }
 
 func updateCommandFingerprint(cmd UpdateResourceCommand) (string, error) {
@@ -52,7 +76,18 @@ func updateCommandFingerprint(cmd UpdateResourceCommand) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fingerprintHash("update", string(cmd.ID), strconv.FormatUint(cmd.ExpectedGeneration, 10), spec), nil
+	// The fingerprint covers the SUBMITTED references form: absent fields
+	// preserve stored relationships and are distinct from an explicit empty
+	// replacement, so the two can never replay against each other.
+	referencePart := "absent"
+	if cmd.ReferencesPresent {
+		edges, err := CanonicalizeReferences(cmd.References)
+		if err != nil {
+			return "", err
+		}
+		referencePart = canonicalReferenceEdges(edges)
+	}
+	return fingerprintHash("update", string(cmd.ID), strconv.FormatUint(cmd.ExpectedGeneration, 10), spec, referencePart), nil
 }
 
 func deleteCommandFingerprint(cmd DeleteResourceCommand) string {

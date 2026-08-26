@@ -959,6 +959,52 @@ components:
           $ref: "#/components/schemas/ResourceSpecSchema"
         outputContract:
           $ref: "#/components/schemas/ResourceTypeOutputContract"
+        referenceContract:
+          $ref: "#/components/schemas/ResourceTypeReferenceContract"
+    ResourceTypeReferenceContract:
+      type: object
+      description: |
+        The provider-neutral reference contract of one ResourceType version
+        (M21). It declares the bounded, hard-dependency slots through which a
+        Resource may explicitly depend on other Liftr Resources of the same
+        owner. Targets are exact ResourceTypeRefs; wildcards, selectors,
+        expressions, provider constraints, and reference modes do not exist.
+        All bound references carry identical lifecycle semantics; optionality
+        exists only as minItems == 0. Relationship execution (ordering,
+        deletion protection) is Liftr-owned and provisioner-independent. The
+        contract is immutable once the type is released: adding or changing
+        slots requires a new ResourceType version. No backend or provisioner
+        information appears anywhere in this document.
+      required: [slots]
+      properties:
+        slots:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceTypeReferenceSlot"
+    ResourceTypeReferenceSlot:
+      type: object
+      required: [name, allowedTargetTypes, minItems, maxItems]
+      properties:
+        name:
+          type: string
+          description: Deterministic slot name used in Resource references.
+        allowedTargetTypes:
+          type: array
+          description: Exact ResourceType refs this slot may bind.
+          items:
+            type: object
+            required: [name, version]
+            properties:
+              name:
+                type: string
+              version:
+                type: string
+        minItems:
+          type: integer
+          description: 0 or 1 in M21.
+        maxItems:
+          type: integer
+          minimum: 1
     SpecViolation:
       type: object
       description: |
@@ -1128,6 +1174,18 @@ components:
           $ref: "#/components/schemas/LatestOperationRef"
         outputs:
           $ref: "#/components/schemas/ResourceOutputs"
+        references:
+          type: object
+          description: |
+            The canonical DESIRED dependency set (M21): slot names mapped to
+            arrays of Liftr Resource IDs, sorted deterministically. Applied
+            references are internal protective evidence and are never exposed;
+            observedGeneration already communicates whether the desired
+            generation has converged. Same-owner only.
+          additionalProperties:
+            type: array
+            items:
+              type: string
         createdAt:
           type: string
           format: date-time
@@ -1220,6 +1278,8 @@ components:
           $ref: "#/components/schemas/OwnerRef"
         spec:
           $ref: "#/components/schemas/ResourceSpec"
+        references:
+          $ref: "#/components/schemas/ResourceReferences"
     UpdateResourceRequest:
       type: object
       required: [spec]
@@ -1227,6 +1287,33 @@ components:
       properties:
         spec:
           $ref: "#/components/schemas/ResourceSpec"
+        references:
+          $ref: "#/components/schemas/ResourceReferencesUpdate"
+    ResourceReferences:
+      type: object
+      description: |
+        The desired dependency binding for a create (M21): an object mapping
+        contract-declared slot names to arrays of Liftr Resource IDs. Omitted
+        and empty mean the same thing on create. Slot order and target-ID
+        order are irrelevant; duplicates are rejected; cardinality is bounded
+        by the ResourceType's referenceContract.
+      additionalProperties:
+        type: array
+        items:
+          type: string
+    ResourceReferencesUpdate:
+      type: object
+      description: |
+        Desired dependency binding on update (M21). PRESENCE is meaningful:
+        omitting the field PRESERVES the stored desired references so clients
+        that send only spec can never accidentally destroy relationships;
+        supplying the field — including {} — fully REPLACES the desired set
+        (subject to the referenceContract's required minItems). JSON null is
+        rejected as ambiguous.
+      additionalProperties:
+        type: array
+        items:
+          type: string
     OperationFailure:
       type: object
       required: [reason]
@@ -1331,6 +1418,9 @@ components:
             - PROVISIONER_UNAVAILABLE
             - POLICY_DENIED
             - QUOTA_EXCEEDED
+            - REFERENCE_INVALID
+            - RESOURCE_IN_USE
+            - DEPENDENCY_CYCLE
             - PERSISTENCE_UNAVAILABLE
             - INTERNAL
         requestId:

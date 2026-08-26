@@ -66,9 +66,17 @@ func TestOpenAPIModelsPublicSchemas(t *testing.T) {
 	schemas := componentSchemas(t, document)
 
 	resourceProperties := propertyNames(t, schemas["Resource"])
-	wantResource := []string{"id", "type", "owner", "generation", "spec", "status", "latestOperation", "outputs", "createdAt", "updatedAt"}
+	wantResource := []string{"id", "type", "owner", "generation", "spec", "status", "latestOperation", "outputs", "references", "createdAt", "updatedAt"}
 	if strings.Join(resourceProperties, ",") != strings.Join(sorted(wantResource), ",") {
 		t.Fatalf("Resource properties = %v, want %v", resourceProperties, wantResource)
+	}
+
+	// The M21 reference contract must be modeled explicitly alongside the
+	// output contract.
+	for _, name := range []string{"ResourceReferences", "ResourceReferencesUpdate", "ResourceTypeReferenceContract", "ResourceTypeReferenceSlot"} {
+		if _, ok := schemas[name]; !ok {
+			t.Errorf("component schema %q is not modeled explicitly", name)
+		}
 	}
 
 	// The outputs envelope and the discovery output contract must be modeled

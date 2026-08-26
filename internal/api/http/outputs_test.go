@@ -59,8 +59,11 @@ func (c outputContract) Capabilities() []domain.Capability                { retu
 func (c outputContract) Domain() domain.ResourceType                      { return c.inner }
 func (c outputContract) SpecSchema() json.RawMessage                      { return json.RawMessage(`{"type":"object"}`) }
 func (c outputContract) OutputContract() *resourcecontract.OutputContract { return &c.fields }
-func (outputContract) ValidateSpec(domain.ResourceSpec) error             { return nil }
-func (outputContract) ValidateUpdate(_, _ domain.ResourceSpec) error      { return nil }
+func (c outputContract) ReferenceContract() *resourcecontract.ReferenceContract {
+	return nil
+}
+func (outputContract) ValidateSpec(domain.ResourceSpec) error        { return nil }
+func (outputContract) ValidateUpdate(_, _ domain.ResourceSpec) error { return nil }
 
 func (c *outputContractCatalog) Get(_ context.Context, ref domain.ResourceTypeRef) (resourcecontract.Contract, error) {
 	typeValue, ok := c.inner.Types[ref]

@@ -372,11 +372,16 @@ func (s *Service) ResourceOperatorDiagnostics(ctx context.Context, principal ide
 				lastActivity := lastActivityOf(operation, execution)
 				diag.ReconciliationSilenceSeconds = durationSeconds(now.Sub(clampPast(lastActivity, now)))
 				diag.RegistrationAvailable = s.resolveRegistration(ctx, execution.ProvisionerRef)
+				dependencyBlocked, blockErr := tx.DependencyWaits().HasDependencyWaitsForOperation(ctx, operation.ID())
+				if blockErr != nil {
+					return blockErr
+				}
 				observeSnapshot = OperationRecoverySnapshot{
 					OperationState:        operation.State(),
 					HasExecution:          true,
 					Execution:             summary,
 					ActiveObserveWork:     work.HasActive(OutboxObserve),
+					DependencyBlocked:     dependencyBlocked,
 					RegistrationAvailable: diag.RegistrationAvailable,
 				}
 			} else if errors.Is(execErr, ErrResourceNotFound) || errors.Is(execErr, ErrOperationNotFound) {

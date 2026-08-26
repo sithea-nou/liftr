@@ -190,6 +190,11 @@ type Contract interface {
 	// OutputContract returns the declared non-secret output contract, or nil
 	// when the ResourceType publishes no outputs.
 	OutputContract() *OutputContract
+	// ReferenceContract returns the declared provider-neutral reference
+	// contract, or nil when the type participates in no relationships as a
+	// source. Relationship semantics belong to Liftr; this contract only
+	// declares the slots, exact target types, and cardinality bounds.
+	ReferenceContract() *ReferenceContract
 }
 
 // The catalog port ("what developer contracts exist?") stays consumer-owned

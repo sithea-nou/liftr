@@ -18,6 +18,16 @@ const (
 	ConditionReconciling     = "Reconciling"
 	ConditionOperationFailed = "OperationFailed"
 	ConditionDeleted         = "Deleted"
+	// ConditionDependenciesReady is the Liftr-owned M21 dependency condition.
+	// It is set and cleared exclusively by the application's execution gate;
+	// provisioners never produce Conditions at all, so ownership stays clean:
+	// provider-derived readiness facts never mix with relationship truth.
+	ConditionDependenciesReady = "DependenciesReady"
+
+	ReasonWaitingForDependencies = "WaitingForDependencies"
+	ReasonDependencyFailed       = "DependencyFailed"
+	ReasonDependencyInvalid      = "DependencyInvalid"
+	ReasonDependenciesSatisfied  = "DependenciesSatisfied"
 
 	EventLifecycleRequested = "LifecycleRequested"
 	EventPhaseChanged       = "LifecyclePhaseChanged"
@@ -322,6 +332,17 @@ func (Engine) Fail(
 	}
 
 	return Result{Operation: updatedOperation, Status: updatedStatus, Event: event}, nil
+}
+
+// SetDependencyCondition records the Liftr-owned DependenciesReady fact on a
+// ResourceStatus without touching state, observedGeneration, or any other
+// condition. It is the single sanctioned writer of the dependency condition.
+func (Engine) SetDependencyCondition(status domain.ResourceStatus, conditionStatus domain.ConditionStatus, reason, message string, at time.Time) (domain.ResourceStatus, error) {
+	conditions, err := setCondition(status.Conditions(), ConditionDependenciesReady, conditionStatus, reason, message, status.ObservedGeneration(), at)
+	if err != nil {
+		return domain.ResourceStatus{}, err
+	}
+	return domain.NewResourceStatus(status.ResourceID(), status.ObservedGeneration(), status.State(), conditions, at)
 }
 
 func validateResourceContext(resource domain.Resource, resourceType domain.ResourceType, status domain.ResourceStatus, at time.Time) error {

@@ -465,6 +465,41 @@ provenance; logs never contain the raw idempotency key. An increase in
 `unsafe`, `not_applicable`, `conflict`, or `stale` is a prompt to reread current
 diagnostics, not to bypass the planner.
 
+## 14. Resource dependencies and blocked dependents (M21)
+
+Resources may declare provider-neutral references to other Liftr Resources of
+the same owner (ADR-0022). A dependent's create/update waits until every hard
+dependency is READY; a conclusively Failed dependency with no active recovery
+fails the dependent PRE-SUBMISSION with reasons `DependencyFailed` /
+`DependencyInvalid`. There is no force-submit and no dependency override:
+progress comes only from target-state wakes driving fresh gate evaluations.
+
+Symptoms and actions:
+
+- **Dependent stuck with `DependenciesReady=False/WaitingForDependencies`:**
+  expected while a dependency converges. Inspect the referenced Resource via
+  the source's public `references`; fix or retry the dependency. The planner
+  reports `DEPENDENCY_BLOCKED` / `no_action_needed` — Observe triggers are
+  intentionally refused because no provider execution exists.
+- **`DependencyFailed` on the dependent:** the dependency terminalized Failed
+  with nothing in flight. Retry the dependency first; then M13-retry or update
+  the dependent. Retrying the dependent alone re-fails pre-submission by
+  design.
+- **`RESOURCE_IN_USE` on delete:** another live Resource still desires or may
+  physically depend on this one. Delete or retarget the dependent; release
+  order is user-sequenced (no cascade).
+- **`DEPENDENCY_WAKE_DEAD`:** a Dead wake row is recoverable — recovery mints
+  ONE fresh current-version wake from current state and never replays waiters.
+- **Reference-invariant INTERNAL failures on delete:** protective rows owned
+  by a Deleted source indicate corruption; investigate durable state before
+  any manual repair. Deletion stays blocked (fail closed).
+
+Metrics: `liftr.dependency.gate.total{result=ready|waiting|failed|invalid}` and
+`liftr.dependency.wake.total{result}`. Neither carries IDs, owners, slots,
+types, or graph depth. A sustained `waiting` share with no wake traffic can
+indicate lost-wake machinery damage — check Dead work sampled as
+`WakeDependents` first.
+
 ## Alerting cookbook (examples, not product)
 
 - 5xx ratio: `sum(rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m])) / sum(rate(http_server_request_duration_seconds_count[5m])) > 0.02`

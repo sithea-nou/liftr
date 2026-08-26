@@ -65,7 +65,9 @@ type resourceOutputsDTO struct {
 // state, normalized observed state, and a monitor link for the latest
 // Operation. Internal concepts such as phases, provisioner references,
 // execution handles, attempts, outbox records, fingerprints, and storage
-// versions have no representation here.
+// versions have no representation here. references exposes the canonical
+// DESIRED dependency set (M21); applied references are internal protective
+// evidence and never serialized.
 type resourceDTO struct {
 	ID              string                 `json:"id"`
 	Type            resourceTypeDTO        `json:"type"`
@@ -75,6 +77,7 @@ type resourceDTO struct {
 	Status          resourceStatusDTO      `json:"status"`
 	LatestOperation *latestOperationRefDTO `json:"latestOperation,omitempty"`
 	Outputs         *resourceOutputsDTO    `json:"outputs,omitempty"`
+	References      map[string][]string    `json:"references,omitempty"`
 	CreatedAt       time.Time              `json:"createdAt"`
 	UpdatedAt       time.Time              `json:"updatedAt"`
 }
@@ -113,7 +116,7 @@ func instant(at time.Time) *time.Time {
 	return &value
 }
 
-func newResourceDTO(record application.ResourceRecord, latest *domain.Operation, outputs *domain.ResourceOutputs) resourceDTO {
+func newResourceDTO(record application.ResourceRecord, latest *domain.Operation, outputs *domain.ResourceOutputs, references []application.ReferenceEdge) resourceDTO {
 	resource := record.Resource
 	resourceType := resource.Type()
 	owner := resource.Owner()
@@ -133,6 +136,13 @@ func newResourceDTO(record application.ResourceRecord, latest *domain.Operation,
 		},
 		CreatedAt: resource.CreatedAt().UTC(),
 		UpdatedAt: resource.UpdatedAt().UTC(),
+	}
+	if len(references) > 0 {
+		grouped := map[string][]string{}
+		for _, edge := range references {
+			grouped[edge.Slot] = append(grouped[edge.Slot], string(edge.TargetID))
+		}
+		dto.References = grouped
 	}
 	for _, condition := range status.Conditions() {
 		dto.Status.Conditions = append(dto.Status.Conditions, conditionDTO{

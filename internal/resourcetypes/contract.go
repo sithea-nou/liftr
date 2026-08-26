@@ -50,6 +50,11 @@ type ContractInput struct {
 	// this ResourceType version. Nil or empty means the type publishes no
 	// outputs; a declared output contract is part of the immutable contract.
 	Outputs []resourcecontract.OutputField
+	// References declares the provider-neutral reference slots of this
+	// ResourceType version. Nil or empty means the type participates in no
+	// relationships as a source; a declared reference contract is part of the
+	// immutable contract and can never be added to a released version.
+	References []resourcecontract.ReferenceSlot
 }
 
 // Contract is a developer-facing ResourceType: identity, display metadata,
@@ -61,12 +66,13 @@ type ContractInput struct {
 // A contract never carries provisioner references, stacks, workspaces,
 // repositories, accounts, credentials, availability, or UI metadata.
 type Contract struct {
-	resourceType   domain.ResourceType
-	displayName    string
-	schema         SpecSchema
-	semantic       SemanticValidator
-	transitions    TransitionValidator
-	outputContract *resourcecontract.OutputContract
+	resourceType      domain.ResourceType
+	displayName       string
+	schema            SpecSchema
+	semantic          SemanticValidator
+	transitions       TransitionValidator
+	outputContract    *resourcecontract.OutputContract
+	referenceContract *resourcecontract.ReferenceContract
 }
 
 var _ resourcecontract.Contract = Contract{}
@@ -99,13 +105,24 @@ func NewContract(input ContractInput) (Contract, error) {
 	} else if input.Outputs != nil {
 		return Contract{}, fmt.Errorf("output field declarations cannot be empty")
 	}
+	var referenceContract *resourcecontract.ReferenceContract
+	if len(input.References) > 0 {
+		references, err := resourcecontract.NewReferenceContract(input.References)
+		if err != nil {
+			return Contract{}, fmt.Errorf("resource type %s/%s reference contract is invalid: %w", input.Type.Ref().Name, input.Type.Ref().Version, err)
+		}
+		referenceContract = &references
+	} else if input.References != nil {
+		return Contract{}, fmt.Errorf("reference slot declarations cannot be empty")
+	}
 	return Contract{
-		resourceType:   input.Type,
-		displayName:    displayName,
-		schema:         schema,
-		semantic:       input.Semantic,
-		transitions:    input.Transitions,
-		outputContract: outputContract,
+		resourceType:      input.Type,
+		displayName:       displayName,
+		schema:            schema,
+		semantic:          input.Semantic,
+		transitions:       input.Transitions,
+		outputContract:    outputContract,
+		referenceContract: referenceContract,
 	}, nil
 }
 
@@ -131,6 +148,10 @@ func (c Contract) SpecSchema() json.RawMessage { return c.schema.Document() }
 // OutputContract returns the declared non-secret output contract, or nil when
 // the ResourceType publishes no outputs.
 func (c Contract) OutputContract() *resourcecontract.OutputContract { return c.outputContract }
+
+// ReferenceContract returns the declared provider-neutral reference contract,
+// or nil when the ResourceType participates in no relationships as a source.
+func (c Contract) ReferenceContract() *resourcecontract.ReferenceContract { return c.referenceContract }
 
 // SchemaDigest reports the SHA-256 of the registered schema bytes. It is not
 // part of the application contract; it supports registration integrity work

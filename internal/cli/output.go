@@ -114,6 +114,19 @@ func (a *App) renderResourceText(w io.Writer, resource *client.Resource) {
 			fmt.Fprintln(w, line)
 		}
 	}
+	if len(resource.References) > 0 {
+		fmt.Fprintln(w, "\nReferences (desired):")
+		slots := make([]string, 0, len(resource.References))
+		for slot := range resource.References {
+			slots = append(slots, slot)
+		}
+		sort.Strings(slots)
+		for _, slot := range slots {
+			targets := append([]string(nil), resource.References[slot]...)
+			sort.Strings(targets)
+			fmt.Fprintf(w, "  %s: %s\n", c(slot), c(strings.Join(targets, ", ")))
+		}
+	}
 	if resource.LatestOperation != nil {
 		latest := resource.LatestOperation
 		fmt.Fprintf(w, "\nLatest operation:   %s (%s, %s, target generation %d)\n",

@@ -40,20 +40,46 @@ type resourceTypeOutputContractDTO struct {
 	Fields []resourceTypeOutputFieldDTO `json:"fields"`
 }
 
+// resourceTypeReferenceTargetDTO declares one allowed target type of a
+// reference slot as an exact ResourceTypeRef. M21 admits no wildcards,
+// selectors, or provider constraints.
+type resourceTypeReferenceTargetDTO struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// resourceTypeReferenceSlotDTO is one declared hard-dependency slot.
+// minItems is 0 or 1; optionality exists only as minItems == 0, and every
+// bound reference carries identical lifecycle semantics.
+type resourceTypeReferenceSlotDTO struct {
+	Name               string                           `json:"name"`
+	AllowedTargetTypes []resourceTypeReferenceTargetDTO `json:"allowedTargetTypes"`
+	MinItems           int                              `json:"minItems"`
+	MaxItems           int                              `json:"maxItems"`
+}
+
+// resourceTypeReferenceContractDTO is the provider-neutral reference contract
+// of one ResourceType version (M21). Slots are returned in deterministic name
+// order; no backend or provisioner information exists anywhere in it.
+type resourceTypeReferenceContractDTO struct {
+	Slots []resourceTypeReferenceSlotDTO `json:"slots"`
+}
+
 // resourceTypeDTO is the detailed discovery representation. specSchema embeds
 // the registered JSON Schema 2020-12 document verbatim; its keywords are
 // governed by the JSON Schema specification, not by this API's envelope.
 // outputContract appears only for ResourceTypes that declare realized values;
 // list summaries never embed either document.
 type resourceTypeDetailDTO struct {
-	Name           string                         `json:"name"`
-	Version        string                         `json:"version"`
-	DisplayName    string                         `json:"displayName"`
-	Description    string                         `json:"description"`
-	Capabilities   []string                       `json:"capabilities"`
-	Href           string                         `json:"href"`
-	SpecSchema     json.RawMessage                `json:"specSchema"`
-	OutputContract *resourceTypeOutputContractDTO `json:"outputContract,omitempty"`
+	Name              string                            `json:"name"`
+	Version           string                            `json:"version"`
+	DisplayName       string                            `json:"displayName"`
+	Description       string                            `json:"description"`
+	Capabilities      []string                          `json:"capabilities"`
+	Href              string                            `json:"href"`
+	SpecSchema        json.RawMessage                   `json:"specSchema"`
+	OutputContract    *resourceTypeOutputContractDTO    `json:"outputContract,omitempty"`
+	ReferenceContract *resourceTypeReferenceContractDTO `json:"referenceContract,omitempty"`
 }
 
 type resourceTypeListDTO struct {
@@ -103,6 +129,22 @@ func newResourceTypeDetailDTO(contract application.ResourceContract) resourceTyp
 			})
 		}
 		detail.OutputContract = outputContract
+	}
+	if declared := contract.ReferenceContract(); declared != nil {
+		referenceContract := &resourceTypeReferenceContractDTO{Slots: []resourceTypeReferenceSlotDTO{}}
+		for _, slot := range declared.Slots() {
+			targets := make([]resourceTypeReferenceTargetDTO, 0, len(slot.AllowedTargetTypes))
+			for _, target := range slot.AllowedTargetTypes {
+				targets = append(targets, resourceTypeReferenceTargetDTO{Name: target.Name, Version: target.Version})
+			}
+			referenceContract.Slots = append(referenceContract.Slots, resourceTypeReferenceSlotDTO{
+				Name:               slot.Name,
+				AllowedTargetTypes: targets,
+				MinItems:           slot.MinItems,
+				MaxItems:           slot.MaxItems,
+			})
+		}
+		detail.ReferenceContract = referenceContract
 	}
 	return detail
 }

@@ -162,6 +162,8 @@ func (w *Worker) runOnce(ctx context.Context, kindPtr *string) (found bool, oper
 		err = w.observe(ctx, message)
 	case application.OutboxPassiveObserve:
 		err = w.passiveObserve(ctx, message)
+	case application.OutboxWakeDependents:
+		err = w.wakeDependents(ctx, message)
 	default:
 		err = fmt.Errorf("unsupported outbox kind %q", message.Kind)
 	}
@@ -233,6 +235,8 @@ func workKindOf(kind application.OutboxKind) string {
 		return WorkKindObserve
 	case application.OutboxPassiveObserve:
 		return WorkKindPassiveObserve
+	case application.OutboxWakeDependents:
+		return WorkKindWakeDependents
 	default:
 		return "unknown"
 	}
@@ -300,11 +304,61 @@ func (w *Worker) drive(ctx context.Context, message application.OutboxMessage) e
 			return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "AlreadyDispatchable")
 		}
 		changedAt := operation.Operation.PhaseChangedAt().Add(time.Nanosecond)
+		gatingUp := next == domain.OperationPhaseApplying && operation.Operation.Capability() != domain.CapabilityDelete
+		var execution application.ProvisioningExecutionRecord
+		var gate *application.DependencyEvaluation
+		if gatingUp || next == domain.OperationPhaseDestroying {
+			execution, err = tx.Executions().GetExecution(ctx, message.OperationID)
+			if err != nil {
+				return err
+			}
+		}
+		if gatingUp && execution.CurrentAttempt == 0 && !execution.IsOutputRecovery() {
+			// M21 pre-Submit dependency gate. The source Resource row is
+			// already locked above; EvaluateDependencies locks the desired
+			// target rows in ascending ID order and reads readiness facts
+			// after those locks, so wait registration cannot lose a
+			// concurrent target transition. The owner admission lock is
+			// deliberately NOT taken: worker gating never serializes through
+			// it (ADR-0022).
+			evaluation, gated, evalErr := application.EvaluateDependencies(ctx, tx, w.Types, resource)
+			if evalErr != nil {
+				return evalErr
+			}
+			if gated {
+				gate = &evaluation
+				switch evaluation.Class {
+				case application.DependencyReady:
+					w.reportGateOutcome(GateResultReady)
+				case application.DependencyWaiting:
+					w.reportGateOutcome(GateResultWaiting)
+				case application.DependencyTerminalFailure:
+					w.reportGateOutcome(GateResultFailed)
+				default:
+					w.reportGateOutcome(GateResultInvalid)
+				}
+				if evaluation.Class != application.DependencyReady {
+					return w.settleGateBlock(ctx, tx, message, resource, operation, execution, evaluation, changedAt)
+				}
+			}
+		}
 		transition, err := w.Lifecycle.Advance(resource.Resource, resource.Status, operation.Operation, next, application.InternalEventID(operation.Operation.ID(), application.InternalTransitionLabel(next)), changedAt)
 		if err != nil {
 			return err
 		}
 		resource.Status = transition.Status
+		if gate != nil {
+			// All dependencies were READY at gate time: record the satisfied
+			// condition and release any obsolete wait rows in the same commit.
+			status, condErr := w.Lifecycle.SetDependencyCondition(resource.Status, domain.ConditionStatusTrue, lifecycle.ReasonDependenciesSatisfied, "", changedAt)
+			if condErr != nil {
+				return condErr
+			}
+			resource.Status = status
+			if err := tx.DependencyWaits().DeleteDependencyWaitsForOperation(ctx, message.OperationID); err != nil {
+				return err
+			}
+		}
 		if err := tx.Resources().SaveResource(ctx, resource, resource.Version); err != nil {
 			return err
 		}
@@ -318,10 +372,6 @@ func (w *Worker) drive(ctx context.Context, message application.OutboxMessage) e
 			return err
 		}
 		if next == domain.OperationPhaseApplying || next == domain.OperationPhaseDestroying {
-			execution, err := tx.Executions().GetExecution(ctx, message.OperationID)
-			if err != nil {
-				return err
-			}
 			if execution.CurrentAttempt != 0 {
 				return application.ErrConcurrencyConflict
 			}
@@ -1086,7 +1136,13 @@ func (w *Worker) passiveObserve(ctx context.Context, message application.OutboxM
 		if err := tx.Resources().SaveResource(ctx, current, current.Version); err != nil {
 			return err
 		}
-		return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "PassivelyObserved")
+		if err := tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "PassivelyObserved"); err != nil {
+			return err
+		}
+		// A passive fact that flips readiness or presence is gate-relevant:
+		// blocked dependents must re-evaluate. Serialized through this same
+		// Resource row lock, so wait registration cannot race it.
+		return application.EnqueueWakeDependentsIfWaited(ctx, tx, message.ResourceID, current.Version+1)
 	})
 }
 
@@ -1120,6 +1176,9 @@ func (w *Worker) finishOperation(ctx context.Context, tx application.UnitOfWork,
 		return err
 	}
 	if err := tx.Executions().SaveExecution(ctx, execution, expectedExecutionVersion); err != nil {
+		return err
+	}
+	if err := applyTerminalSideEffects(ctx, tx, result.Operation, resource.Resource.ID(), resource.Version+1); err != nil {
 		return err
 	}
 	return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "TerminalExecution")
@@ -1209,6 +1268,13 @@ func (w *Worker) finishSuccessInTx(ctx context.Context, tx application.UnitOfWor
 		if err := tx.Executions().SaveExecution(ctx, execution, expectedExecutionVersion); err != nil {
 			return err
 		}
+		// Output-postcondition rejection must NOT advance applied references:
+		// the protective union keeps covering the old applied set while the
+		// desired set stands. Dependents are woken because the target's own
+		// active reconciliation just became a terminal failure.
+		if err := applyTerminalSideEffects(ctx, tx, result.Operation, resource.Resource.ID(), resource.Version+1); err != nil {
+			return err
+		}
 		return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "OutputPostconditionRejected")
 	}
 
@@ -1263,6 +1329,32 @@ func (w *Worker) finishSuccessInTx(ctx context.Context, tx application.UnitOfWor
 		return err
 	}
 	if err := tx.Executions().SaveExecution(ctx, execution, expectedExecutionVersion); err != nil {
+		return err
+	}
+	// M21 applied-reference advancement: ONLY this durable terminal-success
+	// transaction — which proves create/update convergence INCLUDING required
+	// output postconditions — may move the applied set. ObservedGeneration is
+	// deliberately not consulted; it advanced at Request admission.
+	if execution.Capability == domain.CapabilityCreate || execution.Capability == domain.CapabilityUpdate {
+		if operation.Operation.TargetGeneration() == resource.Resource.Generation() {
+			desired, refErr := tx.References().DesiredReferences(ctx, resource.Resource.ID())
+			if refErr != nil {
+				return refErr
+			}
+			applied := make([]application.ReferenceEdge, 0, len(desired))
+			for _, edge := range desired {
+				if edge.Generation != operation.Operation.TargetGeneration() {
+					return fmt.Errorf("%w: desired reference generation %d does not match converged generation %d",
+						application.ErrReferenceInvariant, edge.Generation, operation.Operation.TargetGeneration())
+				}
+				applied = append(applied, edge)
+			}
+			if err := tx.References().AdvanceAppliedReferences(ctx, resource.Resource.ID(), operation.Operation.TargetGeneration(), applied); err != nil {
+				return err
+			}
+		}
+	}
+	if err := applyTerminalSideEffects(ctx, tx, result.Operation, resource.Resource.ID(), resource.Version+1); err != nil {
 		return err
 	}
 	return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "TerminalExecution")

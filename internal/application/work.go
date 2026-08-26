@@ -58,6 +58,11 @@ const (
 	OutboxDispatch       OutboxKind = "Dispatch"
 	OutboxObserve        OutboxKind = "Observe"
 	OutboxPassiveObserve OutboxKind = "PassiveObserve"
+	// OutboxWakeDependents is the resource-targeted M21 work kind. It means
+	// only "something gate-relevant changed on this target; blocked dependent
+	// Operations must re-evaluate". It never carries a waiter list, never
+	// decides readiness, and never submits provider work.
+	OutboxWakeDependents OutboxKind = "WakeDependents"
 )
 
 type OutboxState string
@@ -151,6 +156,11 @@ type OutboxRepository interface {
 	// DeadOutbox quarantines work that is provably invalid and cannot succeed
 	// on retry. It is the only path that moves work to the Dead state.
 	DeadOutbox(context.Context, string, string, string) error
+	// EnqueueWakeDependents inserts one versioned wake, coalescing behind an
+	// active wake for the same target instead of failing. Exact duplicates
+	// are silently ignored; a different version arriving while one wake is
+	// active is folded into that active wake's version handshake.
+	EnqueueWakeDependents(context.Context, OutboxMessage) error
 }
 
 func DriveMessage(operationID domain.OperationID, expectedVersion uint64) OutboxMessage {
@@ -171,4 +181,33 @@ func ObserveMessage(operationID domain.OperationID, sequence, expectedVersion ui
 func PassiveObserveMessage(resourceID domain.ResourceID, sequence, expectedVersion uint64) OutboxMessage {
 	key := fmt.Sprintf("passive-observe:%s:%d", resourceID, sequence)
 	return OutboxMessage{ID: key, Kind: OutboxPassiveObserve, ResourceID: resourceID, DedupeKey: key, ExpectedVersion: expectedVersion, Sequence: sequence, PayloadVersion: 1, Payload: []byte(`{}`), State: OutboxPending}
+}
+
+// WakeDependentsMessage builds one versioned wake work item. The dedupe
+// identity includes the target record version because outbox dedupe keys are
+// globally unique across terminal history: an unversioned key could never be
+// enqueued again after its first completion. Coalescing across versions is the
+// job of the partial unique index (at most one ACTIVE wake per target) plus
+// the finalizer's version handshake.
+func WakeDependentsMessage(resourceID domain.ResourceID, targetVersion uint64) OutboxMessage {
+	key := fmt.Sprintf("wake-dependents:%s:%d", resourceID, targetVersion)
+	return OutboxMessage{ID: key, Kind: OutboxWakeDependents, ResourceID: resourceID, DedupeKey: key, ExpectedVersion: targetVersion, PayloadVersion: 1, Payload: []byte(`{}`), State: OutboxPending}
+}
+
+// EnqueueWakeDependentsIfWaited enqueues one versioned wake for the target
+// when at least one dependency wait names it. It must be called inside the
+// transaction that holds the target Resource row so wait registration and
+// gate-relevant transitions serialize through the same row (the lost-wake
+// invariant). Coalescing is deliberate: if any active wake already exists,
+// this call is a no-op because that wake's final version handshake will
+// observe the newer target version and schedule a follow-up.
+func EnqueueWakeDependentsIfWaited(ctx context.Context, tx UnitOfWork, target domain.ResourceID, targetVersion uint64) error {
+	has, err := tx.DependencyWaits().HasDependencyWaiterForTarget(ctx, target)
+	if err != nil {
+		return err
+	}
+	if !has {
+		return nil
+	}
+	return tx.Outbox().EnqueueWakeDependents(ctx, WakeDependentsMessage(target, targetVersion))
 }

@@ -31,6 +31,9 @@ const (
 	CodeProvisionerUnavailable  = "PROVISIONER_UNAVAILABLE"
 	CodePolicyDenied            = "POLICY_DENIED"
 	CodeQuotaExceeded           = "QUOTA_EXCEEDED"
+	CodeReferenceInvalid        = "REFERENCE_INVALID"
+	CodeResourceInUse           = "RESOURCE_IN_USE"
+	CodeDependencyCycle         = "DEPENDENCY_CYCLE"
 	CodePersistenceUnavailable  = "PERSISTENCE_UNAVAILABLE"
 	CodeInternal                = "INTERNAL"
 )
@@ -60,6 +63,9 @@ var problemTitles = map[string]string{
 	CodeProvisionerUnavailable:  "Provisioner unavailable",
 	CodePolicyDenied:            "Policy denied",
 	CodeQuotaExceeded:           "Quota exceeded",
+	CodeReferenceInvalid:        "Invalid reference",
+	CodeResourceInUse:           "Resource in use",
+	CodeDependencyCycle:         "Dependency cycle",
 	CodePersistenceUnavailable:  "Persistence unavailable",
 	CodeInternal:                "Internal error",
 }
@@ -88,12 +94,13 @@ func problemStatus(code string) int {
 		return http.StatusForbidden
 	case CodeInvalidArgument:
 		return http.StatusBadRequest
-	case CodeUnsupportedResourceType, CodeResourceSpecInvalid:
+	case CodeUnsupportedResourceType, CodeResourceSpecInvalid, CodeReferenceInvalid:
 		return http.StatusUnprocessableEntity
 	case CodeResourceNotFound, CodeOperationNotFound, CodeResourceTypeNotFound:
 		return http.StatusNotFound
 	case CodeResourceAlreadyExists, CodeIdempotencyConflict, CodeGenerationConflict,
-		CodeOperationActive, CodeOperationNotRetryable, CodeResourceStateConflict, CodeUnsupportedCapability, CodeQuotaExceeded:
+		CodeOperationActive, CodeOperationNotRetryable, CodeResourceStateConflict, CodeUnsupportedCapability,
+		CodeQuotaExceeded, CodeResourceInUse, CodeDependencyCycle:
 		return http.StatusConflict
 	case CodePreconditionRequired:
 		return http.StatusPreconditionRequired
@@ -133,6 +140,18 @@ func writeProblem(w http.ResponseWriter, r *http.Request, code, detail string, c
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(problemStatus(code))
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// writeReferencesProblem renders REFERENCE_INVALID with structured violations.
+// Violations are application-sanitized: stable paths, curated messages,
+// deterministic order, and the approved cap with a truncated indicator.
+func writeReferencesProblem(w http.ResponseWriter, r *http.Request, detail string, invalid *application.InvalidReferenceError) {
+	body := buildProblem(r, CodeReferenceInvalid, detail, nil)
+	body.Violations = append([]application.SpecViolation(nil), invalid.Violations...)
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusUnprocessableEntity)
 	_ = json.NewEncoder(w).Encode(body)
 }
 

@@ -63,6 +63,31 @@ func (h *handler) mapMutationError(w http.ResponseWriter, r *http.Request, princ
 		writeSpecProblem(w, r, detail, invalidSpec)
 		return
 	}
+	var invalidReferences *application.InvalidReferenceError
+	if errors.As(err, &invalidReferences) {
+		// One generic refusal for every reference failure: unknown slots,
+		// cardinality, duplicates, self-references, wrong types, ineligible or
+		// missing/inaccessible targets. Existence is never disclosed through a
+		// differing Problem (ADR-0022).
+		writeReferencesProblem(w, r,
+			"the submitted references are not valid for this resource type", invalidReferences)
+		return
+	}
+	if errors.Is(err, application.ErrResourceInUse) {
+		writeProblem(w, r, CodeResourceInUse,
+			"the Resource cannot be deleted while another live Resource still declares it as a dependency; delete or update the dependent first", nil)
+		return
+	}
+	if errors.Is(err, application.ErrDependencyCycle) {
+		writeProblem(w, r, CodeDependencyCycle,
+			"the submitted references would create a dependency cycle between Resources of the same owner", nil)
+		return
+	}
+	if errors.Is(err, application.ErrReferenceGraphLimit) {
+		writeProblem(w, r, CodeReferenceInvalid,
+			"dependency relationships cannot be verified within supported graph bounds; reduce the number or depth of references", nil)
+		return
+	}
 	if errors.Is(err, application.ErrProvisionerNotFound) {
 		writeProblem(w, r, CodeProvisionerUnavailable, "no provisioner is available for this request", nil)
 		return

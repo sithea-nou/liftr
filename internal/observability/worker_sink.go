@@ -111,3 +111,23 @@ func (t *Telemetry) WorkerPanic(kind string, value string) {
 		)
 	}
 }
+
+// DependencyGateObserved counts one pre-Submit dependency gate evaluation by
+// its bounded result. IDs, owners, slots, resource types, and graph depth are
+// forbidden labels (ADR-0022).
+func (t *Telemetry) DependencyGateObserved(result string) {
+	if !t.ready() {
+		return
+	}
+	t.instruments.dependencyGate.Add(context.Background(), 1,
+		metric.WithAttributes(attributeString(attrDependencyGate, result)))
+}
+
+// WakeDependentsObserved counts processed wake work.
+func (t *Telemetry) WakeDependentsObserved(result string) {
+	if !t.ready() {
+		return
+	}
+	t.instruments.dependencyWake.Add(context.Background(), 1,
+		metric.WithAttributes(attributeString(attrDependencyGate, result)))
+}

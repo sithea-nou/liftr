@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -91,6 +92,22 @@ func (r *repositories) LockResourceID(ctx context.Context, id domain.ResourceID)
 		return false, translateError(err)
 	}
 	return found, nil
+}
+
+// LockResources row-locks every named Resource in deterministic ascending ID
+// order, so concurrent multi-target lockers can never deadlock on ordering.
+func (r *repositories) LockResources(ctx context.Context, ids []domain.ResourceID) ([]application.ResourceRecord, error) {
+	ordered := append([]domain.ResourceID(nil), ids...)
+	sort.Slice(ordered, func(a, b int) bool { return ordered[a] < ordered[b] })
+	records := make([]application.ResourceRecord, 0, len(ordered))
+	for _, id := range ordered {
+		record, err := r.loadResource(ctx, id, true)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
 }
 
 func (r *repositories) loadConditions(ctx context.Context, id domain.ResourceID) ([]domain.Condition, error) {

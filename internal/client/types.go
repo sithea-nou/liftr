@@ -72,8 +72,10 @@ type Resource struct {
 	Status          ResourceStatus      `json:"status"`
 	LatestOperation *LatestOperationRef `json:"latestOperation,omitempty"`
 	Outputs         *ResourceOutputs    `json:"outputs,omitempty"`
-	CreatedAt       time.Time           `json:"createdAt"`
-	UpdatedAt       time.Time           `json:"updatedAt"`
+	// References is the canonical DESIRED dependency set (M21).
+	References map[string][]string `json:"references,omitempty"`
+	CreatedAt  time.Time           `json:"createdAt"`
+	UpdatedAt  time.Time           `json:"updatedAt"`
 }
 
 type OperationFailure struct {
@@ -159,6 +161,9 @@ type ResourceTypeDetail struct {
 	Href           string          `json:"href"`
 	SpecSchema     json.RawMessage `json:"specSchema"`
 	OutputContract json.RawMessage `json:"outputContract,omitempty"`
+	// ReferenceContract is the raw provider-neutral reference contract
+	// document (M21); its exact slot shapes are owned by discovery.
+	ReferenceContract json.RawMessage `json:"referenceContract,omitempty"`
 }
 
 type ResourceTypeList struct {

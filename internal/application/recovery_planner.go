@@ -52,6 +52,13 @@ const (
 	ReasonWorkNotDead                DiagnosticReason = "WORK_NOT_DEAD"
 	ReasonOutputRecoveryPending      DiagnosticReason = "OUTPUT_RESOLUTION_PENDING"
 	ReasonManualInterventionRequired DiagnosticReason = "MANUAL_INTERVENTION_REQUIRED"
+	// M21 dependency diagnostics. They extend the closed M20 vocabulary so a
+	// dependency-blocked Operation is never misread as work needing Observe,
+	// and Dead wake work is visible and recoverable (ADR-0022).
+	ReasonDependencyBlocked DiagnosticReason = "DEPENDENCY_BLOCKED"
+	ReasonDependencyFailed  DiagnosticReason = "DEPENDENCY_FAILED"
+	ReasonDependencyInvalid DiagnosticReason = "DEPENDENCY_INVALID"
+	ReasonDeadWake          DiagnosticReason = "DEPENDENCY_WAKE_DEAD"
 )
 
 // OperatorActionKind is the closed set of recovery actions the planner may
@@ -118,9 +125,10 @@ type OperationRecoverySnapshot struct {
 	// ActiveObserveWork reports that an equivalent Observe work item is
 	// currently Pending or Leased for this Operation.
 	ActiveObserveWork bool
-	// RegistrationAvailable reports that the execution's ProvisionerRef still
-	// resolves against current composition. Unresolvable registrations make
-	// scheduled observation spin forever, so they are manual interventions.
+	// DependencyBlocked reports durable dependency wait rows for this
+	// Operation (M21). A blocked Operation has no provider execution to
+	// observe: progress belongs to the wake/Drive machinery.
+	DependencyBlocked     bool
 	RegistrationAvailable bool
 }
 
@@ -171,7 +179,12 @@ func PlanOperationObserve(s OperationRecoverySnapshot) RecoveryAssessment {
 		return assessment(RecoveryManualInterventionNeeded, []DiagnosticReason{ReasonExecutionEvidencePending})
 	default:
 		// Pending or Dispatching: nothing has been submitted yet; the dispatch
-		// chain owns observation scheduling.
+		// chain owns observation scheduling. A dependency-blocked Operation is
+		// the specific M21 case: no Observe applies, no force-submit exists,
+		// and progress comes from target-state wakes driving a fresh gate.
+		if s.DependencyBlocked {
+			return assessment(RecoveryNoActionNeeded, []DiagnosticReason{ReasonDependencyBlocked})
+		}
 		return assessment(RecoveryNoActionNeeded, []DiagnosticReason{ReasonExecutionNotObservable})
 	}
 }
@@ -315,7 +328,7 @@ func PlanDeadWorkRecovery(s DeadWorkKindSnapshot) RecoveryAssessment {
 		}
 	}
 	// Resource-targeted dead work.
-	if s.Kind != OutboxPassiveObserve {
+	if s.Kind != OutboxPassiveObserve && s.Kind != OutboxWakeDependents {
 		return assessment(RecoveryUnsupportedRepair, []DiagnosticReason{ReasonManualInterventionRequired})
 	}
 	if s.ActiveOperation {
@@ -324,11 +337,23 @@ func PlanDeadWorkRecovery(s DeadWorkKindSnapshot) RecoveryAssessment {
 	if s.ResourceState == domain.ResourceStateDeleted {
 		return assessment(RecoveryUnsupportedRepair, []DiagnosticReason{ReasonResourceDeleted})
 	}
-	if !s.RegistrationAvailable {
-		return assessment(RecoveryManualInterventionNeeded, []DiagnosticReason{ReasonRegistrationMissing})
+	switch s.Kind {
+	case OutboxWakeDependents:
+		// Dead WakeDependents recovers by creating ONE fresh CURRENT-version
+		// wake from current target/wait state. It never replays the old waiter
+		// list, never Dispatches, and never Submits; the old Dead row stays
+		// immutable (ADR-0021/0022).
+		if s.ActiveEquivalentWork {
+			return assessment(RecoveryNoActionNeeded, []DiagnosticReason{ReasonWorkAlreadyActive})
+		}
+		return assessment(RecoverySafeRecoverDeadWork, []DiagnosticReason{ReasonDeadWake}, ActionKindRecoverDeadWork)
+	default:
+		if !s.RegistrationAvailable {
+			return assessment(RecoveryManualInterventionNeeded, []DiagnosticReason{ReasonRegistrationMissing})
+		}
+		if s.ActiveEquivalentWork {
+			return assessment(RecoveryNoActionNeeded, []DiagnosticReason{ReasonWorkAlreadyActive})
+		}
+		return assessment(RecoverySafeRecoverDeadWork, nil, ActionKindRecoverDeadWork)
 	}
-	if s.ActiveEquivalentWork {
-		return assessment(RecoveryNoActionNeeded, []DiagnosticReason{ReasonWorkAlreadyActive})
-	}
-	return assessment(RecoverySafeRecoverDeadWork, nil, ActionKindRecoverDeadWork)
 }

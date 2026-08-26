@@ -16,6 +16,7 @@ const (
 	WorkKindDispatch        = "dispatch"
 	WorkKindObserve         = "observe"
 	WorkKindPassiveObserve  = "passive_observe"
+	WorkKindWakeDependents  = "wake_dependents"
 	WorkKindExpiredRecovery = "expired_dispatch_recovery"
 )
 
@@ -65,6 +66,45 @@ type TelemetrySink interface {
 	WorkCompleted(event WorkEvent)
 	OperationTerminalized(event TerminalEvent)
 	WorkerPanic(kind string, value string)
+}
+
+// DependencyTelemetrySink is the optional M21 extension of TelemetrySink for
+// bounded dependency-gate and wake outcomes. Results are closed vocabularies;
+// IDs, owners, slots, and resource types are forbidden as labels.
+type DependencyTelemetrySink interface {
+	DependencyGateObserved(result string)
+	WakeDependentsObserved(result string)
+}
+
+// Bounded dependency telemetry results.
+const (
+	GateResultReady   = "ready"
+	GateResultWaiting = "waiting"
+	GateResultFailed  = "failed"
+	GateResultInvalid = "invalid"
+
+	WakeResultProcessed = "processed"
+)
+
+// reportGateOutcome emits one bounded dependency-gate result when the composed
+// sink implements the optional M21 extension.
+func (w *Worker) reportGateOutcome(result string) {
+	if w.Telemetry == nil {
+		return
+	}
+	if dependencySink, ok := w.Telemetry.(DependencyTelemetrySink); ok {
+		dependencySink.DependencyGateObserved(result)
+	}
+}
+
+// reportWakeOutcome emits one bounded processed-wake result.
+func (w *Worker) reportWakeOutcome(result string) {
+	if w.Telemetry == nil {
+		return
+	}
+	if dependencySink, ok := w.Telemetry.(DependencyTelemetrySink); ok {
+		dependencySink.WakeDependentsObserved(result)
+	}
 }
 
 // ErrRecoveredPanic wraps every panic converted at the per-work boundary. The

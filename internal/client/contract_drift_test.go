@@ -141,24 +141,36 @@ func TestOperationContractsExcludePrivateExecutionFields(t *testing.T) {
 
 func TestCreateEnvelopeKeysMatchOpenAPI(t *testing.T) {
 	schemas := loadOpenAPISchemas(t)
+	documented := make(map[string]bool)
+	for name := range schemas["CreateResourceRequest"].Properties {
+		documented[name] = true
+	}
+	// The references-free envelope stays valid: every emitted key must be
+	// documented, and optional documented keys may be omitted.
 	body := client.BuildCreateEnvelope("orders-db", "PostgreSQLDatabase", "v2", "team", "payments",
 		[]byte(`{"storageGB":20}`))
 	var decoded map[string]json.RawMessage
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	documented := make(map[string]bool)
-	for name := range schemas["CreateResourceRequest"].Properties {
-		documented[name] = true
-	}
 	for key := range decoded {
 		if !documented[key] {
 			t.Errorf("create envelope key %q is not part of CreateResourceRequest", key)
 		}
 	}
-	for key := range documented {
-		if _, ok := decoded[key]; !ok {
-			t.Errorf("create envelope misses required key %q", key)
+	// The references-carrying variant must emit exactly the documented keys.
+	withReferences := client.BuildCreateEnvelopeWithReferences("orders-db", "PostgreSQLDatabase", "v2", "team", "payments",
+		[]byte(`{"storageGB":20}`), []client.ReferenceBinding{{Slot: "replica-of", Targets: []string{"orders-db-primary"}}})
+	var decodedWithReferences map[string]json.RawMessage
+	if err := json.Unmarshal(withReferences, &decodedWithReferences); err != nil {
+		t.Fatal(err)
+	}
+	for key := range decodedWithReferences {
+		if !documented[key] {
+			t.Errorf("references-carrying create envelope key %q is not part of CreateResourceRequest", key)
 		}
+	}
+	if len(decodedWithReferences) != len(documented) {
+		t.Errorf("references-carrying envelope keys = %d, want every documented key (%d)", len(decodedWithReferences), len(documented))
 	}
 }

@@ -90,11 +90,16 @@ func (s *Service) TriggerOperationObservation(ctx context.Context, cmd OperatorM
 			if !matchDiagnosticRevision(ifMatch, revision) {
 				return "", ErrDiagnosticStale
 			}
+			dependencyBlocked, err := tx.DependencyWaits().HasDependencyWaitsForOperation(ctx, operationID)
+			if err != nil {
+				return "", err
+			}
 			assessment := PlanOperationObserve(OperationRecoverySnapshot{
 				OperationState:        operation.Operation.State(),
 				HasExecution:          true,
 				Execution:             executionSummaryOf(execution),
 				ActiveObserveWork:     work.HasActive(OutboxObserve),
+				DependencyBlocked:     dependencyBlocked,
 				RegistrationAvailable: s.resolveRegistration(ctx, execution.ProvisionerRef),
 			})
 			if !assessmentAllows(assessment, ActionKindTriggerObserve) {
@@ -251,6 +256,15 @@ func (s *Service) RecoverDeadWork(ctx context.Context, cmd OperatorMutationComma
 					return "", &UnsafeRecoveryError{Reason: string(ReasonExecutionRecordMissing)}
 				}
 				created = operatorDriveMessage(actionID, operation.Operation.ID(), operation.Version)
+			case OutboxWakeDependents:
+				if resource == nil {
+					return "", &UnsafeRecoveryError{Reason: string(ReasonManualInterventionRequired)}
+				}
+				// Fresh CURRENT-version wake from current target state under a
+				// fresh operator-owned identity: the Dead row's versioned
+				// dedupe key stays reserved by immutable history, so replaying
+				// it would silently swallow the insert.
+				created = operatorWakeDependentsMessage(actionID, resource.Resource.ID(), resource.Version)
 			default:
 				return "", &UnsafeRecoveryError{Reason: string(ReasonManualInterventionRequired)}
 			}
@@ -429,7 +443,8 @@ func (s *Service) deadWorkSnapshot(ctx context.Context, tx UnitOfWork, dead Outb
 	if err != nil {
 		return snapshot, false, "", nil, nil, nil, err
 	}
-	equivalentID := work.ActiveID(OutboxPassiveObserve)
+	equivalentKind := dead.Kind
+	equivalentID := work.ActiveID(equivalentKind)
 	_, snapshot.ActiveOperation, err = tx.Operations().ActiveForResource(ctx, dead.ResourceID)
 	if err != nil {
 		return snapshot, false, "", nil, nil, nil, err
@@ -477,6 +492,18 @@ func operatorPassiveObserveMessage(actionID string, resourceID domain.ResourceID
 	return OutboxMessage{
 		ID: id, Kind: OutboxPassiveObserve, ResourceID: resourceID,
 		DedupeKey: id, ExpectedVersion: expectedVersion, Sequence: sequence,
+		PayloadVersion: 1, Payload: []byte(`{}`), State: OutboxPending,
+	}
+}
+
+// operatorWakeDependentsMessage builds one fresh wake under an
+// action-unique identity so dead-wake recovery can never collide with the
+// immutable versioned dedupe key of the Dead row it recovers.
+func operatorWakeDependentsMessage(actionID string, resourceID domain.ResourceID, expectedVersion uint64) OutboxMessage {
+	id := "operator:" + actionID + ":wake-dependents"
+	return OutboxMessage{
+		ID: id, Kind: OutboxWakeDependents, ResourceID: resourceID,
+		DedupeKey: id, ExpectedVersion: expectedVersion,
 		PayloadVersion: 1, Payload: []byte(`{}`), State: OutboxPending,
 	}
 }

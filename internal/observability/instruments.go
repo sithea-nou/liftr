@@ -37,6 +37,7 @@ const (
 	attrOperatorAction = "liftr.operator.action"
 	attrOperatorResult = "liftr.operator.result"
 	attrRecoveryKind   = "liftr.operator.recovery_kind"
+	attrDependencyGate = "liftr.dependency.result"
 )
 
 // Panic phases for HTTP request handling.
@@ -80,6 +81,8 @@ type instruments struct {
 	policyAdmissions    metric.Int64Counter
 	operatorRequests    metric.Int64Counter
 	operatorRecoveries  metric.Int64Counter
+	dependencyGate      metric.Int64Counter
+	dependencyWake      metric.Int64Counter
 
 	poolAcquired   metric.Int64Gauge
 	poolIdle       metric.Int64Gauge
@@ -174,6 +177,16 @@ func newInstruments(meter metric.Meter) (*instruments, error) {
 	if i.workerPanics, err = meter.Int64Counter("liftr.worker.panics",
 		metric.WithDescription("Panics recovered at the per-work execution boundary."),
 		metric.WithUnit("{panic}")); err != nil {
+		return nil, err
+	}
+	if i.dependencyGate, err = meter.Int64Counter("liftr.dependency.gate.total",
+		metric.WithDescription("Pre-Submit dependency gate evaluations by bounded result (ready|waiting|failed|invalid)."),
+		metric.WithUnit("{evaluation}")); err != nil {
+		return nil, err
+	}
+	if i.dependencyWake, err = meter.Int64Counter("liftr.dependency.wake.total",
+		metric.WithDescription("Processed WakeDependents work items by bounded result."),
+		metric.WithUnit("{wake}")); err != nil {
 		return nil, err
 	}
 	if i.provSubmissions, err = meter.Int64Counter("liftr.provisioner.submissions",

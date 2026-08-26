@@ -85,8 +85,11 @@ func (c mappedContract) Capabilities() []domain.Capability                { retu
 func (c mappedContract) Domain() domain.ResourceType                      { return c.resourceType }
 func (c mappedContract) SpecSchema() json.RawMessage                      { return json.RawMessage(`{"type":"object"}`) }
 func (c mappedContract) OutputContract() *resourcecontract.OutputContract { return &c.fields }
-func (mappedContract) ValidateSpec(domain.ResourceSpec) error             { return nil }
-func (mappedContract) ValidateUpdate(_, _ domain.ResourceSpec) error      { return nil }
+
+// ReferenceContract is nil by default in the output-mapping test contract.
+func (c mappedContract) ReferenceContract() *resourcecontract.ReferenceContract { return nil }
+func (mappedContract) ValidateSpec(domain.ResourceSpec) error                   { return nil }
+func (mappedContract) ValidateUpdate(_, _ domain.ResourceSpec) error            { return nil }
 
 // mappingProvider models a provisioner whose registered output mapping can
 // change across deployments. It records every requested mapping identity and

@@ -42,6 +42,10 @@ type Store struct {
 	outputs               map[domain.ResourceID]map[uint64]application.ResourceOutputRecord
 	operatorActions       map[string]application.OperatorActionRecord
 	operatorIdempotency   map[string]application.OperatorIdempotencyRecord
+	desiredReferences     map[domain.ResourceID][]application.ReferenceEdge
+	appliedReferences     map[domain.ResourceID][]application.ReferenceEdge
+	dependencyWaits       map[string]application.DependencyWait
+	nextWaitSequence      uint64
 }
 
 func NewStore() *Store {
@@ -57,6 +61,9 @@ func NewStore() *Store {
 		outputs:             make(map[domain.ResourceID]map[uint64]application.ResourceOutputRecord),
 		operatorActions:     make(map[string]application.OperatorActionRecord),
 		operatorIdempotency: make(map[string]application.OperatorIdempotencyRecord),
+		desiredReferences:   make(map[domain.ResourceID][]application.ReferenceEdge),
+		appliedReferences:   make(map[domain.ResourceID][]application.ReferenceEdge),
+		dependencyWaits:     make(map[string]application.DependencyWait),
 	}
 }
 
@@ -77,12 +84,17 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 		outputs:               cloneOutputs(s.outputs),
 		operatorActions:       cloneOperatorActions(s.operatorActions),
 		operatorIdempotency:   cloneOperatorIdempotency(s.operatorIdempotency),
+		desiredReferences:     cloneReferenceEdges(s.desiredReferences),
+		appliedReferences:     cloneReferenceEdges(s.appliedReferences),
+		dependencyWaits:       cloneMap(s.dependencyWaits),
+		nextWaitSequence:      s.nextWaitSequence,
 	}
 	if err := fn(tx); err != nil {
 		// PostgreSQL identity sequences are non-transactional: allocated values
 		// remain consumed when the surrounding transaction rolls back.
 		s.nextOperationSequence = tx.nextOperationSequence
 		s.nextResourceSequence = tx.nextResourceSequence
+		s.nextWaitSequence = tx.nextWaitSequence
 		return err
 	}
 	s.resources = tx.resources
@@ -98,6 +110,9 @@ func (s *Store) Within(_ context.Context, fn func(application.UnitOfWork) error)
 	s.outputs = tx.outputs
 	s.operatorActions = tx.operatorActions
 	s.operatorIdempotency = tx.operatorIdempotency
+	s.desiredReferences = tx.desiredReferences
+	s.appliedReferences = tx.appliedReferences
+	s.dependencyWaits = tx.dependencyWaits
 	return nil
 }
 
@@ -270,6 +285,8 @@ func (s *Store) Outputs() application.ResourceOutputRepository                  
 func (s *Store) Quotas() application.QuotaRepository                            { return s }
 func (s *Store) OperatorActions() application.OperatorAuditRepository           { return s }
 func (s *Store) OperatorIdempotency() application.OperatorIdempotencyRepository { return s }
+func (s *Store) References() application.ReferenceRepository                    { return s }
+func (s *Store) DependencyWaits() application.DependencyWaitRepository          { return s }
 
 // SaveResourceOutputs is idempotent only for identical provenance and
 // content; contradictory evidence for the same resource/generation pair
@@ -826,6 +843,33 @@ func (s *Store) Enqueue(_ context.Context, message application.OutboxMessage) er
 	return nil
 }
 
+// EnqueueWakeDependents mirrors the durable coalescing semantics: exact
+// versioned dedupe hits are ignored, and a different-version wake arriving
+// while one wake is active folds silently behind it. The active wake's
+// finalizer handshake schedules the newer version.
+func (s *Store) EnqueueWakeDependents(_ context.Context, message application.OutboxMessage) error {
+	for _, existing := range s.outbox {
+		if existing.DedupeKey == message.DedupeKey {
+			return nil
+		}
+		if existing.Kind != application.OutboxWakeDependents || (existing.State != application.OutboxPending && existing.State != application.OutboxLeased) {
+			continue
+		}
+		if existing.ResourceID == message.ResourceID {
+			return nil
+		}
+	}
+	message.State = application.OutboxPending
+	if message.AvailableAt.IsZero() {
+		message.AvailableAt = time.Now().Add(message.Delay)
+	}
+	if message.CreatedAt.IsZero() {
+		message.CreatedAt = time.Now()
+	}
+	s.outbox[message.ID] = message
+	return nil
+}
+
 func (s *Store) GetOutbox(_ context.Context, id string) (application.OutboxMessage, error) {
 	message, ok := s.outbox[id]
 	if !ok {
@@ -1031,9 +1075,12 @@ func (s *Store) DeadOutbox(_ context.Context, id, token, reason string) error {
 // bare domain types; they are adapted to application.ResourceContract with a
 // permissive ValidateSpec so existing tests are unaffected by contract
 // validation. Set ValidateFunc to make admission reject specific specs.
+// Catalog optionally declares reference contracts per ResourceType ref so
+// M21 admission and dependency gating can be exercised with bare fakes.
 type Catalog struct {
 	Types        map[domain.ResourceTypeRef]domain.ResourceType
 	ValidateFunc func(ref domain.ResourceTypeRef, spec domain.ResourceSpec) error
+	References   map[domain.ResourceTypeRef]*resourcecontract.ReferenceContract
 }
 
 func (c Catalog) Get(_ context.Context, ref domain.ResourceTypeRef) (application.ResourceContract, error) {
@@ -1041,7 +1088,7 @@ func (c Catalog) Get(_ context.Context, ref domain.ResourceTypeRef) (application
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return basicContract{resourceType: typeValue, validate: c.ValidateFunc}, nil
+	return basicContract{resourceType: typeValue, validate: c.ValidateFunc, references: c.References[ref]}, nil
 }
 
 func (c Catalog) List(_ context.Context) ([]application.ResourceContract, error) {
@@ -1057,7 +1104,7 @@ func (c Catalog) List(_ context.Context) ([]application.ResourceContract, error)
 	})
 	contracts := make([]application.ResourceContract, 0, len(refs))
 	for _, ref := range refs {
-		contracts = append(contracts, basicContract{resourceType: c.Types[ref], validate: c.ValidateFunc})
+		contracts = append(contracts, basicContract{resourceType: c.Types[ref], validate: c.ValidateFunc, references: c.References[ref]})
 	}
 	return contracts, nil
 }
@@ -1066,6 +1113,7 @@ func (c Catalog) List(_ context.Context) ([]application.ResourceContract, error)
 type basicContract struct {
 	resourceType domain.ResourceType
 	validate     func(ref domain.ResourceTypeRef, spec domain.ResourceSpec) error
+	references   *resourcecontract.ReferenceContract
 }
 
 func (b basicContract) Ref() domain.ResourceTypeRef       { return b.resourceType.Ref() }
@@ -1089,6 +1137,11 @@ func (b basicContract) ValidateUpdate(_, _ domain.ResourceSpec) error { return n
 
 // OutputContract is nil by default: bare fakes publish no outputs.
 func (b basicContract) OutputContract() *resourcecontract.OutputContract { return nil }
+
+// ReferenceContract is nil by default: bare fakes declare no reference slots.
+func (b basicContract) ReferenceContract() *resourcecontract.ReferenceContract {
+	return b.references
+}
 
 func (b basicContract) SpecSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 

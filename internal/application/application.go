@@ -30,6 +30,13 @@ var (
 	ErrRetryablePersistence   = errors.New("retryable persistence error")
 	ErrOperationNotRetryable  = errors.New("operation not retryable")
 	ErrInvalidApplicationCall = errors.New("invalid application call")
+	// ErrEagerExecutionBlockedByDependencies reports that the eager
+	// synchronous test composition reached a reference-bearing Operation whose
+	// hard dependencies are not all READY. Eager execution must NEVER bypass
+	// M21 dependency safety (ADR-0022): the operation is handed to the durable
+	// worker with a fresh canonical Drive and the inline Submit path is
+	// refused. Production compositions always run the durable worker.
+	ErrEagerExecutionBlockedByDependencies = errors.New("eager execution blocked by unsatisfied dependencies")
 )
 
 // ProvisionerRef is private platform metadata. It is never part of ResourceSpec
@@ -145,6 +152,11 @@ type ResourceRepository interface {
 	// returned items are summary read models: spec and conditions are never
 	// loaded, and the private ordering sequence is never serialized publicly.
 	ListResources(context.Context, ResourceListQuery) (ResourceInventoryPage, error)
+	// LockResources row-locks every named Resource in deterministic ascending
+	// ID order inside the caller's transaction and returns their current
+	// records. Reference admission and dependency gating lock targets through
+	// this method so multi-target schedules never deadlock on ordering.
+	LockResources(context.Context, []domain.ResourceID) ([]ResourceRecord, error)
 }
 
 // MaxResourcePageSize bounds one inventory page. It mirrors the operation
@@ -288,6 +300,10 @@ type UnitOfWork interface {
 	OperatorActions() OperatorAuditRepository
 	OperatorIdempotency() OperatorIdempotencyRepository
 	OperatorDiagnostics() OperatorDiagnosticRepository
+	// References persists the desired/applied relationship sets (M21).
+	References() ReferenceRepository
+	// DependencyWaits persists the private dependency wait registrations.
+	DependencyWaits() DependencyWaitRepository
 }
 
 type TransactionRunner interface {
@@ -346,11 +362,15 @@ type CreateResourceCommand struct {
 	// Actor is the authenticated principal admitting this request. It is
 	// authorized against the requested owner before any durable effect and
 	// recorded on the admission audit Event (ADR-0012).
-	Actor          identity.Principal
-	ID             domain.ResourceID
-	Type           domain.ResourceTypeRef
-	Owner          domain.OwnerRef
-	Spec           domain.ResourceSpec
+	Actor identity.Principal
+	ID    domain.ResourceID
+	Type  domain.ResourceTypeRef
+	Owner domain.OwnerRef
+	Spec  domain.ResourceSpec
+	// References is the submitted desired reference binding, slot -> target
+	// IDs. Nil means none were submitted; canonicalization makes ordering
+	// irrelevant and rejects duplicates.
+	References     map[string][]string
 	OperationID    domain.OperationID
 	EventID        domain.EventID
 	RequestedAt    time.Time
@@ -365,10 +385,17 @@ type UpdateResourceCommand struct {
 	ID                 domain.ResourceID
 	ExpectedGeneration uint64
 	Spec               domain.ResourceSpec
-	OperationID        domain.OperationID
-	EventID            domain.EventID
-	RequestedAt        time.Time
-	IdempotencyKey     string
+	// ReferencesPresent distinguishes an explicitly supplied references field
+	// from an absent one. Absent PRESERVES the stored desired references so
+	// pre-M21 clients that send only spec can never accidentally destroy
+	// relationships. Present (including an empty object) fully replaces the
+	// desired set.
+	ReferencesPresent bool
+	References        map[string][]string
+	OperationID       domain.OperationID
+	EventID           domain.EventID
+	RequestedAt       time.Time
+	IdempotencyKey    string
 }
 
 type DeleteResourceCommand struct {
@@ -485,7 +512,7 @@ func (s *Service) AdmitUpdateResource(ctx context.Context, cmd UpdateResourceCom
 	if err := validateExternalEventID(cmd.EventID); err != nil {
 		return Result{}, err
 	}
-	return s.persistExistingRequest(ctx, existingRequest{id: cmd.ID, expectedGeneration: cmd.ExpectedGeneration, spec: &cmd.Spec, capability: domain.CapabilityUpdate, operationID: cmd.OperationID, eventID: cmd.EventID, requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, actor: cmd.Actor})
+	return s.persistExistingRequest(ctx, existingRequest{id: cmd.ID, expectedGeneration: cmd.ExpectedGeneration, spec: &cmd.Spec, referencesPresent: cmd.ReferencesPresent, references: cmd.References, capability: domain.CapabilityUpdate, operationID: cmd.OperationID, eventID: cmd.EventID, requestedAt: cmd.RequestedAt, idempotencyKey: cmd.IdempotencyKey, actor: cmd.Actor})
 }
 
 func (s *Service) DeleteResource(ctx context.Context, cmd DeleteResourceCommand) (Result, error) {
@@ -1065,6 +1092,22 @@ func validateOutputRecoveryAdmission(operation domain.Operation, execution Provi
 }
 
 func (s *Service) drive(ctx context.Context, operationID domain.OperationID) (Result, error) {
+	if s.eager {
+		// M21 eager-safety rule (ADR-0022): classify the dependency gate
+		// BEFORE any inline phase advance. A reference-bearing Operation whose
+		// hard dependencies are not all READY must never reach the inline
+		// Submit path. Refusing here leaves the Operation untouched at its
+		// admitted state with its ORIGINAL canonical Drive still valid, so the
+		// durable worker owns waiting, waking, and pre-submission failure
+		// outcomes through the standard gate with zero special-casing.
+		handoff, err := s.eagerDependencyHandoff(ctx, operationID)
+		if err != nil {
+			return Result{}, err
+		}
+		if handoff {
+			return Result{}, fmt.Errorf("%w: operation %q", ErrEagerExecutionBlockedByDependencies, operationID)
+		}
+	}
 	for {
 		opRecord, err := s.loadOperation(ctx, operationID)
 		if err != nil {
@@ -1107,6 +1150,64 @@ func nextPhase(operation domain.Operation) domain.OperationPhase {
 		return domain.OperationPhaseDestroying
 	}
 	return domain.OperationPhasePlanning
+}
+
+// eagerDependencyHandoff classifies the reference-bearing gate for the eager
+// synchronous composition. Zero-reference Resources (the overwhelmingly common
+// case, including every released built-in type) return false and keep today's
+// eager behavior byte-for-byte. A reference-bearing Operation whose
+// dependencies are not all READY returns true WITHOUT mutating any durable
+// state: the admitted Operation and its original canonical Drive remain
+// exactly as admission produced them, so a durable worker processes the full
+// wait/wake/pre-submission-failure semantics later. Lock order follows
+// loadOperationContext (unlocked lookup, then Resource row, then Operation
+// row); target rows are locked by EvaluateDependencies in ascending ID order.
+func (s *Service) eagerDependencyHandoff(ctx context.Context, operationID domain.OperationID) (bool, error) {
+	var handoff bool
+	err := s.Transactions.Within(ctx, func(tx UnitOfWork) error {
+		preflight, err := tx.Operations().LookupOperation(ctx, operationID)
+		if err != nil {
+			return err
+		}
+		if preflight.Operation.Capability() == domain.CapabilityDelete {
+			// Delete bypasses dependency readiness unconditionally.
+			return nil
+		}
+		resource, err := tx.Resources().GetResource(ctx, preflight.Operation.ResourceID())
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Operations().GetOperation(ctx, operationID); err != nil {
+			return err
+		}
+		if s.Types == nil {
+			return nil
+		}
+		contract, err := s.Types.Get(ctx, resource.Resource.Type())
+		if err != nil || isNilInterface(contract) || contract.ReferenceContract() == nil {
+			return nil
+		}
+		desired, err := tx.References().DesiredReferences(ctx, resource.Resource.ID())
+		if err != nil {
+			return err
+		}
+		if len(desired) == 0 {
+			return nil
+		}
+		evaluation, _, err := EvaluateDependencies(ctx, tx, s.Types, resource)
+		if err != nil {
+			return err
+		}
+		if evaluation.Class == DependencyReady {
+			return nil
+		}
+		handoff = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return handoff, nil
 }
 
 // DispatchOperation advances a persisted provisioning attempt without creating
@@ -1564,6 +1665,36 @@ func (s *Service) finishObserved(ctx context.Context, record ResourceRecord, opR
 			return err
 		}
 		execution.Version++
+		if succeeded {
+			// Eager twin of the durable terminal-success side effects (M21):
+			// applied references advance ONLY here — with proven convergence
+			// including output postconditions — and a successful delete
+			// releases both sets atomically with the Deleted tombstone.
+			capability := currentOperation.Operation.Capability()
+			if capability == domain.CapabilityCreate || capability == domain.CapabilityUpdate {
+				if currentOperation.Operation.TargetGeneration() == current.Resource.Generation() {
+					desired, refErr := tx.References().DesiredReferences(ctx, current.Resource.ID())
+					if refErr != nil {
+						return refErr
+					}
+					applied := make([]ReferenceEdge, 0, len(desired))
+					for _, edge := range desired {
+						if edge.Generation != currentOperation.Operation.TargetGeneration() {
+							return fmt.Errorf("%w: desired reference generation %d does not match converged generation %d",
+								ErrReferenceInvariant, edge.Generation, currentOperation.Operation.TargetGeneration())
+						}
+						applied = append(applied, edge)
+					}
+					if err := tx.References().AdvanceAppliedReferences(ctx, current.Resource.ID(), currentOperation.Operation.TargetGeneration(), applied); err != nil {
+						return err
+					}
+				}
+			} else if capability == domain.CapabilityDelete && transition.Operation.State() == domain.OperationStateSucceeded {
+				if err := tx.References().DeleteReferencesForSource(ctx, current.Resource.ID()); err != nil {
+					return err
+				}
+			}
+		}
 		event := transition.Event
 		result = Result{Resource: current, Operation: transition.Operation, Execution: &execution, Event: &event}
 		return nil
@@ -1585,6 +1716,8 @@ type existingRequest struct {
 	id                 domain.ResourceID
 	expectedGeneration uint64
 	spec               *domain.ResourceSpec
+	referencesPresent  bool
+	references         map[string][]string
 	capability         domain.Capability
 	operationID        domain.OperationID
 	eventID            domain.EventID
@@ -1620,6 +1753,14 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 		if err := validateCommandSpec(resourceType, cmd.Spec); err != nil {
 			return err
 		}
+		referenceContract := resourceType.ReferenceContract()
+		edges, err := CanonicalizeReferences(cmd.References)
+		if err != nil {
+			return err
+		}
+		if err := ValidateReferenceShape(referenceContract, cmd.ID, edges); err != nil {
+			return err
+		}
 		resource, err := domain.NewResource(cmd.ID, cmd.Type, cmd.Owner, cmd.Spec, cmd.RequestedAt)
 		if err != nil {
 			return err
@@ -1637,7 +1778,11 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 			return fmt.Errorf("%w: %v", ErrPolicyEvaluation, err)
 		}
 		facts := ResourceCountFacts{}
-		if plan.RequiresResourceCounts() {
+		// The M18 owner advisory lock doubles as the owner-scoped structural
+		// admission lock for relationship-bearing creates. It is always held
+		// before any Resource row lock; the key derivation and SQL are
+		// byte-identical to the quota path (ADR-0019/0022).
+		if plan.RequiresResourceCounts() || len(edges) > 0 || referenceContract != nil {
 			if err := tx.Quotas().LockOwnerQuota(ctx, cmd.Owner); err != nil {
 				return fmt.Errorf("%w: quota owner lock failed: %v", ErrPersistenceUnavailable, err)
 			}
@@ -1655,6 +1800,18 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 		}
 		if exists {
 			return fmt.Errorf("%w: resource already exists", ErrConcurrencyConflict)
+		}
+		// Relationship admission runs after the owner structural lock and the
+		// source identity lock, with every target row locked in deterministic
+		// ID order. Target failures render one generic refusal so an
+		// inaccessible target is indistinguishable from a missing one.
+		if len(edges) > 0 {
+			if err := s.validateReferenceTargets(ctx, tx, cmd.Actor, cmd.Owner, referenceContract, edges); err != nil {
+				return err
+			}
+			if err := DetectDependencyCycle(ctx, tx, cmd.ID, distinctEdgeTargets(edges)); err != nil {
+				return err
+			}
 		}
 		if plan.RequiresResourceCounts() {
 			facts, err = tx.Quotas().ResourceCountFacts(ctx, cmd.Owner, cmd.Type)
@@ -1686,7 +1843,7 @@ func (s *Service) persistCreateRequest(ctx context.Context, cmd CreateResourceCo
 		if err != nil {
 			return err
 		}
-		result, err = persistNewRequest(ctx, tx, ResourceRecord{Resource: resource, Status: transition.Status, ProvisionerRef: ref, Version: 1}, transition, scope, cmd.IdempotencyKey, fingerprint)
+		result, err = persistNewRequest(ctx, tx, ResourceRecord{Resource: resource, Status: transition.Status, ProvisionerRef: ref, Version: 1}, transition, scope, cmd.IdempotencyKey, fingerprint, edges)
 		return err
 	})
 	return result, err
@@ -1723,6 +1880,16 @@ func (s *Service) persistExistingRequest(ctx context.Context, request existingRe
 			result = replay
 			return nil
 		}
+		// Owner structural admission lock (M18 lock reused, ADR-0022). Deletes
+		// always serialize because inbound protective references decide the
+		// outcome; reference-bearing updates serialize whenever references are
+		// explicitly supplied. It is acquired after the idempotency lock and
+		// BEFORE any Resource row lock, preserving the canonical ladder.
+		if request.capability == domain.CapabilityDelete || request.referencesPresent {
+			if err := tx.Quotas().LockOwnerQuota(ctx, resourceTargetOf(preflight).Owner); err != nil {
+				return fmt.Errorf("%w: owner admission lock failed: %v", ErrPersistenceUnavailable, err)
+			}
+		}
 		stored, err := tx.Resources().GetResource(ctx, request.id)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceNotFound, err)
@@ -1744,6 +1911,53 @@ func (s *Service) persistExistingRequest(ctx context.Context, request existingRe
 		resourceType, err := s.Types.Get(ctx, stored.Resource.Type())
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrResourceTypeNotFound, err)
+		}
+		referenceContract := resourceType.ReferenceContract()
+		if request.capability == domain.CapabilityDelete {
+			// Target deletion protection (M21). Any inbound desired or applied
+			// row is protective evidence and fails closed: rows owned by a
+			// Deleted source indicate invariant corruption and refuse the
+			// delete rather than being silently ignored. No cascade exists;
+			// the caller must release the dependency by converging or deleting
+			// the dependent first.
+			protected, err := tx.References().HasInboundProtectiveReference(ctx, stored.Resource.ID())
+			if err != nil {
+				return err
+			}
+			if protected {
+				return ErrResourceInUse
+			}
+		}
+		var effectiveDesired []ReferenceEdge
+		if request.capability == domain.CapabilityUpdate && referenceContract != nil || request.referencesPresent {
+			oldEdges, err := tx.References().DesiredReferences(ctx, stored.Resource.ID())
+			if err != nil {
+				return err
+			}
+			effectiveDesired = oldEdges
+			if request.referencesPresent {
+				effectiveDesired, err = CanonicalizeReferences(request.references)
+				if err != nil {
+					return err
+				}
+				if err := ValidateReferenceShape(referenceContract, stored.Resource.ID(), effectiveDesired); err != nil {
+					return err
+				}
+				added, _ := ReferenceDifference(oldEdges, effectiveDesired)
+				if len(added) > 0 {
+					// Newly added edges are new durable intent: they require
+					// current same-owner, read-authorization, exact-type, and
+					// eligibility validation. Preserved durable edges are
+					// trusted admitted intent and are neither reauthorized nor
+					// revalidated; removed edges require no target permission.
+					if err := s.validateReferenceTargets(ctx, tx, request.actor, stored.Resource.Owner(), referenceContract, added); err != nil {
+						return err
+					}
+					if err := DetectDependencyCycle(ctx, tx, stored.Resource.ID(), distinctEdgeTargets(added)); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		if request.spec != nil {
 			if err := validateCommandSpec(resourceType, *request.spec); err != nil {
@@ -1794,6 +2008,20 @@ func (s *Service) persistExistingRequest(ctx context.Context, request existingRe
 			return err
 		}
 		stored.Version++
+		if request.capability == domain.CapabilityUpdate {
+			// The desired set is rewritten atomically with every new
+			// generation — including PRESERVED sets on absent-reference
+			// updates, whose row generation must always equal the source's
+			// current generation. The EDGE SET is unchanged in that case, so
+			// no target is revalidated or reauthorized (ADR-0022). Applied
+			// references are untouched here; the protective union covers both
+			// until final successful convergence.
+			if request.referencesPresent || len(effectiveDesired) > 0 {
+				if err := tx.References().ReplaceDesiredReferences(ctx, stored.Resource.ID(), stored.Resource.Generation(), effectiveDesired); err != nil {
+					return err
+				}
+			}
+		}
 		result, err = persistExistingTransition(ctx, tx, stored, transition, scope, request.idempotencyKey, fingerprint, string(request.capability))
 		return err
 	})
@@ -1818,7 +2046,7 @@ func actionForCapability(capability domain.Capability) identity.Action {
 // not involve specs.
 func fingerprintForExistingRequest(request existingRequest) (string, error) {
 	if request.spec != nil && request.capability == domain.CapabilityUpdate {
-		cmd := UpdateResourceCommand{ID: request.id, ExpectedGeneration: request.expectedGeneration, Spec: *request.spec}
+		cmd := UpdateResourceCommand{ID: request.id, ExpectedGeneration: request.expectedGeneration, Spec: *request.spec, ReferencesPresent: request.referencesPresent, References: request.references}
 		return updateCommandFingerprint(cmd)
 	}
 	if request.capability == domain.CapabilityDelete {
@@ -1842,8 +2070,14 @@ func stampedAdmissionEvent(transition lifecycle.Result, principal identity.Princ
 	return event.WithAdmissionPolicyRevision(string(policyRevision[0]))
 }
 
-func persistNewRequest(ctx context.Context, tx UnitOfWork, record ResourceRecord, transition lifecycle.Result, scope, key, fingerprint string) (Result, error) {
+func persistNewRequest(ctx context.Context, tx UnitOfWork, record ResourceRecord, transition lifecycle.Result, scope, key, fingerprint string, edges []ReferenceEdge) (Result, error) {
 	if err := tx.Resources().CreateResource(ctx, record); err != nil {
+		return Result{}, err
+	}
+	// Desired references persist atomically with the created Resource. The
+	// applied set starts empty and advances only with durable successful
+	// convergence (ADR-0022).
+	if err := tx.References().ReplaceDesiredReferences(ctx, record.Resource.ID(), record.Resource.Generation(), edges); err != nil {
 		return Result{}, err
 	}
 	return persistExistingTransition(ctx, tx, record, transition, scope, key, fingerprint, string(transition.Operation.Capability()))

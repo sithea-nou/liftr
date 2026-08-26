@@ -26,6 +26,7 @@ type strictContract struct {
 	validations    int
 	transitionFunc func(oldSpec, newSpec domain.ResourceSpec) error
 	outputs        *resourcecontract.OutputContract
+	references     *resourcecontract.ReferenceContract
 }
 
 func newStrictContract(name string) *strictContract {
@@ -52,6 +53,21 @@ func (c *strictContract) SpecSchema() json.RawMessage { return json.RawMessage(`
 
 // OutputContract returns the declared output contract, nil by default.
 func (c *strictContract) OutputContract() *resourcecontract.OutputContract { return c.outputs }
+
+// ReferenceContract is nil by default; reference-contract tests wrap their own
+// contract type.
+func (c *strictContract) ReferenceContract() *resourcecontract.ReferenceContract { return c.references }
+
+// WithReferences attaches a declared reference contract to the synthetic
+// contract for M21 admission tests.
+func (c *strictContract) WithReferences(slots ...resourcecontract.ReferenceSlot) *strictContract {
+	contract, err := resourcecontract.NewReferenceContract(slots)
+	if err != nil {
+		panic(err)
+	}
+	c.references = &contract
+	return c
+}
 
 func (c *strictContract) ValidateSpec(spec domain.ResourceSpec) error {
 	c.validations++

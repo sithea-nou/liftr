@@ -139,17 +139,19 @@ func validResourceListState(state string) bool {
 }
 
 type mutationOptions struct {
-	file           string
-	id             string
-	typeName       string
-	typeVersion    string
-	owner          string
-	specFile       string
-	idempotencyKey string
-	wait           bool
-	timeout        time.Duration
-	generation     uint64
-	yes            bool
+	file            string
+	id              string
+	typeName        string
+	typeVersion     string
+	owner           string
+	specFile        string
+	references      []string
+	clearReferences bool
+	idempotencyKey  string
+	wait            bool
+	timeout         time.Duration
+	generation      uint64
+	yes             bool
 }
 
 func addWaitFlags(flags *pflag.FlagSet, m *mutationOptions) {
@@ -224,8 +226,51 @@ Use "-" as the file name to read from stdin. Input is JSON only, at most
 	flags.StringVar(&m.typeVersion, "version", "", "ResourceType version")
 	flags.StringVar(&m.owner, "owner", "", "requested owner as KIND=ID")
 	flags.StringVar(&m.specFile, "spec", "", "spec document FILE ('-' reads stdin)")
+	flags.StringArrayVar(&m.references, "reference", nil, "desired dependency binding SLOT=RESOURCE_ID[,RESOURCE_ID...] (repeatable)")
 	addWaitFlags(command.Flags(), m)
 	return command
+}
+
+// parseReferenceFlags converts repeatable --reference SLOT=ID[,ID...] values
+// into canonical envelope bindings. Repeating a slot appends targets; a
+// duplicate target within one slot is rejected locally.
+func parseReferenceFlags(values []string) ([]client.ReferenceBinding, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	var bindings []client.ReferenceBinding
+	index := map[string]int{}
+	for _, value := range values {
+		slot, targets, found := strings.Cut(value, "=")
+		slot = strings.TrimSpace(slot)
+		if !found || slot == "" {
+			return nil, fmt.Errorf("--reference must be SLOT=RESOURCE_ID (with optional comma-separated IDs), got %q", value)
+		}
+		list := strings.Split(targets, ",")
+		cleaned := make([]string, 0, len(list))
+		for _, target := range list {
+			target = strings.TrimSpace(target)
+			if err := validateResourceID(target); err != nil {
+				return nil, fmt.Errorf("--reference %q: %v", slot, err)
+			}
+			cleaned = append(cleaned, target)
+		}
+		position, exists := index[slot]
+		if !exists {
+			index[slot] = len(bindings)
+			bindings = append(bindings, client.ReferenceBinding{Slot: slot, Targets: cleaned})
+			continue
+		}
+		for _, target := range cleaned {
+			for _, existing := range bindings[position].Targets {
+				if existing == target {
+					return nil, fmt.Errorf("--reference %q repeats target %q", slot, target)
+				}
+			}
+			bindings[position].Targets = append(bindings[position].Targets, target)
+		}
+	}
+	return bindings, nil
 }
 
 func buildCreateBody(a *App, m *mutationOptions) ([]byte, error) {
@@ -277,7 +322,11 @@ func buildCreateBody(a *App, m *mutationOptions) ([]byte, error) {
 		if err := validateSingleJSONObject(spec, "spec"); err != nil {
 			return nil, err
 		}
-		return client.BuildCreateEnvelope(m.id, m.typeName, m.typeVersion, ownerKind, ownerID, spec), nil
+		bindings, err := parseReferenceFlags(m.references)
+		if err != nil {
+			return nil, err
+		}
+		return client.BuildCreateEnvelopeWithReferences(m.id, m.typeName, m.typeVersion, ownerKind, ownerID, spec, bindings), nil
 	default:
 		return nil, errors.New("specify -f/--file with a request document, or all of --id, --type, --version, --owner, and --spec")
 	}
@@ -361,7 +410,11 @@ re-read the state and re-apply your change deliberately.`,
 			if err != nil {
 				return err
 			}
-			result, err := a.api.UpdateResource(cmd.Context(), resourceID, client.WrapUpdateSpec(spec), key, generation)
+			body, err := buildUpdateBody(m, spec)
+			if err != nil {
+				return err
+			}
+			result, err := a.api.UpdateResource(cmd.Context(), resourceID, body, key, generation)
 			if err != nil {
 				if interruptedNow(cmd.Context()) {
 					return exit(ExitInterrupted)
@@ -373,9 +426,30 @@ re-read the state and re-apply your change deliberately.`,
 	}
 	command.Flags().StringVar(&m.specFile, "spec", "", "complete replacement spec FILE ('-' reads stdin)")
 	command.Flags().Uint64Var(&m.generation, "generation", 0, "concrete If-Liftr-Generation precondition; skips the default pre-read")
+	command.Flags().StringArrayVar(&m.references, "reference", nil, "REPLACES all desired references; SLOT=RESOURCE_ID[,ID...] (repeatable)")
+	command.Flags().BoolVar(&m.clearReferences, "clear-references", false, "explicitly clear every desired reference (references are preserved when neither this nor --reference is supplied)")
 	addWaitFlags(command.Flags(), m)
 	_ = command.MarkFlagRequired("spec")
 	return command
+}
+
+// buildUpdateBody implements the M21 update compatibility rule: an update that
+// supplies neither --reference nor --clear-references omits the references
+// field entirely so the server preserves stored relationships. Supplying
+// --reference switches to explicit full replacement; --clear-references sends
+// {} with the field explicitly present. The two flags are mutually exclusive.
+func buildUpdateBody(m *mutationOptions, spec []byte) ([]byte, error) {
+	if m.clearReferences && len(m.references) > 0 {
+		return nil, errors.New("use either --reference or --clear-references, not both")
+	}
+	if !m.clearReferences && len(m.references) == 0 {
+		return client.WrapUpdateSpec(spec), nil
+	}
+	bindings, err := parseReferenceFlags(m.references)
+	if err != nil {
+		return nil, err
+	}
+	return client.WrapUpdateReferences(spec, true, bindings), nil
 }
 
 func newResourceDeleteCommand(a *App) *cobra.Command {
@@ -512,4 +586,15 @@ func (a *App) finishMutation(ctx context.Context, verb string, result *client.Mu
 		return ExitOK
 	}
 	return a.waitForOperation(ctx, result, m.timeout)
+}
+
+// ParseReferenceFlagsForTest exposes flag parsing to external test package.
+func ParseReferenceFlagsForTest(values []string) ([]client.ReferenceBinding, error) {
+	return parseReferenceFlags(values)
+}
+
+// BuildUpdateBodyForTest exposes update-body assembly to external tests.
+func BuildUpdateBodyForTest(spec []byte, references []string, clear bool) ([]byte, error) {
+	m := &mutationOptions{references: references, clearReferences: clear}
+	return buildUpdateBody(m, spec)
 }

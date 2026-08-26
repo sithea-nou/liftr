@@ -23,6 +23,11 @@ type ResourceView struct {
 	// deleted endpoints are never exposed, while immutable internal history is
 	// retained for audit and recovery.
 	Outputs *domain.ResourceOutputs
+	// References is the current canonical DESIRED reference set (M21).
+	// Applied references are internal protective evidence and are never
+	// exposed publicly; observedGeneration already communicates whether the
+	// desired generation has converged.
+	References []ReferenceEdge
 }
 
 // GetResource reads the current stored state of one Resource for an
@@ -141,6 +146,11 @@ func (s *Service) GetResourceOperation(ctx context.Context, principal identity.P
 				view.Outputs = &outputs
 			}
 		}
+		references, err := tx.References().DesiredReferences(ctx, id)
+		if err != nil {
+			return err
+		}
+		view.References = references
 		return nil
 	})
 	if err != nil {
