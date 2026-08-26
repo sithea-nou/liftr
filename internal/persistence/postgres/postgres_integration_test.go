@@ -166,9 +166,15 @@ func TestPostgresOperationHistorySequenceOrdering(t *testing.T) {
 	requestedAt := command.RequestedAt.Add(-time.Hour)
 	equalOlder := mustEqualTimestampOperation(t, "op-a-equal-older", command.ID, domain.CapabilityUpdate, requestedAt)
 	equalNewer := mustEqualTimestampOperation(t, "op-b-equal-newer", command.ID, domain.CapabilityDelete, requestedAt)
+	history := []domain.Operation{equalOlder, equalNewer}
+	for number := 3; number <= 11; number++ {
+		history = append(history, mustEqualTimestampOperation(t,
+			domain.OperationID(fmt.Sprintf("op-%02d-equal", number)), command.ID, domain.CapabilityUpdate, requestedAt))
+	}
+	newest := history[len(history)-1]
 
 	err = store.Within(ctx, func(tx application.UnitOfWork) error {
-		for _, operation := range []domain.Operation{equalOlder, equalNewer} {
+		for _, operation := range history {
 			if err := tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: operation, Version: 1}); err != nil {
 				return err
 			}
@@ -200,8 +206,8 @@ func TestPostgresOperationHistorySequenceOrdering(t *testing.T) {
 	}
 
 	for attempt := 0; attempt < 25; attempt++ {
-		if got := latestFromPostgres(t); got != equalNewer.ID() {
-			t.Fatalf("attempt %d: latest selected %q, want last inserted %q", attempt, got, equalNewer.ID())
+		if got := latestFromPostgres(t); got != newest.ID() {
+			t.Fatalf("attempt %d: latest selected %q, want last inserted %q", attempt, got, newest.ID())
 		}
 	}
 	if err := store.Within(ctx, func(tx application.UnitOfWork) error {
@@ -209,14 +215,14 @@ func TestPostgresOperationHistorySequenceOrdering(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if len(first.Records) != 2 || first.Records[0].Operation.ID() != equalNewer.ID() || first.Records[1].Operation.ID() != equalOlder.ID() || first.NextSequence == 0 {
+		if len(first.Records) != 2 || first.Records[0].Operation.ID() != newest.ID() || first.Records[1].Operation.ID() != history[len(history)-2].ID() || first.NextSequence == 0 {
 			return fmt.Errorf("unexpected first operation page: %#v", first)
 		}
 		second, err := tx.Operations().PageForResource(ctx, command.ID, first.NextSequence, 2)
 		if err != nil {
 			return err
 		}
-		if len(second.Records) != 1 || second.Records[0].Operation.ID() != admitted.Operation.ID() || second.NextSequence != 0 {
+		if len(second.Records) != 2 || second.Records[0].Operation.ID() != history[len(history)-3].ID() || second.Records[1].Operation.ID() != history[len(history)-4].ID() || second.NextSequence == 0 {
 			return fmt.Errorf("unexpected second operation page: %#v", second)
 		}
 		return nil
@@ -232,7 +238,7 @@ func TestPostgresOperationHistorySequenceOrdering(t *testing.T) {
 		if err := tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: create, Version: 1}); err != nil {
 			return err
 		}
-		for _, operation := range []domain.Operation{equalOlder, equalNewer} {
+		for _, operation := range history {
 			if err := tx.Operations().CreateOperation(ctx, application.OperationRecord{Operation: operation, Version: 1}); err != nil {
 				return err
 			}
@@ -248,9 +254,9 @@ func TestPostgresOperationHistorySequenceOrdering(t *testing.T) {
 	if err != nil || !fakeFound {
 		t.Fatalf("fake latest found=%t err=%v", fakeFound, err)
 	}
-	if pgLatest != fakeLatest.Operation.ID() || pgLatest != equalNewer.ID() {
+	if pgLatest != fakeLatest.Operation.ID() || pgLatest != newest.ID() {
 		t.Fatalf("ordering disagreement: postgres selected %q, fake selected %q, want tiebreak winner %q",
-			pgLatest, fakeLatest.Operation.ID(), equalNewer.ID())
+			pgLatest, fakeLatest.Operation.ID(), newest.ID())
 	}
 }
 

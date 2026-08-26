@@ -87,16 +87,16 @@ func TestPostgresResourceOutputsRoundTripSurvivesReopen(t *testing.T) {
 	}
 	seedOutputResource(t, ctx, store, "outputs-roundtrip")
 	seedOutputOperation(t, ctx, store, "op-outputs-gen1", "outputs-roundtrip", domain.CapabilityCreate, 1)
-	seedOutputOperation(t, ctx, store, "op-outputs-gen2", "outputs-roundtrip", domain.CapabilityUpdate, 2)
+	seedOutputOperation(t, ctx, store, "op-outputs-gen10", "outputs-roundtrip", domain.CapabilityUpdate, 10)
 
 	publishedAt := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
 	gen1 := outputSnapshot(t, 1, "old.example", publishedAt)
-	gen2 := outputSnapshot(t, 2, "new.example", publishedAt.Add(time.Minute))
+	gen10 := outputSnapshot(t, 10, "new.example", publishedAt.Add(time.Minute))
 	digest1, err := application.ValuesDigest(gen1.Values())
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest2, err := application.ValuesDigest(gen2.Values())
+	digest10, err := application.ValuesDigest(gen10.Values())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestPostgresResourceOutputsRoundTripSurvivesReopen(t *testing.T) {
 	if err := insert(gen1, "op-outputs-gen1", digest1, domain.CapabilityCreate); err != nil {
 		t.Fatal(err)
 	}
-	if err := insert(gen2, "op-outputs-gen2", digest2, domain.CapabilityUpdate); err != nil {
+	if err := insert(gen10, "op-outputs-gen10", digest10, domain.CapabilityUpdate); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,11 +127,11 @@ func TestPostgresResourceOutputsRoundTripSurvivesReopen(t *testing.T) {
 		if err != nil || !found {
 			t.Fatalf("latest outputs found=%t err=%v", found, err)
 		}
-		if latest.ObservedGeneration != 2 || latest.Values.Values()["hostname"] != "new.example" {
+		if latest.ObservedGeneration != 10 || latest.Values.Values()["hostname"] != "new.example" {
 			t.Fatalf("latest = generation %d values %v", latest.ObservedGeneration, latest.Values.Values())
 		}
-		if latest.OperationID != "op-outputs-gen2" || latest.OutputMappingRef != "mapping-v1" ||
-			latest.OutputContractDigest != "contract-digest" || latest.ValuesDigest != digest2 {
+		if latest.OperationID != "op-outputs-gen10" || latest.OutputMappingRef != "mapping-v1" ||
+			latest.OutputContractDigest != "contract-digest" || latest.ValuesDigest != digest10 {
 			t.Fatalf("provenance lost: %+v", latest)
 		}
 		return nil

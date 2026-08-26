@@ -1,0 +1,9 @@
+.git
+.idea
+.demo
+dist
+bin
+node_modules
+**/node_modules
+examples/demo/.demo
+integrations/backstage/node_modules

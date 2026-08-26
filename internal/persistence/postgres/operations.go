@@ -62,7 +62,7 @@ func (r *repositories) LatestForResource(ctx context.Context, id domain.Resource
 	row := r.tx.QueryRow(ctx, `SELECT id, resource_id, operation_seq::text, retry_of_operation_id, capability, target_generation::text, state, phase,
 		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
 		failure_reason, failure_message, record_version::text
-		FROM operations WHERE resource_id=$1 ORDER BY operation_seq DESC LIMIT 1`, id)
+		FROM operations WHERE resource_id=$1 ORDER BY operations.operation_seq DESC LIMIT 1`, id)
 	record, err := scanOperation(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -81,7 +81,7 @@ func (r *repositories) PageForResource(ctx context.Context, id domain.ResourceID
 		requested_at_ns, started_at_ns, phase_changed_at_ns, completed_at_ns,
 		failure_reason, failure_message, record_version::text
 		FROM operations WHERE resource_id=$1 AND ($2::numeric=0 OR operation_seq < $2::numeric)
-		ORDER BY operation_seq DESC LIMIT $3`, id, uintText(beforeSequence), limit+1)
+		ORDER BY operations.operation_seq DESC LIMIT $3`, id, uintText(beforeSequence), limit+1)
 	if err != nil {
 		return application.OperationPage{}, translateError(err)
 	}

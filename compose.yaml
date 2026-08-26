@@ -12,3 +12,50 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # NON-PRODUCTION demo control plane (examples/demo). The loopback guard is
+  # intentionally disabled inside the container (LIFTR_DEMO_ALLOW_REMOTE=1);
+  # real host exposure is governed exclusively by the ports mapping, which is
+  # pinned to 127.0.0.1 so the stack stays off the network.
+  demo-server:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: examples/demo/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Bind every listener to the container interface; host exposure is
+      # governed solely by the 127.0.0.1-pinned ports mapping below.
+      LIFTR_ADDR: 0.0.0.0:18080
+      LIFTR_ADMIN_ADDR: 0.0.0.0:18090
+      LIFTR_CONTROL_ADDR: 0.0.0.0:18099
+      LIFTR_DEMO_ALLOW_REMOTE: "1"
+      LIFTR_DEMO_DATABASE_URL: postgres://liftr:liftr@postgres:5432/liftr_demo?sslmode=disable
+      LIFTR_OPENAPI_DIR: /docs/openapi
+      LIFTR_POLICY_FILE: /policy.json
+    ports:
+      - "127.0.0.1:18080:18080"
+      - "127.0.0.1:18090:18090"
+      - "127.0.0.1:18099:18099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18080/readyz >/dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # Read-only Swagger UI for the developer API spec, mounted straight from the
+  # working tree so the rendered contract always matches the repository.
+  # NON-PRODUCTION convenience; Liftr itself serves no HTML.
+  swagger-ui:
+    profiles: ["demo"]
+    image: swaggerapi/swagger-ui:v5.17.14
+    depends_on:
+      - demo-server
+    environment:
+      SWAGGER_JSON: /spec/openapi.yaml
+    volumes:
+      - ./docs/openapi/v1:/spec:ro
+    ports:
+      - "127.0.0.1:18081:8080"

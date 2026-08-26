@@ -1,0 +1,17 @@
+{
+  "apiVersion": "liftr.dev/admission-policy/v1",
+  "rules": [
+    {
+      "id": "demo-no-demoapp-update",
+      "kind": "capability-deny",
+      "resourceType": { "name": "DemoFault", "version": "v1" },
+      "capabilities": ["update"]
+    },
+    {
+      "id": "demo-team-quota",
+      "kind": "resource-count-quota",
+      "owner": { "kind": "team", "id": "demo" },
+      "limit": 4
+    }
+  ]
+}

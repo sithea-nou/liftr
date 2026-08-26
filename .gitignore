@@ -1,7 +1,13 @@
 # Build output
 /liftr-server
+/liftr-migrate
+/liftr-demo-server
+/liftr-demo-tofu-server
 /bin/
 /dist/
+
+# Local demo runtime state (examples/demo)
+/.demo/
 
 # Prebuilt Pulumi program binaries (registered programs require a digest;
 # binaries are rebuilt from source, never committed)

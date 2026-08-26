@@ -61,7 +61,7 @@ func (r *repositories) LatestResourceOutputs(ctx context.Context, id domain.Reso
 	err := r.tx.QueryRow(ctx, `SELECT observed_generation::text, operation_id, capability, output_mapping_ref,
 		output_contract_digest, values_jsonb, values_digest, published_at_ns
 		FROM resource_outputs WHERE resource_id=$1
-		ORDER BY observed_generation DESC LIMIT 1`, id).Scan(
+		ORDER BY resource_outputs.observed_generation DESC LIMIT 1`, id).Scan(
 		&generationText, &operationID, &capability, &mappingRef, &contractDigest, &valuesBytes, &valuesDigest, &publishedNS)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
