@@ -10,7 +10,7 @@
     "start": "backstage-cli package start --config ../../app-config.yaml"
   },
   "dependencies": {
-    "@backstage/backend-defaults": "^0.17.7",
+    "@backstage/backend-defaults": "^0.18.0",
     "@backstage/backend-plugin-api": "^1.10.0",
     "@backstage/plugin-auth-backend": "^0.30.0",
     "@backstage/plugin-auth-backend-module-guest-provider": "^0.2.22",
