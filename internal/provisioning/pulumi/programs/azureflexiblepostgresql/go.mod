@@ -4,7 +4,7 @@ go 1.25.11
 
 require (
 	github.com/pulumi/pulumi-azure-native-sdk/dbforpostgresql/v2 v2.92.3
-	github.com/pulumi/pulumi-azure-native-sdk/resources/v2 v2.90.0
+	github.com/pulumi/pulumi-azure-native-sdk/resources/v2 v2.92.3
 	github.com/pulumi/pulumi-random/sdk/v4 v4.21.2
 	github.com/pulumi/pulumi/sdk/v3 v3.259.0
 )
