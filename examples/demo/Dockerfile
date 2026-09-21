@@ -13,7 +13,7 @@ COPY internal ./internal
 COPY docs/openapi ./docs/openapi
 RUN go build -trimpath -ldflags "-s -w" -o /out/liftr-demo-server ./cmd/liftr-demo-server
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN adduser -D -H liftr-demo
 COPY --from=build /out/liftr-demo-server /liftr-demo-server
 COPY --from=build /src/docs/openapi /docs/openapi
