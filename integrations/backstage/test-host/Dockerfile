@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Disposable, non-production Backstage host images for the Liftr demo.
 
-FROM node:24-bookworm-slim AS backstage-build
+FROM node:25-bookworm-slim AS backstage-build
 WORKDIR /app
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     NODE_OPTIONS=--max-old-space-size=4096
@@ -24,7 +24,7 @@ RUN corepack yarn@4.9.2 workspace @liftr/testhost-backend build \
 FROM backstage-build AS backstage-prod-deps
 RUN corepack yarn@4.9.2 workspaces focus @liftr/testhost-backend --production
 
-FROM node:24-bookworm-slim AS backstage-backend
+FROM node:25-bookworm-slim AS backstage-backend
 WORKDIR /app
 ENV NODE_ENV=production
 
