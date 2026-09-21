@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@backstage/core-plugin-api": "^1.10.0",
-    "@backstage/frontend-defaults": "^0.5.0",
+    "@backstage/frontend-defaults": "^0.5.6",
     "@backstage/frontend-plugin-api": "^0.18.0",
     "@backstage/ui": "^0.17.1",
     "@liftr/plugin-liftr": "workspace:^",
