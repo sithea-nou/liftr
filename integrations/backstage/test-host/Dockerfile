@@ -39,7 +39,7 @@ USER node
 EXPOSE 7007
 CMD ["node", "test-host/packages/backend", "--config", "test-host/app-config.yaml", "--config", "test-host/app-config.container.yaml"]
 
-FROM nginx:1.27-alpine AS backstage-app
+FROM nginx:1.31-alpine AS backstage-app
 COPY test-host/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=backstage-build /app/test-host/packages/app/dist /usr/share/nginx/html
 EXPOSE 80
