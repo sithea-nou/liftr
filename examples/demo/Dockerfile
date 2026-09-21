@@ -3,7 +3,7 @@
 # Builds cmd/liftr-demo-server (deterministic demo provisioner, insecure dev
 # auth) plus the OpenAPI documents it serves. Never use for real deployments.
 
-FROM golang:1.25.11-alpine AS build
+FROM golang:1.27.0-alpine AS build
 WORKDIR /src
 ENV GOTOOLCHAIN=local CGO_ENABLED=0
 COPY go.mod go.sum ./
