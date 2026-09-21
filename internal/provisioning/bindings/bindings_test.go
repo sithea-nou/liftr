@@ -175,3 +175,64 @@ func TestPostgresEncoderProducesDeterministicEnvelope(t *testing.T) {
 		t.Fatalf("envelope leaked execution correlation data: %s", string(first))
 	}
 }
+
+func TestEncodeObjectStorageRequest(t *testing.T) {
+	request := bindings.ObjectStorageRequest{
+		Capability:       domain.CapabilityCreate,
+		ResourceID:       "storage-1",
+		ResourceType:     domain.ResourceTypeRef{Name: "ObjectStorage", Version: "v1"},
+		TargetGeneration: 1,
+		SpecValues: map[string]any{
+			"accessFrequency":       "frequent",
+			"permitAnonymousAccess": false,
+		},
+		InfraName: "liftr-0123456789abcdef0123",
+		Platform:  bindings.ObjectStoragePlatform{Location: "switzerlandnorth", SkuName: "Standard_LRS"},
+	}
+	encoded, err := bindings.EncodeObjectStorageRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	spec := envelope["spec"].(map[string]any)
+	if spec["accessFrequency"] != "frequent" || spec["permitAnonymousAccess"] != false {
+		t.Fatalf("unexpected object-storage spec: %+v", spec)
+	}
+	platform := envelope["platform"].(map[string]any)
+	if platform["location"] != "switzerlandnorth" || platform["skuName"] != "Standard_LRS" {
+		t.Fatalf("unexpected private platform mapping: %+v", platform)
+	}
+}
+
+func TestEncodeObjectStorageRequestRejectsInvalidInput(t *testing.T) {
+	base := bindings.ObjectStorageRequest{
+		Capability: domain.CapabilityCreate, ResourceID: "storage-1",
+		ResourceType: domain.ResourceTypeRef{Name: "ObjectStorage", Version: "v1"}, TargetGeneration: 1,
+		SpecValues: map[string]any{"accessFrequency": "frequent", "permitAnonymousAccess": false},
+		InfraName:  "liftr-0123456789abcdef0123",
+		Platform:   bindings.ObjectStoragePlatform{Location: "eastus", SkuName: "Standard_LRS"},
+	}
+	brokenFrequency := base
+	brokenFrequency.SpecValues = map[string]any{"accessFrequency": "Hot", "permitAnonymousAccess": false}
+	if _, err := bindings.EncodeObjectStorageRequest(brokenFrequency); err == nil {
+		t.Fatal("provider-specific frequency was accepted")
+	}
+	brokenAnonymous := base
+	brokenAnonymous.SpecValues = map[string]any{"accessFrequency": "frequent", "permitAnonymousAccess": "false"}
+	if _, err := bindings.EncodeObjectStorageRequest(brokenAnonymous); err == nil {
+		t.Fatal("non-boolean anonymous-access value was accepted")
+	}
+	brokenPlatform := base
+	brokenPlatform.Platform.Location = ""
+	if _, err := bindings.EncodeObjectStorageRequest(brokenPlatform); err == nil {
+		t.Fatal("incomplete platform configuration was accepted")
+	}
+	unsupported := base
+	unsupported.Capability = domain.CapabilityObserve
+	if _, err := bindings.EncodeObjectStorageRequest(unsupported); err == nil {
+		t.Fatal("observe capability reached the program envelope")
+	}
+}

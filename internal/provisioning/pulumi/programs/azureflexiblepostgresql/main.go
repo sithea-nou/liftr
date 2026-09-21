@@ -28,8 +28,8 @@ import (
 	"strconv"
 	"strings"
 
-	pf "github.com/pulumi/pulumi-azure-native-sdk/dbforpostgresql/v2"
-	"github.com/pulumi/pulumi-azure-native-sdk/resources/v2"
+	pf "github.com/pulumi/pulumi-azure-native-sdk/dbforpostgresql/v3"
+	"github.com/pulumi/pulumi-azure-native-sdk/resources/v3"
 	"github.com/pulumi/pulumi-random/sdk/v4/go/random"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
