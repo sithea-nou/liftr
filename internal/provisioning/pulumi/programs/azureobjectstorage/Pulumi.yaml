@@ -1,0 +1,6 @@
+name: liftr-objectstorage
+runtime:
+  name: go
+  options:
+    binary: ./program
+description: Liftr acceptance implementation of ObjectStorage/v1 on Azure Storage.

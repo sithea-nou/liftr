@@ -77,6 +77,14 @@ Liftr is in early development. The repository currently implements:
   sets jointly protect dependencies from deletion during convergence. The
   public API, CLI, and Backstage integration expose references without leaking
   provider identifiers.
+- An opt-in, cost-bearing Azure Storage qualification scenario
+  ([ADR-0023](docs/adr/0023-azure-object-storage-acceptance-scenario.md))
+  exercises the same provider-neutral `ObjectStorage/v1` intent through both a
+  private Pulumi Azure Native program and a private OpenTofu AzureRM program.
+  It covers create, access-frequency update, normalized endpoint output, and
+  delete. The scenario is acceptance-only: it is not registered in the
+  production server catalog, changes no public HTTP API, and remains
+  unvalidated until it passes in a real subscription.
 - Initial tests and continuous integration.
 
 ## Future Direction
@@ -207,6 +215,68 @@ LIFTR_TEST_PULUMI_ROOT="$HOME/.pulumi" make test-acceptance-azure
 ```
 
 Never commit generated credentials or cloud state.
+
+#### Azure Storage with Pulumi and OpenTofu
+
+The `ObjectStorage/v1` acceptance scenario provisions a real Azure Storage
+account twice: once through Pulumi and once through OpenTofu. Both
+implementations consume the same provider-neutral intent:
+
+```json
+{
+  "accessFrequency": "frequent",
+  "permitAnonymousAccess": false
+}
+```
+
+The tests create the account, update `accessFrequency` to `infrequent`, verify
+an HTTPS `endpoint` output, and delete the resource group. They are never part
+of `make verify`. They can incur Azure charges, and emergency cleanup is best
+effort, so confirm deletion in Azure if a process or machine is interrupted.
+
+Prerequisites:
+
+- An Azure service principal allowed to create/delete resource groups and
+  storage accounts in the selected subscription.
+- Pulumi CLI 3.257.0 and Azure Native SDK `v3.28.0`; the CLI must be installed
+  under `LIFTR_TEST_PULUMI_ROOT`.
+- The official OpenTofu CLI exactly at 1.12.6.
+- Network access for the one-time AzureRM provider mirror preparation.
+
+```sh
+export ARM_SUBSCRIPTION_ID=...
+export ARM_TENANT_ID=...
+export ARM_CLIENT_ID=...
+export ARM_CLIENT_SECRET=...
+export LIFTR_ACCEPTANCE_STORAGE_LOCATION='switzerlandnorth'
+
+# Optional private implementation choices:
+export LIFTR_ACCEPTANCE_STORAGE_SKU_NAME='Standard_LRS'       # Pulumi
+export LIFTR_ACCEPTANCE_STORAGE_REPLICATION_TYPE='LRS'        # OpenTofu
+
+# Pulumi qualification
+export LIFTR_TEST_PULUMI_ROOT="$HOME/.pulumi"
+export PULUMI_CONFIG_PASSPHRASE='use-a-local-test-passphrase'
+make test-acceptance-azure-storage-pulumi
+
+# OpenTofu qualification; the target prepares an ignored offline mirror.
+make prepare-acceptance-azure-storage-opentofu \
+  OPENTOFU_BIN="$HOME/.opentofu/bin/tofu"
+make test-acceptance-azure-storage-opentofu \
+  OPENTOFU_BIN="$HOME/.opentofu/bin/tofu"
+
+# Or run both after exporting all values above.
+make test-acceptance-azure-storage \
+  OPENTOFU_BIN="$HOME/.opentofu/bin/tofu"
+```
+
+The OpenTofu program pins AzureRM `4.46.0`, commits checksums for
+`darwin_arm64` and `linux_amd64`, and admits only the exact package for the
+current platform from the offline mirror. Add a platform checksum explicitly
+with `tofu providers lock -platform=<os>_<arch>` before using another platform.
+The local OpenTofu backend is limited to this acceptance test; it does not
+weaken the production requirement for an operator-qualified HTTPS HTTP state
+backend.
 
 Apply migrations explicitly with:
 

@@ -1,6 +1,6 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build fmt fmt-check test test-race test-integration test-opentofu build-programs test-acceptance-azure vet verify verify-backstage demo-build demo-up demo demo-backstage-up demo-backstage demo-backstage-test demo-down
+.PHONY: build fmt fmt-check test test-race test-integration test-opentofu build-programs build-acceptance-azure-storage-program test-acceptance-azure test-acceptance-azure-storage test-acceptance-azure-storage-pulumi test-acceptance-azure-storage-opentofu prepare-acceptance-azure-storage-opentofu vet verify verify-backstage demo-build demo-up demo demo-backstage-up demo-backstage demo-backstage-test demo-down
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" ./cmd/...
@@ -37,6 +37,36 @@ build-programs:
 # variables documented in README.md. Never part of `verify`.
 test-acceptance-azure: build-programs
 	LIFTR_ACCEPTANCE_AZURE=1 go test ./internal/provisioning/pulumi -count=1 -run TestAzureFlexibleServerLifecycle -v -timeout 3h
+
+# Opt-in, cost-bearing Azure Storage qualification. ObjectStorage/v1 remains
+# acceptance-only and is not registered by the production server composition.
+# The OpenTofu package is downloaded into ignored .demo state and verified
+# against the committed dependency lock before adapter execution.
+OPENTOFU_BIN ?= $(HOME)/.opentofu/bin/tofu
+AZURE_STORAGE_TOFU_MIRROR ?= $(abspath .demo/opentofu-provider-mirror)
+AZURE_STORAGE_TOFU_PLATFORM ?= $(shell go env GOOS)_$(shell go env GOARCH)
+
+prepare-acceptance-azure-storage-opentofu:
+	@test -x "$(OPENTOFU_BIN)" || (echo "OPENTOFU_BIN must point to executable OpenTofu 1.12.6." && exit 1)
+	@mkdir -p "$(AZURE_STORAGE_TOFU_MIRROR)"
+	cd internal/provisioning/opentofu/testdata/azureobjectstorage && \
+		"$(OPENTOFU_BIN)" providers mirror -platform="$(AZURE_STORAGE_TOFU_PLATFORM)" "$(AZURE_STORAGE_TOFU_MIRROR)"
+
+build-acceptance-azure-storage-program:
+	cd internal/provisioning/pulumi/programs/azureobjectstorage && \
+		GOTOOLCHAIN=local go build -o program .
+
+test-acceptance-azure-storage-pulumi: build-acceptance-azure-storage-program
+	LIFTR_ACCEPTANCE_AZURE_STORAGE_PULUMI=1 go test ./internal/provisioning/pulumi \
+		-count=1 -run '^TestAzureStorageLifecyclePulumi$$' -v -timeout 2h
+
+test-acceptance-azure-storage-opentofu: prepare-acceptance-azure-storage-opentofu
+	LIFTR_TEST_OPENTOFU_BIN="$(OPENTOFU_BIN)" \
+	LIFTR_ACCEPTANCE_OPENTOFU_PROVIDER_MIRROR="$(AZURE_STORAGE_TOFU_MIRROR)" \
+	LIFTR_ACCEPTANCE_AZURE_STORAGE_OPENTOFU=1 go test ./internal/provisioning/opentofu \
+		-count=1 -run '^TestAzureStorageLifecycleOpenTofu$$' -v -timeout 2h
+
+test-acceptance-azure-storage: test-acceptance-azure-storage-pulumi test-acceptance-azure-storage-opentofu
 
 vet:
 	go vet ./...

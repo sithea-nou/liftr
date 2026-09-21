@@ -167,3 +167,98 @@ func PostgresEncoder(identity, namespace string, platform PostgresPlatform) pulu
 		})
 	}
 }
+
+// ObjectStoragePlatform is private Azure implementation configuration for
+// the ObjectStorage/v1 acceptance program. These fields never cross the
+// developer-facing Resource contract.
+type ObjectStoragePlatform struct {
+	Location string `json:"location"`
+	SkuName  string `json:"skuName"`
+}
+
+func (p ObjectStoragePlatform) Validate() error {
+	if p.Location == "" {
+		return fmt.Errorf("platform configuration field %q is required", "location")
+	}
+	if p.SkuName == "" {
+		return fmt.Errorf("platform configuration field %q is required", "skuName")
+	}
+	return nil
+}
+
+type objectStorageEnvelope struct {
+	InputVersion        int                   `json:"inputVersion"`
+	Capability          string                `json:"capability"`
+	ResourceID          string                `json:"resourceId"`
+	ResourceTypeName    string                `json:"resourceTypeName"`
+	ResourceTypeVersion string                `json:"resourceTypeVersion"`
+	TargetGeneration    uint64                `json:"targetGeneration"`
+	InfraName           string                `json:"infraName"`
+	Platform            ObjectStoragePlatform `json:"platform"`
+	Spec                struct {
+		AccessFrequency       string `json:"accessFrequency"`
+		PermitAnonymousAccess bool   `json:"permitAnonymousAccess"`
+	} `json:"spec"`
+}
+
+type ObjectStorageRequest struct {
+	Capability       domain.Capability
+	ResourceID       domain.ResourceID
+	ResourceType     domain.ResourceTypeRef
+	TargetGeneration uint64
+	SpecValues       map[string]any
+	InfraName        string
+	Platform         ObjectStoragePlatform
+}
+
+// EncodeObjectStorageRequest translates provider-neutral intent into the
+// private input envelope consumed by the Azure Pulumi acceptance program.
+func EncodeObjectStorageRequest(request ObjectStorageRequest) ([]byte, error) {
+	if err := request.Platform.Validate(); err != nil {
+		return nil, err
+	}
+	switch request.Capability {
+	case domain.CapabilityCreate, domain.CapabilityUpdate, domain.CapabilityDelete:
+	default:
+		return nil, fmt.Errorf("unsupported capability %q", request.Capability)
+	}
+	frequency, ok := request.SpecValues["accessFrequency"].(string)
+	if !ok || (frequency != "frequent" && frequency != "infrequent") {
+		return nil, fmt.Errorf("spec property %q must be frequent or infrequent", "accessFrequency")
+	}
+	permitAnonymous, ok := request.SpecValues["permitAnonymousAccess"].(bool)
+	if !ok {
+		return nil, fmt.Errorf("spec property %q must be a boolean", "permitAnonymousAccess")
+	}
+	envelope := objectStorageEnvelope{
+		InputVersion:        EnvelopeVersion,
+		Capability:          string(request.Capability),
+		ResourceID:          string(request.ResourceID),
+		ResourceTypeName:    request.ResourceType.Name,
+		ResourceTypeVersion: request.ResourceType.Version,
+		TargetGeneration:    request.TargetGeneration,
+		InfraName:           request.InfraName,
+		Platform:            request.Platform,
+	}
+	envelope.Spec.AccessFrequency = frequency
+	envelope.Spec.PermitAnonymousAccess = permitAnonymous
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("encode program input: %w", err)
+	}
+	return encoded, nil
+}
+
+func ObjectStorageEncoder(identity, namespace string, platform ObjectStoragePlatform) pulumi.InputEncoder {
+	return func(input pulumi.Input) ([]byte, error) {
+		return EncodeObjectStorageRequest(ObjectStorageRequest{
+			Capability:       input.Capability,
+			ResourceID:       input.ResourceID,
+			ResourceType:     input.ResourceType,
+			TargetGeneration: input.TargetGeneration,
+			SpecValues:       input.Spec.Values(),
+			InfraName:        pulumi.InfraName(identity, namespace, input.ResourceType, input.ResourceID),
+			Platform:         platform,
+		})
+	}
+}
