@@ -21,7 +21,7 @@
     "verify:host": "yarn workspace @liftr/testhost-backend build && yarn workspace @liftr/testhost-backend config:check && yarn workspace @liftr/testhost-app build && yarn workspace @liftr/testhost-app config:check"
   },
   "devDependencies": {
-    "@backstage/core-app-api": "^1.16.0",
+    "@backstage/core-app-api": "^1.20.5",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.0",
