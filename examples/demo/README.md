@@ -41,6 +41,10 @@ make demo-backstage-up
 make demo-backstage
 ```
 
+That target runs the entire service topology in Compose: PostgreSQL, the
+Liftr demo server, Swagger UI, the built Backstage backend, and the Nginx-served
+Backstage frontend. It requires no host Go, Node.js, or Yarn build/runtime.
+
 The server runs as a Docker Compose service (`compose.yaml`, profile `demo`)
 by default: `DEMO_RUNTIME=docker make demo-up`. To build and run the server as
 a native host process instead: `DEMO_RUNTIME=native make demo-up`. Both modes

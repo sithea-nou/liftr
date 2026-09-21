@@ -77,42 +77,6 @@ func scanSubmissionAttemptWithCount(row rowScanner, count *int64) (application.S
 	return record, nil
 }
 
-func scanSubmissionAttempt(row rowScanner) (application.SubmissionAttemptRecord, error) {
-	var record application.SubmissionAttemptRecord
-	var attemptText, state string
-	var failureKind, failureReason, failureMessage *string
-	var claimedAt, resolvedAt *time.Time
-	err := row.Scan(&record.OperationID, &attemptText, &state, &record.DispatchMessage, &claimedAt, &resolvedAt,
-		&failureKind, &failureReason, &failureMessage)
-	if err != nil {
-		return application.SubmissionAttemptRecord{}, translateError(err)
-	}
-	record.AttemptNumber, err = parseUint64(attemptText)
-	if err != nil {
-		return application.SubmissionAttemptRecord{}, err
-	}
-	record.State = application.SubmissionAttemptState(state)
-	if claimedAt != nil {
-		record.ClaimedAt = *claimedAt
-	}
-	if resolvedAt != nil {
-		record.ResolvedAt = *resolvedAt
-	}
-	if failureKind != nil || failureReason != nil || failureMessage != nil {
-		record.Failure = &provisioning.ExecutionFailure{}
-		if failureKind != nil {
-			record.Failure.Kind = provisioning.ExecutionFailureKind(*failureKind)
-		}
-		if failureReason != nil {
-			record.Failure.Reason = *failureReason
-		}
-		if failureMessage != nil {
-			record.Failure.Message = *failureMessage
-		}
-	}
-	return record, nil
-}
-
 func (r *repositories) GetSubmissionAttempt(ctx context.Context, operationID domain.OperationID, attempt uint64) (application.SubmissionAttemptRecord, error) {
 	var record application.SubmissionAttemptRecord
 	var attemptText, state string

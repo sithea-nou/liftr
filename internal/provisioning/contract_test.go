@@ -174,19 +174,6 @@ func TestObservationCorrelationFieldsAreJointlyPresentOrAbsent(t *testing.T) {
 	}
 }
 
-func testRequest(id domain.OperationID, capability domain.Capability) provisioning.ExecutionRequest {
-	spec, _ := domain.NewResourceSpec(map[string]any{"intent": "test"})
-	return provisioning.ExecutionRequest{
-		OperationID:      id,
-		AttemptNumber:    1,
-		ResourceID:       "resource-1",
-		ResourceType:     domain.ResourceTypeRef{Name: "FakeResource", Version: "v1"},
-		Spec:             spec,
-		Capability:       capability,
-		TargetGeneration: 1,
-	}
-}
-
 func testObservationRequest(id domain.OperationID) provisioning.ObservationRequest {
 	spec, _ := domain.NewResourceSpec(map[string]any{"intent": "test"})
 	return provisioning.ObservationRequest{

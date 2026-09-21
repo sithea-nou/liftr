@@ -76,7 +76,7 @@ func pinExecutable(source, workRoot, expectedDigest string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open OpenTofu executable: %w", err)
 	}
-	defer input.Close()
+	defer func() { _ = input.Close() }()
 	info, err := input.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > maxExecutableBytes {
 		return "", fmt.Errorf("OpenTofu executable changed during admission")

@@ -274,7 +274,7 @@ func validateRegistration(reg Registration, allowInsecure bool) error {
 	}
 	for name, raw := range map[string]string{"state": b.StateURL, "lock": b.LockURL, "unlock": b.UnlockURL} {
 		u, err := url.Parse(raw)
-		if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && !(allowInsecure && u.Scheme == "http")) {
+		if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && (!allowInsecure || u.Scheme != "http")) {
 			return fmt.Errorf("OpenTofu HTTP backend %s URL is invalid", name)
 		}
 	}

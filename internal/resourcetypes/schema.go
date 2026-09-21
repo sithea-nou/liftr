@@ -157,9 +157,7 @@ func collectViolations(err *jsonschema.ValidationError, out *[]resourcecontract.
 		}
 		return
 	}
-	for _, violation := range expandViolation(err) {
-		*out = append(*out, violation)
-	}
+	*out = append(*out, expandViolation(err)...)
 	for _, cause := range err.Causes {
 		collectViolations(cause, out)
 	}

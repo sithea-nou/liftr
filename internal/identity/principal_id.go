@@ -42,8 +42,8 @@ func NewPrincipalID(issuer, subject string) PrincipalID {
 // writeFramed writes one length-prefixed field so no value can be confused
 // with a delimiter or with another field's content.
 func writeFramed(hasher hash.Hash, part string) {
-	hasher.Write([]byte(fmt.Sprintf("%08x", len(part))))
-	hasher.Write([]byte(part))
+	_, _ = fmt.Fprintf(hasher, "%08x", len(part))
+	_, _ = hasher.Write([]byte(part))
 }
 
 // ValidatePrincipalID reports whether id has the exact shape produced by

@@ -14,14 +14,6 @@ import (
 	"github.com/sithea-nou/liftr/internal/provisioning/crossplane/kube/fakeapi"
 )
 
-func assertSubmission(t *testing.T, submission provisioning.Submission, err error) provisioning.ExecutionObservation {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("submit returned error %v", err)
-	}
-	return submission.Observation
-}
-
 func requireFound(t *testing.T, observation provisioning.ExecutionObservation, state provisioning.ExecutionState) *provisioning.Execution {
 	t.Helper()
 	if observation.Correlation != provisioning.RequestCorrelationFound {

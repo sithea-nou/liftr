@@ -27,7 +27,7 @@ var _ provisioning.Provisioner = (*Provisioner)(nil)
 
 func New(config Config) (*Provisioner, error) {
 	if isTruthy(os.Getenv("PULUMI_AUTOMATION_API_SKIP_VERSION_CHECK")) {
-		return nil, fmt.Errorf("Pulumi version checking cannot be disabled")
+		return nil, fmt.Errorf("pulumi version checking cannot be disabled")
 	}
 	programs, err := config.validate()
 	if err != nil {
@@ -49,7 +49,7 @@ func newProvisioner(config Config, factory automationFactory) (*Provisioner, err
 		return nil, err
 	}
 	if factory == nil {
-		return nil, fmt.Errorf("Automation API factory is required")
+		return nil, fmt.Errorf("automation API factory is required")
 	}
 	return &Provisioner{config: config, programs: programs, factory: factory}, nil
 }

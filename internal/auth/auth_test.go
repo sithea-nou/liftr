@@ -61,12 +61,12 @@ func newTestIDP(t *testing.T) *testIDP {
 		if idp.jwksURIOverride != "" {
 			jwksURI = idp.jwksURIOverride
 		}
-		fmt.Fprintf(w, `{"issuer":%q,"jwks_uri":%q}`, idp.issuer, jwksURI)
+		_, _ = fmt.Fprintf(w, `{"issuer":%q,"jwks_uri":%q}`, idp.issuer, jwksURI)
 	})
 	mux.HandleFunc("/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		idp.fetches++
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(idp.jwksBody)
+		_, _ = w.Write(idp.jwksBody)
 	})
 	server := httptest.NewUnstartedServer(mux)
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}}

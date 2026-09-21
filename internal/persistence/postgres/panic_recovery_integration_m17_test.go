@@ -136,12 +136,6 @@ func (p *submitBoundaryProvider) Submit(ctx context.Context, request provisionin
 	return submission, err
 }
 
-func (p *submitBoundaryProvider) countInnerSubmits() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.innerSubmits
-}
-
 func (p *submitBoundaryProvider) Observe(ctx context.Context, request provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
 	return p.inner.Observe(ctx, request)
 }
@@ -601,19 +595,6 @@ func getResourceVersionM17(t *testing.T, store *postgres.Store, id domain.Resour
 		t.Fatal(err)
 	}
 	return version
-}
-
-func getOutboxM17(t *testing.T, store *postgres.Store, id string) application.OutboxMessage {
-	t.Helper()
-	var message application.OutboxMessage
-	if err := store.Within(context.Background(), func(tx application.UnitOfWork) error {
-		var err error
-		message, err = tx.Outbox().GetOutbox(context.Background(), id)
-		return err
-	}); err != nil {
-		return application.OutboxMessage{}
-	}
-	return message
 }
 
 func mustGetOutboxM17(t *testing.T, store *postgres.Store, id string) (application.OutboxMessage, error) {

@@ -186,7 +186,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, extra
 		}
 
 		raw, truncated, readErr := readBounded(resp.Body, maxResponseBytes)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				lastErr = &TransportError{Method: method, Err: ctxErr}

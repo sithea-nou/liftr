@@ -485,24 +485,41 @@ func openPostgres(ctx context.Context) (*postgres.Store, func(), error) {
 }
 
 func composePulumiProvisioner() (application.ProvisionerRef, provisioning.Provisioner, error) {
-	root := requireEnv("LIFTR_PULUMI_ROOT")
-	goExecutable := requireEnv("LIFTR_PULUMI_GO_EXECUTABLE")
-	backendDir := requireEnv("LIFTR_PULUMI_BACKEND_DIR")
-	workspaceDir := requireEnv("LIFTR_PULUMI_WORKSPACE_DIR")
-	identity := requireEnv("LIFTR_PULUMI_IDENTITY")
-	namespace := requireEnv("LIFTR_PULUMI_NAMESPACE")
-	sourceDir := requireEnv("LIFTR_PULUMI_PROGRAM_DIR")
+	environment, err := requiredEnvironment(
+		"LIFTR_PULUMI_ROOT",
+		"LIFTR_PULUMI_GO_EXECUTABLE",
+		"LIFTR_PULUMI_BACKEND_DIR",
+		"LIFTR_PULUMI_WORKSPACE_DIR",
+		"LIFTR_PULUMI_IDENTITY",
+		"LIFTR_PULUMI_NAMESPACE",
+		"LIFTR_PULUMI_PROGRAM_DIR",
+		"LIFTR_PG_LOCATION",
+		"LIFTR_PG_SKU_NAME",
+		"LIFTR_PG_SKU_TIER",
+		"LIFTR_PG_HA_MODE",
+		"LIFTR_PG_ADMIN_LOGIN",
+	)
+	if err != nil {
+		return "", nil, err
+	}
+	root := environment["LIFTR_PULUMI_ROOT"]
+	goExecutable := environment["LIFTR_PULUMI_GO_EXECUTABLE"]
+	backendDir := environment["LIFTR_PULUMI_BACKEND_DIR"]
+	workspaceDir := environment["LIFTR_PULUMI_WORKSPACE_DIR"]
+	identity := environment["LIFTR_PULUMI_IDENTITY"]
+	namespace := environment["LIFTR_PULUMI_NAMESPACE"]
+	sourceDir := environment["LIFTR_PULUMI_PROGRAM_DIR"]
 	backendURL := (&url.URL{Scheme: "file", Path: filepath.Clean(backendDir)}).String()
 	sourceDigest, err := pulumiprovisioner.SourceDigest(sourceDir)
 	if err != nil {
 		return "", nil, fmt.Errorf("digest registered Pulumi source: %w", err)
 	}
 	platform := bindings.PostgresPlatform{
-		Location:             requireEnv("LIFTR_PG_LOCATION"),
-		SkuName:              requireEnv("LIFTR_PG_SKU_NAME"),
-		SkuTier:              requireEnv("LIFTR_PG_SKU_TIER"),
-		HighAvailabilityMode: requireEnv("LIFTR_PG_HA_MODE"),
-		AdministratorLogin:   requireEnv("LIFTR_PG_ADMIN_LOGIN"),
+		Location:             environment["LIFTR_PG_LOCATION"],
+		SkuName:              environment["LIFTR_PG_SKU_NAME"],
+		SkuTier:              environment["LIFTR_PG_SKU_TIER"],
+		HighAvailabilityMode: environment["LIFTR_PG_HA_MODE"],
+		AdministratorLogin:   environment["LIFTR_PG_ADMIN_LOGIN"],
 	}
 	config := pulumiprovisioner.Config{
 		Identity: identity, StackNamingVersion: pulumiprovisioner.StackNamingVersionV1,
@@ -569,11 +586,19 @@ func supplyDeclaredEnvironment(names []string) pulumiprovisioner.EnvironmentProv
 	}
 }
 
-func requireEnv(name string) string {
-	value := os.Getenv(name)
-	if value == "" {
-		fmt.Fprintf(os.Stderr, "environment variable %s is required\n", name)
-		os.Exit(1)
+func requiredEnvironment(names ...string) (map[string]string, error) {
+	values := make(map[string]string, len(names))
+	missing := make([]string, 0, len(names))
+	for _, name := range names {
+		value := os.Getenv(name)
+		if value == "" {
+			missing = append(missing, name)
+			continue
+		}
+		values[name] = value
 	}
-	return value
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("required environment variables are not set: %s", strings.Join(missing, ", "))
+	}
+	return values, nil
 }

@@ -86,33 +86,36 @@ it and traversal restarts from the first page.`,
 			}
 			if a.output == outputJSON {
 				if err := emitJSON(a.stdout, list.Raw); err != nil {
-					fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 					return exit(ExitFailure)
 				}
 			} else {
-				a.renderResourceListText(a.stdout, list)
+				if err := a.renderResourceListText(a.stdout, list); err != nil {
+					_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					return exit(ExitFailure)
+				}
 			}
 			if list.NextCursor != "" {
-				fmt.Fprintf(a.stderr, "next page: liftr resource list")
+				_, _ = fmt.Fprint(a.stderr, "next page: liftr resource list")
 				if options.owner != "" {
-					fmt.Fprintf(a.stderr, " --owner %s", a.clean(options.owner))
+					_, _ = fmt.Fprintf(a.stderr, " --owner %s", a.clean(options.owner))
 				}
 				if options.typeName != "" {
-					fmt.Fprintf(a.stderr, " --type %s", a.clean(options.typeName))
+					_, _ = fmt.Fprintf(a.stderr, " --type %s", a.clean(options.typeName))
 				}
 				if options.typeVersion != "" {
-					fmt.Fprintf(a.stderr, " --version %s", a.clean(options.typeVersion))
+					_, _ = fmt.Fprintf(a.stderr, " --version %s", a.clean(options.typeVersion))
 				}
 				if options.state != "" {
-					fmt.Fprintf(a.stderr, " --state %s", a.clean(options.state))
+					_, _ = fmt.Fprintf(a.stderr, " --state %s", a.clean(options.state))
 				}
 				if options.includeDeleted {
-					fmt.Fprintf(a.stderr, " --include-deleted")
+					_, _ = fmt.Fprint(a.stderr, " --include-deleted")
 				}
 				if cmd.Flags().Changed("limit") {
-					fmt.Fprintf(a.stderr, " --limit %d", options.limit)
+					_, _ = fmt.Fprintf(a.stderr, " --limit %d", options.limit)
 				}
-				fmt.Fprintf(a.stderr, " --cursor %s\n", a.clean(list.NextCursor))
+				_, _ = fmt.Fprintf(a.stderr, " --cursor %s\n", a.clean(list.NextCursor))
 			}
 			return nil
 		},
@@ -360,7 +363,7 @@ func newResourceGetCommand(a *App) *cobra.Command {
 				return exit(classifyInterrupted(cmd.Context(), a.reportReadFailure(err)))
 			}
 			if err := a.outputResource(resource); err != nil {
-				fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+				_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 				return exit(ExitFailure)
 			}
 			return nil
@@ -403,7 +406,7 @@ re-read the state and re-apply your change deliberately.`,
 				}
 				generation = current.Generation
 				if a.output == outputText {
-					fmt.Fprintf(a.stderr, "preconditioning update on current generation %d\n", generation)
+					_, _ = fmt.Fprintf(a.stderr, "preconditioning update on current generation %d\n", generation)
 				}
 			}
 			key, err := resolveIdempotencyKey(m.idempotencyKey)
@@ -488,7 +491,7 @@ they are never retried with a freshly fetched generation.`,
 					return err
 				}
 				if !confirmed {
-					fmt.Fprintln(a.stderr, "confirmation did not match; nothing was deleted")
+					_, _ = fmt.Fprintln(a.stderr, "confirmation did not match; nothing was deleted")
 					return exit(ExitFailure)
 				}
 			}
@@ -513,13 +516,13 @@ they are never retried with a freshly fetched generation.`,
 }
 
 func (a *App) renderDeleteTarget(target *client.Resource) {
-	fmt.Fprintln(a.stderr, "deleting this Resource:")
-	fmt.Fprintf(a.stderr, "  ID:          %s\n", a.clean(target.ID))
-	fmt.Fprintf(a.stderr, "  Type:        %s/%s\n", a.clean(target.Type.Name), a.clean(target.Type.Version))
-	fmt.Fprintf(a.stderr, "  Owner:       %s/%s\n", a.clean(target.Owner.Kind), a.clean(target.Owner.ID))
-	fmt.Fprintf(a.stderr, "  State:       %s\n", a.clean(target.Status.State))
-	fmt.Fprintf(a.stderr, "  Generation:  %d\n", target.Generation)
-	fmt.Fprintf(a.stderr, "This admits an asynchronous delete operation.\n")
+	_, _ = fmt.Fprintln(a.stderr, "deleting this Resource:")
+	_, _ = fmt.Fprintf(a.stderr, "  ID:          %s\n", a.clean(target.ID))
+	_, _ = fmt.Fprintf(a.stderr, "  Type:        %s/%s\n", a.clean(target.Type.Name), a.clean(target.Type.Version))
+	_, _ = fmt.Fprintf(a.stderr, "  Owner:       %s/%s\n", a.clean(target.Owner.Kind), a.clean(target.Owner.ID))
+	_, _ = fmt.Fprintf(a.stderr, "  State:       %s\n", a.clean(target.Status.State))
+	_, _ = fmt.Fprintf(a.stderr, "  Generation:  %d\n", target.Generation)
+	_, _ = fmt.Fprintln(a.stderr, "This admits an asynchronous delete operation.")
 }
 
 // confirmDelete requires typing the exact Resource ID. It never runs when
@@ -528,7 +531,7 @@ func (a *App) confirmDelete(resourceID string) (bool, error) {
 	if !a.isTTY() {
 		return false, errors.New("refusing to delete without confirmation: stdin is not interactive; pass --yes for non-interactive use")
 	}
-	fmt.Fprintf(a.stderr, "Type the resource ID %q to confirm deletion: ", resourceID)
+	_, _ = fmt.Fprintf(a.stderr, "Type the resource ID %q to confirm deletion: ", resourceID)
 	line, err := a.readLine()
 	if err != nil {
 		return false, fmt.Errorf("reading confirmation: %w", err)
@@ -563,24 +566,24 @@ func (a *App) readSpecDocument(specFile string) ([]byte, error) {
 // authoritative monitor Operation.
 func (a *App) finishMutation(ctx context.Context, verb string, result *client.MutationResult, m *mutationOptions) int {
 	if result.Replay {
-		fmt.Fprintln(a.stderr, "note: the server reports that this response replays an earlier admission under this idempotency key")
+		_, _ = fmt.Fprintln(a.stderr, "note: the server reports that this response replays an earlier admission under this idempotency key")
 	}
 	if operationID, err := a.api.MonitorOperationID(result); err == nil {
 		if a.output == outputText && !m.wait {
-			fmt.Fprintf(a.stderr, "monitor with: liftr operation get %s\n", a.clean(operationID))
+			_, _ = fmt.Fprintf(a.stderr, "monitor with: liftr operation get %s\n", a.clean(operationID))
 		}
 	} else {
-		fmt.Fprintf(a.stderr, "warning: the admission carries no usable monitor reference (%s)\n", a.clean(err.Error()))
+		_, _ = fmt.Fprintf(a.stderr, "warning: the admission carries no usable monitor reference (%s)\n", a.clean(err.Error()))
 	}
 	if !m.wait {
 		var err error
 		if a.output == outputJSON {
 			err = emitJSON(a.stdout, result.Resource.Raw)
 		} else {
-			a.renderAdmissionText(a.stdout, verb, result.Resource)
+			err = a.renderAdmissionText(a.stdout, verb, result.Resource)
 		}
 		if err != nil {
-			fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+			_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 			return ExitFailure
 		}
 		return ExitOK

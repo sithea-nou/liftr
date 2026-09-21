@@ -144,22 +144,6 @@ func createOutputResource(t *testing.T, service *application.Service, id string)
 	return result
 }
 
-func latestView(t *testing.T, store *appfake.Store, id string) (application.ResourceView, error) {
-	t.Helper()
-	service, err := application.NewService(&alwaysCatalog{}, &appfake.Selector{Ref: mustRef(t)}, &appfake.Resolver{}, store, appfake.AllowAll{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return service.GetResourceOperation(context.Background(), appfake.Principal("tester"), domain.ResourceID(id))
-}
-
-type alwaysCatalog struct{}
-
-func (alwaysCatalog) Get(context.Context, domain.ResourceTypeRef) (resourcecontract.Contract, error) {
-	return nil, errors.New("unused")
-}
-func (alwaysCatalog) List(context.Context) ([]resourcecontract.Contract, error) { return nil, nil }
-
 // TestPlanTerminalOutputs pins the decision matrix over evidence and contracts.
 func TestPlanTerminalOutputs(t *testing.T) {
 	fieldsContract, err := resourcecontract.NewOutputContract(hostnamePortFields())
@@ -692,11 +676,11 @@ func TestCleanupDeleteFromFailedDestroysInfrastructure(t *testing.T) {
 	provider.onSubmit = func(request provisioning.ExecutionRequest, call int) (provisioning.Submission, error) {
 		handle, _ := provisioning.NewExecutionHandle("h-" + string(request.OperationID))
 		observation := successObservation(handle, nil)
-		switch {
-		case request.Capability == domain.CapabilityCreate:
+		switch request.Capability {
+		case domain.CapabilityCreate:
 			// Infrastructure succeeds; required outputs are rejected.
 			observation.Outputs = invalidEvidence()
-		case request.Capability == domain.CapabilityDelete:
+		case domain.CapabilityDelete:
 			observation.ObservedAt = time.Date(2026, 8, 23, 9, 15, 0, 0, time.UTC)
 			observation.Resource = domain.ObservedFacts{Presence: domain.ResourcePresenceNotFound,
 				Readiness: domain.ResourceReadinessUnknown, Drift: domain.ResourceDriftUnknown}

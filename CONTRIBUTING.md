@@ -2,9 +2,11 @@
 
 Thank you for your interest in Liftr. The project is at an early stage, so keeping changes focused and architectural intent explicit is especially important.
 
+Participation in this project is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Development Setup
 
-Install Go 1.24 or newer, then run:
+Install Go 1.25.11 or newer, then run:
 
 ```sh
 make verify
@@ -37,4 +39,6 @@ Liftr is licensed under the [Apache License 2.0](LICENSE). Unless explicitly sta
 
 ## Reporting Issues
 
-Include a concise description, reproduction steps when applicable, expected behavior, actual behavior, and relevant environment details. Security reporting guidance will be added before Liftr handles sensitive workloads.
+Include a concise description, reproduction steps when applicable, expected behavior, actual behavior, and relevant environment details. See [SUPPORT.md](SUPPORT.md) for support scope.
+
+Do not report vulnerabilities publicly. Follow the private reporting process in [SECURITY.md](SECURITY.md).

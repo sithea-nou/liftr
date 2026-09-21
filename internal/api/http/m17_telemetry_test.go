@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -359,15 +358,6 @@ func (f *instrumentedFixture) drain(t *testing.T) {
 		}
 	}
 	t.Fatal("worker did not drain")
-}
-
-func mustU64(t *testing.T, value string) uint64 {
-	t.Helper()
-	parsed, err := strconv.ParseUint(value, 10, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return parsed
 }
 
 func TestAccessLogsCarryRequestCorrelationAndMutationPrincipal(t *testing.T) {

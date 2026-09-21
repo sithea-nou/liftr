@@ -54,7 +54,8 @@ func TestPlatformDigestSeparatesInstallations(t *testing.T) {
 	if PlatformDigest("one") == PlatformDigest("two") {
 		t.Fatal("distinct installations share a platform digest")
 	}
-	if PlatformDigest("one") != PlatformDigest("one") {
+	first := PlatformDigest("one")
+	if first != PlatformDigest("one") {
 		t.Fatal("platform digest is unstable")
 	}
 }

@@ -67,18 +67,21 @@ func newOperationListCommand(a *App) *cobra.Command {
 			}
 			if a.output == outputJSON {
 				if err := emitJSON(a.stdout, list.Raw); err != nil {
-					fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 					return exit(ExitFailure)
 				}
 			} else {
-				a.renderOperationListText(a.stdout, list)
+				if err := a.renderOperationListText(a.stdout, list); err != nil {
+					_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					return exit(ExitFailure)
+				}
 			}
 			if list.NextCursor != "" {
-				fmt.Fprintf(a.stderr, "next page: liftr operation list --resource %s", a.clean(options.resourceID))
+				_, _ = fmt.Fprintf(a.stderr, "next page: liftr operation list --resource %s", a.clean(options.resourceID))
 				if cmd.Flags().Changed("limit") {
-					fmt.Fprintf(a.stderr, " --limit %d", options.limit)
+					_, _ = fmt.Fprintf(a.stderr, " --limit %d", options.limit)
 				}
-				fmt.Fprintf(a.stderr, " --cursor %s\n", a.clean(list.NextCursor))
+				_, _ = fmt.Fprintf(a.stderr, " --cursor %s\n", a.clean(list.NextCursor))
 			}
 			return nil
 		},
@@ -126,7 +129,7 @@ func newOperationRetryCommand(a *App) *cobra.Command {
 				}
 				generation = resource.Generation
 				if a.output == outputText {
-					fmt.Fprintf(a.stderr, "preconditioning retry on current generation %d\n", generation)
+					_, _ = fmt.Fprintf(a.stderr, "preconditioning retry on current generation %d\n", generation)
 				}
 			}
 			key, err := resolveIdempotencyKey(options.idempotencyKey)
@@ -152,35 +155,34 @@ func newOperationRetryCommand(a *App) *cobra.Command {
 
 func (a *App) finishOperationOutput(cmd *cobra.Command, operation *client.Operation) error {
 	if a.output == outputJSON {
-		return finishJSON(cmd, emitJSON(a.stdout, operation.Raw))
+		return finishOutput(a, emitJSON(a.stdout, operation.Raw))
 	}
-	a.renderOperationText(a.stdout, operation)
-	return nil
+	return finishOutput(a, a.renderOperationText(a.stdout, operation))
 }
 
 func (a *App) finishOperationRetry(cmd *cobra.Command, result *client.MutationResult, options *operationRetryOptions) int {
 	if result != nil && result.Replay {
-		fmt.Fprintln(a.stderr, "note: the server reports that this response replays an earlier admission under this idempotency key")
+		_, _ = fmt.Fprintln(a.stderr, "note: the server reports that this response replays an earlier admission under this idempotency key")
 	}
 	if !options.wait {
 		if result == nil || result.Operation == nil || result.Operation.ID == "" {
-			fmt.Fprintln(a.stderr, "error: retry admission omitted its Operation")
+			_, _ = fmt.Fprintln(a.stderr, "error: retry admission omitted its Operation")
 			return ExitFailure
 		}
 		if _, monitorErr := a.retryMonitorOperationID(result); monitorErr != nil {
-			fmt.Fprintf(a.stderr, "warning: retry admission carries unusable monitor metadata: %s\n", a.clean(monitorErr.Error()))
+			_, _ = fmt.Fprintf(a.stderr, "warning: retry admission carries unusable monitor metadata: %s\n", a.clean(monitorErr.Error()))
 		}
 		if a.output == outputText {
-			fmt.Fprintf(a.stderr, "monitor with: liftr operation get %s\n", a.clean(result.Operation.ID))
+			_, _ = fmt.Fprintf(a.stderr, "monitor with: liftr operation get %s\n", a.clean(result.Operation.ID))
 		}
 		if err := a.finishOperationOutput(cmd, result.Operation); err != nil {
-			fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+			_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 			return ExitFailure
 		}
 		return ExitOK
 	}
 	if _, monitorErr := a.retryMonitorOperationID(result); monitorErr != nil {
-		fmt.Fprintf(a.stderr, "error: retry admission protocol failure: %s\n", a.clean(monitorErr.Error()))
+		_, _ = fmt.Fprintf(a.stderr, "error: retry admission protocol failure: %s\n", a.clean(monitorErr.Error()))
 		return ExitFailure
 	}
 	return a.waitForRetryOperation(cmd.Context(), result, options.timeout)

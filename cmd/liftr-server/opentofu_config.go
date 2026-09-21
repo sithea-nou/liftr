@@ -111,7 +111,7 @@ func loadOpenTofuConfigFile(ctx context.Context, path string, catalog applicatio
 	if err != nil {
 		return openTofuConfigSet{}, fmt.Errorf("open OpenTofu config file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(file, maxOpenTofuConfigBytes+1))
 	if err != nil {
 		return openTofuConfigSet{}, fmt.Errorf("read OpenTofu config file: %w", err)

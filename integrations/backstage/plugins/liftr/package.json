@@ -16,6 +16,7 @@
     "@material-ui/core": "^4.12.2",
     "@material-ui/icons": "^4.11.3",
     "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0"
   },
   "peerDependencies": {
@@ -30,6 +31,11 @@
   "configSchema": "config-schema.json",
   "backstage": {
     "role": "frontend-plugin"
+  },
+  "jest": {
+    "setupFiles": [
+      "<rootDir>/setupConsole.ts"
+    ]
   },
   "scripts": {
     "build": "backstage-cli package build",

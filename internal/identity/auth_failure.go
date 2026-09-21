@@ -2,8 +2,6 @@
 
 package identity
 
-import "fmt"
-
 // AuthFailureReason is the closed, typed classification of one rejected
 // authentication attempt. It is neutral authentication vocabulary owned by
 // the identity/authentication boundary: the concrete verifier reports it and
@@ -79,13 +77,4 @@ func (r AuthFailureReason) String() string {
 		return string(AuthFailureOther)
 	}
 	return string(r)
-}
-
-// invalidCredentials builds the single collapsed caller-facing error for
-// transport-level credential rejections (missing or structurally unusable
-// credentials) that occur before the concrete verifier is reached. It uses
-// the same sentinel and message shape as the verifier so callers can never
-// distinguish reasons (ADR-0012).
-func invalidCredentials(r AuthFailureReason) error {
-	return fmt.Errorf("invalid credentials (%s)", r)
 }

@@ -25,7 +25,7 @@ func TestResourceListPaginationJSONAndTextOutput(t *testing.T) {
 			t.Errorf("Authorization = %q", got)
 		}
 		jsonHeaders(w)
-		fmt.Fprint(w, resourceListPageFixture)
+		_, _ = fmt.Fprint(w, resourceListPageFixture)
 	}))
 	defer server.Close()
 	env := map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken}

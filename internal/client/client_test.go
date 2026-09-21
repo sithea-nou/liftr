@@ -51,7 +51,7 @@ func TestClientSendsBearerTokenAndHeaders(t *testing.T) {
 		gotUA = r.Header.Get("User-Agent")
 		gotCorrelation = r.Header.Get("X-Correlation-ID")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, resourceBody("orders-db", "20"))
+		_, _ = fmt.Fprint(w, resourceBody("orders-db", "20"))
 	}))
 	defer server.Close()
 
@@ -75,7 +75,7 @@ func TestClientWithoutTokenSendsNoAuthorizationHeader(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawAuthorization = r.Header.Get("Authorization") != ""
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"items":[]}`)
+		_, _ = fmt.Fprint(w, `{"items":[]}`)
 	}))
 	defer server.Close()
 
@@ -137,7 +137,7 @@ func TestMonitorReferencesNeverLeaveTheOrigin(t *testing.T) {
 				w.Header().Set("Location", locationHeader)
 			}
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, resourceBody("orders-db", "20"))
+			_, _ = fmt.Fprint(w, resourceBody("orders-db", "20"))
 		}))
 		defer server.Close()
 
@@ -179,7 +179,7 @@ func TestMonitorReferencesNeverLeaveTheOrigin(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Link", `</v1/operations/op-rel>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, resourceBody("orders-db", "20"))
+			_, _ = fmt.Fprint(w, resourceBody("orders-db", "20"))
 		}))
 		defer server.Close()
 		c := newTestClient(t, server.URL)
@@ -269,7 +269,7 @@ func TestRetriesReuseIdenticalBytes(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		fmt.Fprint(w, resourceBody("orders-db", "20"))
+		_, _ = fmt.Fprint(w, resourceBody("orders-db", "20"))
 	}))
 	defer server.Close()
 
@@ -302,7 +302,7 @@ func TestMutationsDoNotRetrySemanticErrors(t *testing.T) {
 		attempts.Add(1)
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusConflict)
-		fmt.Fprint(w, `{"type":"https://liftr.dev/problems/generation-conflict","title":"Generation conflict",`+
+		_, _ = fmt.Fprint(w, `{"type":"https://liftr.dev/problems/generation-conflict","title":"Generation conflict",`+
 			`"status":409,"code":"GENERATION_CONFLICT","requestId":"req-1","currentGeneration":7}`)
 	}))
 	defer server.Close()
@@ -332,7 +332,7 @@ func TestReadsRetryTransientFailures(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, resourceBody("orders-db", "20"))
+		_, _ = fmt.Fprint(w, resourceBody("orders-db", "20"))
 	}))
 	defer server.Close()
 
@@ -358,7 +358,7 @@ func TestJSONOutputPreservesNumericLiterals(t *testing.T) {
 		t.Run(tc.specLiteral, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, resourceBody("orders-db", tc.specLiteral))
+				_, _ = fmt.Fprint(w, resourceBody("orders-db", tc.specLiteral))
 			}))
 			defer server.Close()
 
@@ -395,7 +395,7 @@ func TestProblemDecoding(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer server.Close()
 
@@ -416,7 +416,7 @@ func TestNonProblemErrorBodiesStayOpaque(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Header().Set("X-Request-ID", "req-header-id")
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "<html>boom</html>")
+		_, _ = fmt.Fprint(w, "<html>boom</html>")
 	}))
 	defer server.Close()
 
@@ -434,7 +434,7 @@ func TestNonProblemErrorBodiesStayOpaque(t *testing.T) {
 func TestResponseSizeLimitIsEnforced(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(make([]byte, 5<<20)) // exceeds maxResponseBytes
+		_, _ = w.Write(make([]byte, 5<<20)) // exceeds maxResponseBytes
 	}))
 	defer server.Close()
 
@@ -457,7 +457,7 @@ func TestListResourceOperationsEncodesQueryAndPreservesRawPage(t *testing.T) {
 			t.Errorf("raw query = %q", r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, page)
+		_, _ = fmt.Fprint(w, page)
 	}))
 	defer server.Close()
 
@@ -513,7 +513,7 @@ func TestRetryOperationHasNoBodyAndRetainsAdmissionMetadata(t *testing.T) {
 		w.Header().Set("Location", "/v1/operations/op-location")
 		w.Header().Set("Idempotency-Replayed", "true")
 		w.WriteHeader(http.StatusAccepted)
-		fmt.Fprint(w, operationBody)
+		_, _ = fmt.Fprint(w, operationBody)
 	}))
 	defer server.Close()
 

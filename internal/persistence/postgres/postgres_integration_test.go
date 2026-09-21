@@ -1247,34 +1247,6 @@ func (*postgresNotAttemptedOnceProvider) Observe(context.Context, provisioning.O
 	return provisioning.ExecutionObservation{}, errors.New("unexpected Observe")
 }
 
-type postgresBlockingProvider struct {
-	mu          sync.Mutex
-	submissions int
-	started     chan struct{}
-	release     chan struct{}
-}
-
-func newPostgresBlockingProvider() *postgresBlockingProvider {
-	return &postgresBlockingProvider{started: make(chan struct{}), release: make(chan struct{})}
-}
-
-func (p *postgresBlockingProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
-
-func (p *postgresBlockingProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {
-	p.mu.Lock()
-	p.submissions++
-	p.mu.Unlock()
-	close(p.started)
-	<-p.release
-	return provisioning.Submission{Observation: provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
-		Execution: &provisioning.Execution{State: provisioning.ExecutionStateAccepted}}}, nil
-}
-
-func (p *postgresBlockingProvider) Observe(context.Context, provisioning.ObservationRequest) (provisioning.ExecutionObservation, error) {
-	return provisioning.ExecutionObservation{Correlation: provisioning.RequestCorrelationFound,
-		Execution: &provisioning.Execution{State: provisioning.ExecutionStateRunning}}, nil
-}
-
 func (p *postgresRecoveryProvider) Capabilities() []provisioning.ProvisionerCapability { return nil }
 
 func (p *postgresRecoveryProvider) Submit(context.Context, provisioning.ExecutionRequest) (provisioning.Submission, error) {

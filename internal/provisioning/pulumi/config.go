@@ -108,7 +108,7 @@ func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 		return nil, fmt.Errorf("unsupported stack naming version %q", c.StackNamingVersion)
 	}
 	if !filepath.IsAbs(c.PulumiRoot) || !filepath.IsAbs(c.GoExecutable) || !filepath.IsAbs(c.WorkspaceRoot) {
-		return nil, fmt.Errorf("Pulumi, Go, and workspace paths must be absolute")
+		return nil, fmt.Errorf("pulumi, Go, and workspace paths must be absolute")
 	}
 	goInfo, err := os.Stat(c.GoExecutable)
 	if err != nil || !goInfo.Mode().IsRegular() || !isExecutable(goInfo.Mode()) {
@@ -131,14 +131,14 @@ func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 	for _, program := range c.Programs {
 		if strings.TrimSpace(program.ResourceType.Name) == "" || strings.TrimSpace(program.ResourceType.Version) == "" ||
 			strings.TrimSpace(program.ProjectName) == "" || !filepath.IsAbs(program.SourceDir) || program.EncodeInput == nil {
-			return nil, fmt.Errorf("Pulumi program registration is incomplete")
+			return nil, fmt.Errorf("pulumi program registration is incomplete")
 		}
 		if !program.SecretInputsUnsupported {
 			return nil, fmt.Errorf("v0.1 programs must reject secret-bearing input")
 		}
 		sourceInfo, err := os.Lstat(program.SourceDir)
 		if err != nil || !sourceInfo.IsDir() || sourceInfo.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("Pulumi source must be a real directory")
+			return nil, fmt.Errorf("pulumi source must be a real directory")
 		}
 		project, err := pulumiworkspace.LoadProject(filepath.Join(program.SourceDir, "Pulumi.yaml"))
 		if err != nil || string(project.Name) != program.ProjectName || project.Runtime.Name() != "go" || project.Backend != nil {
@@ -157,10 +157,10 @@ func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 			return nil, fmt.Errorf("validate Pulumi source: %w", err)
 		}
 		if !strings.EqualFold(digest, program.SourceDigest) {
-			return nil, fmt.Errorf("Pulumi source digest does not match its registration")
+			return nil, fmt.Errorf("pulumi source digest does not match its registration")
 		}
 		if len(program.Capabilities) == 0 {
-			return nil, fmt.Errorf("Pulumi program capabilities are required")
+			return nil, fmt.Errorf("pulumi program capabilities are required")
 		}
 		if err := validateRequiredEnvironment(program.RequiredEnvironment); err != nil {
 			return nil, err
@@ -174,7 +174,7 @@ func (c Config) validate() (map[domain.ResourceTypeRef]Program, error) {
 				return nil, fmt.Errorf("unsupported Pulumi program capability")
 			}
 			if _, exists := seen[capability]; exists {
-				return nil, fmt.Errorf("Pulumi program capability is duplicated")
+				return nil, fmt.Errorf("pulumi program capability is duplicated")
 			}
 			seen[capability] = struct{}{}
 		}
@@ -201,10 +201,10 @@ func validateOutputMappings(program Program) error {
 	compatibleSources := make(map[string]struct{}, len(program.OutputMappings))
 	for _, mapping := range program.OutputMappings {
 		if strings.TrimSpace(mapping.Ref) == "" || strings.TrimSpace(mapping.ExportName) == "" {
-			return fmt.Errorf("Pulumi output mapping identity and export name are required")
+			return fmt.Errorf("pulumi output mapping identity and export name are required")
 		}
 		if _, exists := refs[mapping.Ref]; exists {
-			return fmt.Errorf("Pulumi output mapping identity is duplicated")
+			return fmt.Errorf("pulumi output mapping identity is duplicated")
 		}
 		refs[mapping.Ref] = struct{}{}
 		if mapping.CompatibleSourceMappingRef == "" {

@@ -24,7 +24,7 @@ func TestOperationListPaginationAndOutput(t *testing.T) {
 			t.Errorf("request URL = %s?%s", r.URL.Path, r.URL.RawQuery)
 		}
 		jsonHeaders(w)
-		fmt.Fprint(w, page)
+		_, _ = fmt.Fprint(w, page)
 	}))
 	defer server.Close()
 	env := map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken}
@@ -82,11 +82,11 @@ func TestOperationRetryGenerationPreReadAndExplicitBypass(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op-source":
 					sourceReads.Add(1)
 					jsonHeaders(w)
-					fmt.Fprint(w, retrySourceFixture)
+					_, _ = fmt.Fprint(w, retrySourceFixture)
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/resources/orders-db":
 					resourceReads.Add(1)
 					jsonHeaders(w)
-					fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 9, `{}`, "Ready", 9))
+					_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 9, `{}`, "Ready", 9)
 				case r.Method == http.MethodPost && r.URL.Path == "/v1/operations/op-source/retry":
 					retries.Add(1)
 					if r.Header.Get("If-Liftr-Generation") != "9" {
@@ -102,7 +102,7 @@ func TestOperationRetryGenerationPreReadAndExplicitBypass(t *testing.T) {
 					jsonHeaders(w)
 					w.Header().Set("Link", `</v1/operations/op-child>; rel="monitor"`)
 					w.WriteHeader(http.StatusAccepted)
-					fmt.Fprintf(w, retryChildFixture, "Pending")
+					_, _ = fmt.Fprintf(w, retryChildFixture, "Pending")
 				default:
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
@@ -144,7 +144,7 @@ func TestOperationRetryRejectsMonitorOperationMismatchWithoutPollingOrGuidance(t
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-other>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprintf(w, retryChildFixture, "Pending")
+			_, _ = fmt.Fprintf(w, retryChildFixture, "Pending")
 			return
 		}
 		polls.Add(1)
@@ -181,7 +181,7 @@ func TestOperationRetryWithoutWaitEmitsChildDespiteUnusableMonitorMetadata(t *te
 					w.Header().Set("Link", tc.link)
 				}
 				w.WriteHeader(http.StatusAccepted)
-				fmt.Fprintf(w, retryChildFixture, "Pending")
+				_, _ = fmt.Fprintf(w, retryChildFixture, "Pending")
 			}))
 			defer server.Close()
 
@@ -205,11 +205,11 @@ func TestOperationRetryWaitOutputsOnlyFinalChildOperation(t *testing.T) {
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-child>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprintf(w, retryChildFixture, "Pending")
+			_, _ = fmt.Fprintf(w, retryChildFixture, "Pending")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op-child":
 			childPolls.Add(1)
 			jsonHeaders(w)
-			fmt.Fprintf(w, retryChildFixture, "Succeeded")
+			_, _ = fmt.Fprintf(w, retryChildFixture, "Succeeded")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op-source":
 			sourcePolls.Add(1)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
@@ -237,10 +237,10 @@ func TestOperationRetryWaitFailureEmitsOperationAndExitsFive(t *testing.T) {
 		if r.Method == http.MethodPost {
 			w.Header().Set("Location", "/v1/operations/op-child")
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprintf(w, retryChildFixture, "Pending")
+			_, _ = fmt.Fprintf(w, retryChildFixture, "Pending")
 			return
 		}
-		fmt.Fprint(w, `{"id":"op-child","resourceId":"orders-db","retryOf":"op-source","capability":"update","state":"Failed","targetGeneration":7,"requestedAt":"2026-08-23T10:00:00Z","completedAt":"2026-08-23T10:01:00Z","failure":{"reason":"ProvisionFailed","message":"backend rejected retry"}}`)
+		_, _ = fmt.Fprint(w, `{"id":"op-child","resourceId":"orders-db","retryOf":"op-source","capability":"update","state":"Failed","targetGeneration":7,"requestedAt":"2026-08-23T10:00:00Z","completedAt":"2026-08-23T10:01:00Z","failure":{"reason":"ProvisionFailed","message":"backend rejected retry"}}`)
 	}))
 	defer server.Close()
 
@@ -257,7 +257,7 @@ func TestOperationRetryGenerationConflictIsNotRetried(t *testing.T) {
 		attempts.Add(1)
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusConflict)
-		fmt.Fprint(w, `{"type":"https://liftr.dev/problems/generation-conflict","title":"Generation conflict","status":409,"code":"GENERATION_CONFLICT","requestId":"req-conflict","currentGeneration":8}`)
+		_, _ = fmt.Fprint(w, `{"type":"https://liftr.dev/problems/generation-conflict","title":"Generation conflict","status":409,"code":"GENERATION_CONFLICT","requestId":"req-conflict","currentGeneration":8}`)
 	}))
 	defer server.Close()
 
@@ -271,7 +271,7 @@ func TestOperationRetryGenerationConflictIsNotRetried(t *testing.T) {
 func TestOperationDetailShowsRetryOf(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		jsonHeaders(w)
-		fmt.Fprintf(w, retryChildFixture, "Succeeded")
+		_, _ = fmt.Fprintf(w, retryChildFixture, "Succeeded")
 	}))
 	defer server.Close()
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL}, "operation", "get", "op-child")

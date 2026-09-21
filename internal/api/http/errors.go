@@ -134,10 +134,10 @@ func (h *handler) mapMutationError(w http.ResponseWriter, r *http.Request, princ
 // RESOURCE_STATE_CONFLICT. Details are curated sentences; underlying storage
 // or provider errors are never echoed to clients.
 func (h *handler) mapConcurrencyConflict(w http.ResponseWriter, r *http.Request, principal identity.Principal, id domain.ResourceID) {
-	switch {
-	case r.Method == http.MethodPost:
+	switch r.Method {
+	case http.MethodPost:
 		h.mapCreateCollision(w, r, principal, id)
-	case r.Method == http.MethodPut || r.Method == http.MethodDelete:
+	case http.MethodPut, http.MethodDelete:
 		var current *uint64
 		detail := "the supplied If-Liftr-Generation does not match the current generation of the Resource"
 		record, readErr := h.service.GetResource(r.Context(), principal, id)

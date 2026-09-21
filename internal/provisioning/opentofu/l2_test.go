@@ -203,13 +203,6 @@ func (b *l2HTTPBackend) prelock(status int) {
 	b.mu.Unlock()
 }
 
-func (b *l2HTTPBackend) clearLock() {
-	b.mu.Lock()
-	b.lockBody = nil
-	b.lockID = ""
-	b.mu.Unlock()
-}
-
 func (b *l2HTTPBackend) snapshot() ([]byte, []httpRequestMetadata) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

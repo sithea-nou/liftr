@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible problem in Liftr
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Liftr. For vulnerabilities, stop here and follow SECURITY.md instead.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: This report does not contain secrets, credentials, cloud state, or private data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest sequence of steps that reproduces the problem.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Liftr revision/version, OS, Go version, and relevant provisioner or Backstage versions.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Additional context
+      description: Add redacted logs or other context that may help investigation.
+    validations:
+      required: false

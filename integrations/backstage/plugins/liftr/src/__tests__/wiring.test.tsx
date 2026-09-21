@@ -17,7 +17,7 @@
 import React from 'react';
 import { configApiRef, discoveryApiRef, fetchApiRef, identityApiRef } from '@backstage/core-plugin-api';
 import { ApiProvider } from '@backstage/core-app-api';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
 import { InventoryPage } from '../components/InventoryPage';
 import { ResourceDetailPage } from '../components/ResourceDetailPage';
@@ -111,30 +111,15 @@ const DetailBridge = () => {
   return <ResourceDetailPage resourceId={id ?? ''} />;
 };
 
-async function waitForPredicate(predicate: () => void, timeoutMs = 15000): Promise<void> {
-  const start = Date.now();
-  let lastError: unknown = new Error('predicate never ran');
-  while (Date.now() - start < timeoutMs) {
-    try {
-      predicate();
-      return;
-    } catch (e) {
-      lastError = e;
-    }
-    await new Promise(r => setTimeout(r, 100));
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
 describe('frontend wiring smoke', () => {
   it('renders bounded developer guidance for lifecycle and admission Problems', () => {
     const cases = [
-      ['RESOURCE_IN_USE', 'Remove the desired reference'],
-      ['REFERENCE_INVALID', 'Review the ResourceType reference contract'],
-      ['DEPENDENCY_CYCLE', 'do not create a dependency cycle'],
-      ['POLICY_DENIED', 'satisfy platform admission policy'],
-      ['QUOTA_EXCEEDED', 'request a quota change'],
-      ['GENERATION_CONFLICT', 'Refresh and review the current generation'],
+      ['RESOURCE_IN_USE', 'still referenced by another Liftr Resource'],
+      ['REFERENCE_INVALID', 'Choose a visible Resource'],
+      ['DEPENDENCY_CYCLE', 'do not create a cycle'],
+      ['POLICY_DENIED', 'satisfy the platform admission policy'],
+      ['QUOTA_EXCEEDED', 'quota change'],
+      ['GENERATION_CONFLICT', 'Reload the Resource'],
     ];
     for (const [code, guidance] of cases) {
       const error = new LiftrApiError(
@@ -175,7 +160,10 @@ describe('frontend wiring smoke', () => {
         { apis: makeRegistry(fetchImpl as unknown as typeof fetch) as never },
         React.createElement(
           MemoryRouter,
-          { initialEntries: ['/liftr'] },
+          {
+            initialEntries: ['/liftr'],
+            future: { v7_startTransition: true, v7_relativeSplatPath: true },
+          },
           React.createElement(
             Routes,
             null,
@@ -193,23 +181,27 @@ describe('frontend wiring smoke', () => {
     );
 
     // ResourceSummary appears.
-    await waitForPredicate(() => {
+    await waitFor(() => {
       expect(view.baseElement.textContent).toContain('orders-db');
-    });
+    }, { timeout: 15000 });
+    const inventoryTable = screen.getByRole('region', { name: 'Resource inventory table' });
+    expect(window.getComputedStyle(inventoryTable).overflowX).toBe('auto');
 
     // Select the resource via its router link -> detail renders.
     fireEvent.click(screen.getByRole('link', { name: 'orders-db' }));
 
-    await waitForPredicate(() => {
-      expect(view.baseElement.textContent).toContain('Resource orders-db');
-    });
+    await waitFor(() => {
+      expect(fetchImpl).toHaveBeenCalledWith(
+        '/api/liftr/v1/resources/orders-db',
+        expect.anything(),
+      );
+    }, { timeout: 15000 });
 
-    // Open the Outputs tab and verify generation-bound output data renders.
-    fireEvent.click(screen.getByText('Outputs'));
-    await waitForPredicate(() => {
+    // The developer overview presents outputs without requiring a technical tab.
+    await waitFor(() => {
       expect(view.baseElement.textContent).toContain('db.example.com');
       expect(view.baseElement.textContent).toContain('5432');
-    });
+    }, { timeout: 15000 });
 
     // Detail came from the authoritative detail endpoint.
     expect(fetchImpl).toHaveBeenCalledWith(
@@ -285,9 +277,9 @@ describe('frontend wiring smoke', () => {
     const { useOperationMonitor } = await import('../hooks/useOperationMonitor');
     const { result } = renderHook(() => useOperationMonitor(client, env.monitorOperationId));
 
-    await waitForPredicate(() => {
+    await waitFor(() => {
       expect(result.current.status).toBe('succeeded');
-    });
+    }, { timeout: 15000 });
 
     expect(polledUrls.length).toBeGreaterThanOrEqual(2);
     for (const u of polledUrls) {

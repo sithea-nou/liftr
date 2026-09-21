@@ -47,7 +47,7 @@ func (a *App) reportReadFailure(err error) int {
 		}
 		return ExitRejected
 	}
-	fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+	_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 	return ExitFailure
 }
 
@@ -56,7 +56,7 @@ func (a *App) reportReadFailure(err error) int {
 // so this is never exit 5 — it is a command/read failure (exit 1, or exit 3
 // when authentication failed). Nothing stale is emitted as a final snapshot.
 func (a *App) reportFinalReadFailure(operationID string, err error) int {
-	fmt.Fprintf(a.stderr, "Operation %s succeeded, but the final Resource could not be retrieved.\n", operationID)
+	_, _ = fmt.Fprintf(a.stderr, "Operation %s succeeded, but the final Resource could not be retrieved.\n", operationID)
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && apiErr.IsAuthentication() {
 		a.renderProblem(apiErr)
@@ -64,9 +64,9 @@ func (a *App) reportFinalReadFailure(operationID string, err error) int {
 	}
 	var generic *client.APIError
 	if errors.As(err, &generic) {
-		fmt.Fprintf(a.stderr, "%s\n", a.clean(generic.Error()))
+		_, _ = fmt.Fprintf(a.stderr, "%s\n", a.clean(generic.Error()))
 	} else {
-		fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+		_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 	}
 	return ExitFailure
 }
@@ -78,9 +78,9 @@ func (a *App) reportFinalReadFailure(operationID string, err error) int {
 func (a *App) reportMutationFailure(idempotencyKey string, err error) int {
 	var terr *client.TransportError
 	if errors.As(err, &terr) && terr.OutcomeUnknown {
-		fmt.Fprintf(a.stderr, "error: %s\n", a.clean(terr.Error()))
-		fmt.Fprintf(a.stderr, "The outcome of this request could not be determined.\n")
-		fmt.Fprintf(a.stderr, "To resolve it safely, re-run this command with --idempotency-key %s to replay the identical request.\n", idempotencyKey)
+		_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(terr.Error()))
+		_, _ = fmt.Fprintln(a.stderr, "The outcome of this request could not be determined.")
+		_, _ = fmt.Fprintf(a.stderr, "To resolve it safely, re-run this command with --idempotency-key %s to replay the identical request.\n", idempotencyKey)
 		return ExitFailure
 	}
 	return a.reportReadFailure(err)
@@ -90,8 +90,7 @@ func (a *App) outputResource(resource *client.Resource) error {
 	if a.output == outputJSON {
 		return emitJSON(a.stdout, resource.Raw)
 	}
-	a.renderResourceText(a.stdout, resource)
-	return nil
+	return a.renderResourceText(a.stdout, resource)
 }
 
 // waitForOperation follows exactly the authoritative monitor Operation of
@@ -109,11 +108,11 @@ func (a *App) outputResource(resource *client.Resource) error {
 func (a *App) waitForOperation(ctx context.Context, admission *client.MutationResult, timeout time.Duration) int {
 	operationID, err := a.api.MonitorOperationID(admission)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "error: cannot determine the admitted Operation: %s\n", a.clean(err.Error()))
+		_, _ = fmt.Fprintf(a.stderr, "error: cannot determine the admitted Operation: %s\n", a.clean(err.Error()))
 		return ExitFailure
 	}
 	if a.output == outputText {
-		fmt.Fprintf(a.stderr, "waiting for operation %s (timeout %s)\n", operationID, timeout)
+		_, _ = fmt.Fprintf(a.stderr, "waiting for operation %s (timeout %s)\n", operationID, timeout)
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -128,7 +127,7 @@ func (a *App) waitForOperation(ctx context.Context, admission *client.MutationRe
 			consecutiveFailures = 0
 			if operation.State != lastState {
 				if a.output == outputText && lastState != "" {
-					fmt.Fprintf(a.stderr, "operation %s: %s\n", a.clean(operationID), a.clean(operation.State))
+					_, _ = fmt.Fprintf(a.stderr, "operation %s: %s\n", a.clean(operationID), a.clean(operation.State))
 				}
 				lastState = operation.State
 			}
@@ -142,7 +141,7 @@ func (a *App) waitForOperation(ctx context.Context, admission *client.MutationRe
 					return a.reportFinalReadFailure(operationID, err)
 				}
 				if err := a.outputResource(resource); err != nil {
-					fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 					return ExitFailure
 				}
 				return ExitOK
@@ -157,13 +156,13 @@ func (a *App) waitForOperation(ctx context.Context, admission *client.MutationRe
 					return a.reportReadFailure(err)
 				}
 				if apiErr.HasCode(client.CodeOperationNotFound) {
-					fmt.Fprintf(a.stderr, "error: operation %s unexpectedly disappeared while waiting; this is a protocol violation\n", a.clean(operationID))
+					_, _ = fmt.Fprintf(a.stderr, "error: operation %s unexpectedly disappeared while waiting; this is a protocol violation\n", a.clean(operationID))
 					return ExitFailure
 				}
 			}
 			consecutiveFailures++
 			if consecutiveFailures >= maxConsecutivePollFailures {
-				fmt.Fprintf(a.stderr, "error: waiting for operation %s failed after repeated request failures: %s\n", a.clean(operationID), a.clean(err.Error()))
+				_, _ = fmt.Fprintf(a.stderr, "error: waiting for operation %s failed after repeated request failures: %s\n", a.clean(operationID), a.clean(err.Error()))
 				return ExitFailure
 			}
 		}
@@ -191,11 +190,11 @@ func (a *App) waitForOperation(ctx context.Context, admission *client.MutationRe
 func (a *App) waitForRetryOperation(ctx context.Context, admission *client.MutationResult, timeout time.Duration) int {
 	operationID, err := a.retryMonitorOperationID(admission)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "error: cannot determine the admitted Operation: %s\n", a.clean(err.Error()))
+		_, _ = fmt.Fprintf(a.stderr, "error: cannot determine the admitted Operation: %s\n", a.clean(err.Error()))
 		return ExitFailure
 	}
 	if a.output == outputText {
-		fmt.Fprintf(a.stderr, "waiting for operation %s (timeout %s)\n", a.clean(operationID), timeout)
+		_, _ = fmt.Fprintf(a.stderr, "waiting for operation %s (timeout %s)\n", a.clean(operationID), timeout)
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -210,20 +209,20 @@ func (a *App) waitForRetryOperation(ctx context.Context, admission *client.Mutat
 			consecutiveFailures = 0
 			if operation.State != lastState {
 				if a.output == outputText && lastState != "" {
-					fmt.Fprintf(a.stderr, "operation %s: %s\n", a.clean(operationID), a.clean(operation.State))
+					_, _ = fmt.Fprintf(a.stderr, "operation %s: %s\n", a.clean(operationID), a.clean(operation.State))
 				}
 				lastState = operation.State
 			}
 			switch operation.State {
 			case client.StateSucceeded:
 				if err := a.outputOperation(operation); err != nil {
-					fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 					return ExitFailure
 				}
 				return ExitOK
 			case client.StateFailed, client.StateCanceled:
 				if err := a.outputOperation(operation); err != nil {
-					fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
+					_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 					return ExitFailure
 				}
 				a.renderTerminalFailure(operation)
@@ -236,13 +235,13 @@ func (a *App) waitForRetryOperation(ctx context.Context, admission *client.Mutat
 					return a.reportReadFailure(err)
 				}
 				if apiErr.HasCode(client.CodeOperationNotFound) {
-					fmt.Fprintf(a.stderr, "error: operation %s unexpectedly disappeared while waiting; this is a protocol violation\n", a.clean(operationID))
+					_, _ = fmt.Fprintf(a.stderr, "error: operation %s unexpectedly disappeared while waiting; this is a protocol violation\n", a.clean(operationID))
 					return ExitFailure
 				}
 			}
 			consecutiveFailures++
 			if consecutiveFailures >= maxConsecutivePollFailures {
-				fmt.Fprintf(a.stderr, "error: waiting for operation %s failed after repeated request failures: %s\n", a.clean(operationID), a.clean(err.Error()))
+				_, _ = fmt.Fprintf(a.stderr, "error: waiting for operation %s failed after repeated request failures: %s\n", a.clean(operationID), a.clean(err.Error()))
 				return ExitFailure
 			}
 		}
@@ -268,8 +267,7 @@ func (a *App) outputOperation(operation *client.Operation) error {
 	if a.output == outputJSON {
 		return emitJSON(a.stdout, operation.Raw)
 	}
-	a.renderOperationText(a.stdout, operation)
-	return nil
+	return a.renderOperationText(a.stdout, operation)
 }
 
 func (a *App) renderTerminalFailure(operation *client.Operation) {
@@ -277,21 +275,21 @@ func (a *App) renderTerminalFailure(operation *client.Operation) {
 	if operation.State == client.StateCanceled {
 		state = "was canceled"
 	}
-	fmt.Fprintf(a.stderr, "operation %s %s\n", a.clean(operation.ID), state)
+	_, _ = fmt.Fprintf(a.stderr, "operation %s %s\n", a.clean(operation.ID), state)
 	if operation.Failure != nil {
 		if operation.Failure.Reason != "" {
-			fmt.Fprintf(a.stderr, "reason: %s\n", a.clean(operation.Failure.Reason))
+			_, _ = fmt.Fprintf(a.stderr, "reason: %s\n", a.clean(operation.Failure.Reason))
 		}
 		if operation.Failure.Message != "" {
-			fmt.Fprintf(a.stderr, "%s\n", a.clean(operation.Failure.Message))
+			_, _ = fmt.Fprintf(a.stderr, "%s\n", a.clean(operation.Failure.Message))
 		}
 	}
-	fmt.Fprintf(a.stderr, "inspect with: liftr operation get %s\n", a.clean(operation.ID))
-	fmt.Fprintf(a.stderr, "resource state: liftr resource get %s\n", a.clean(operation.ResourceID))
+	_, _ = fmt.Fprintf(a.stderr, "inspect with: liftr operation get %s\n", a.clean(operation.ID))
+	_, _ = fmt.Fprintf(a.stderr, "resource state: liftr resource get %s\n", a.clean(operation.ResourceID))
 }
 
 func (a *App) renderWaitTimeout(operationID string, timeout time.Duration) {
 	id := a.clean(operationID)
-	fmt.Fprintf(a.stderr, "error: timed out after %s waiting for operation %s; it may still complete — check with: liftr operation get %s\n",
+	_, _ = fmt.Fprintf(a.stderr, "error: timed out after %s waiting for operation %s; it may still complete — check with: liftr operation get %s\n",
 		timeout, id, id)
 }

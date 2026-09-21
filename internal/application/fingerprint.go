@@ -55,8 +55,8 @@ func canonicalReferenceEdges(edges []ReferenceEdge) string {
 }
 
 func writeFramedPart(hasher interface{ Write([]byte) (int, error) }, part string) {
-	hasher.Write([]byte(fmt.Sprintf("%08x", len(part))))
-	hasher.Write([]byte(part))
+	_, _ = fmt.Fprintf(hasher, "%08x", len(part))
+	_, _ = hasher.Write([]byte(part))
 }
 
 func createCommandFingerprint(cmd CreateResourceCommand) (string, error) {
@@ -106,8 +106,8 @@ func retryCommandFingerprint(cmd RetryOperationCommand) string {
 func fingerprintHash(parts ...string) string {
 	hasher := sha256.New()
 	for _, part := range parts {
-		hasher.Write([]byte(fmt.Sprintf("%08x", len(part))))
-		hasher.Write([]byte(part))
+		_, _ = fmt.Fprintf(hasher, "%08x", len(part))
+		_, _ = hasher.Write([]byte(part))
 	}
 	digest := hasher.Sum(nil)
 	return hex.EncodeToString(digest)

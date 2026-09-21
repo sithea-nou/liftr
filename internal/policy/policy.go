@@ -74,7 +74,7 @@ func LoadFile(ctx context.Context, path string, catalog application.ResourceType
 	if err != nil {
 		return nil, fmt.Errorf("read policy file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(file, MaxFileBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read policy file: %w", err)
@@ -334,10 +334,7 @@ type canonicalRule struct {
 func canonicalPolicy(rules []compiledRule) ([]byte, error) {
 	document := canonicalDocument{APIVersion: APIVersion, Rules: make([]canonicalRule, 0, len(rules))}
 	for _, rule := range rules {
-		document.Rules = append(document.Rules, canonicalRule{
-			ID: rule.ID, Kind: rule.Kind, Owner: rule.Owner, ResourceType: rule.ResourceType,
-			Capabilities: rule.Capabilities, Limit: rule.Limit,
-		})
+		document.Rules = append(document.Rules, canonicalRule(rule))
 	}
 	return json.Marshal(document)
 }

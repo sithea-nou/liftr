@@ -16,8 +16,8 @@ import (
 )
 
 var (
-	errStackNotFound = errors.New("Pulumi stack not found")
-	errStackExists   = errors.New("Pulumi stack already exists")
+	errStackNotFound = errors.New("pulumi stack not found")
+	errStackExists   = errors.New("pulumi stack already exists")
 )
 
 type updateSummary struct {
@@ -149,7 +149,7 @@ func (s localStack) run(ctx context.Context, operation, message string) (updateS
 			return summary, nil
 		}
 	}
-	return updateSummary{}, fmt.Errorf("Pulumi operation completed without correlated history")
+	return updateSummary{}, fmt.Errorf("pulumi operation completed without correlated history")
 }
 
 func expectedCommandKind(operation string) string {

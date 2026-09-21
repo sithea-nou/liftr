@@ -63,15 +63,6 @@ func decodeHandle(handle *provisioning.ExecutionHandle) (handlePayload, bool) {
 	return payload, true
 }
 
-// handleUID returns the UID recorded on the request handle, if any.
-func handleUID(request operationRequest) string {
-	payload, ok := decodeHandle(request.handle())
-	if !ok {
-		return ""
-	}
-	return payload.UID
-}
-
 func base64RawURL(value []byte) string {
 	return base64.RawURLEncoding.EncodeToString(value)
 }

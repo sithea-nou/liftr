@@ -25,6 +25,12 @@ the conformant test HTTP backend. Qualification of each production HTTPS HTTP
 backend remains the operator's responsibility. Terraform remains unsupported
 and has no selected version.
 
+M20 adds the separate operator diagnostics and safe-recovery plane from
+[ADR-0021](adr/0021-operator-diagnostics-and-safe-recovery-control-plane.md).
+M21 adds provider-neutral Resource references, dependency gating, durable
+wakeups, cycle prevention, and deletion protection from
+[ADR-0022](adr/0022-resource-relationships-and-dependency-aware-lifecycle.md).
+
 ## Product Boundary
 
 Liftr is a vendor-neutral resource lifecycle control plane. Developers interact
@@ -65,7 +71,8 @@ and all provisioner technologies remain private implementation choices.
 ## Architectural Boundaries
 
 - **Resource model:** Defines provisioner-neutral identity, desired state,
-  observed state, lifecycle state, and status.
+  observed state, lifecycle state, status, and typed Resource-to-Resource
+  references.
 - **Lifecycle engine:** Owns deterministic create, update, delete, retry, and
   asynchronous reconciliation policy. Adapters do not own business policy.
 - **Operations and Events:** Provide the auditable account of requested
@@ -76,8 +83,9 @@ and all provisioner technologies remain private implementation choices.
   actions. Adapter concepts never become ResourceSpec fields or public API
   methods.
 - **Persistence boundary:** Stores Resources, Operations, Events, outputs,
-  private bindings, execution evidence, and outbox work through ports defined
-  by application and domain needs.
+  desired/applied references, dependency waits, private bindings, execution
+  evidence, and outbox work through ports defined by application and domain
+  needs.
 - **Clients:** The CLI, Backstage, portals, and automation consume only the
   public `/v1` API. They do not import server or provisioner implementation
   packages.
@@ -101,22 +109,24 @@ provider executes.
   provisioner implementations.
 - `internal/application` owns admission, authorization ports, orchestration,
   stable private provisioner bindings, passive observation, evidence
-  monotonicity, explicit retry, output reconciliation, and schema/transition
-  validation before durable effects.
+  monotonicity, explicit retry, output reconciliation, graph validation,
+  dependency gating/wakeups, and schema/transition/reference validation before
+  durable effects.
 - `internal/api/http` implements the versioned `/v1` Resource, ResourceType,
   and Resource-scoped Operation API with asynchronous mutations, concrete
   generation preconditions, idempotency, keyset pagination, and RFC 9457
   Problems.
 - `internal/resourcetypes` publishes self-contained JSON Schema draft 2020-12
-  contracts and declared non-secret output fields without exposing platform
-  registrations. PostgreSQLDatabase/v1 and v2 preserve their versioned public
-  contracts.
+  contracts, declared non-secret output fields, and bounded typed reference
+  slots without exposing platform registrations. PostgreSQLDatabase/v1 and v2
+  preserve their versioned public contracts.
 - Authentication verifies RFC 9068 access tokens from the configured issuer;
   application authorization uses normalized owner membership. Inventory uses
   independent `resource:list` authorization and visibility-bound pagination.
 - `internal/persistence/postgres` provides checksummed migrations, durable
-  lifecycle records, immutable attempts, outputs, private evidence, and the
-  transactionally claimed and fenced outbox.
+  lifecycle records, immutable attempts, outputs, desired/applied reference
+  sets, indexed dependency waits, private evidence, and the transactionally
+  claimed and fenced outbox.
 
 ### Provisioning adapters
 
@@ -179,6 +189,20 @@ selected HTTP state backend.
   user-delegating BFF, and shared TypeScript public-API contracts
   ([ADR-0017](adr/0017-backstage-as-a-delegated-public-api-client.md)). The
   Software Catalog is not Liftr inventory.
+
+### Relationships and operator recovery
+
+- Resource references are first-class desired state, never fields scraped from
+  `spec`. Admission canonicalizes them, enforces the ResourceType reference
+  contract, same-owner visibility, target lifecycle eligibility, and an
+  acyclic owner graph under the structural admission lock.
+- Workers remain authorization-blind. Create/update execution waits until all
+  targets are Ready at current generation; durable wait rows and outbox wakeups
+  avoid polling-only dependency convergence. Desired plus applied edges protect
+  targets from deletion while a source generation is converging.
+- The opt-in `/admin/v1` listener exposes curated diagnostics and narrowly safe
+  recovery scheduling under a distinct audience and grants file. It cannot
+  force state, replace dispatch, or expose provider-private data.
 
 ### Policy and observability
 

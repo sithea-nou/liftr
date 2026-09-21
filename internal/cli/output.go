@@ -73,14 +73,40 @@ func formatOutputValue(value any) string {
 	}
 }
 
-func writeIndentedJSON(w io.Writer, raw []byte) {
+type textWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (out *textWriter) printf(format string, args ...any) {
+	if out.err == nil {
+		_, out.err = fmt.Fprintf(out.w, format, args...)
+	}
+}
+
+func (out *textWriter) println(args ...any) {
+	if out.err == nil {
+		_, out.err = fmt.Fprintln(out.w, args...)
+	}
+}
+
+func (out *textWriter) print(args ...any) {
+	if out.err == nil {
+		_, out.err = fmt.Fprint(out.w, args...)
+	}
+}
+
+func writeIndentedJSON(w io.Writer, raw []byte) error {
 	var buffer bytes.Buffer
 	if err := json.Indent(&buffer, raw, "", "  "); err != nil {
-		_, _ = w.Write(raw)
-		_, _ = io.WriteString(w, "\n")
-		return
+		if _, writeErr := w.Write(raw); writeErr != nil {
+			return writeErr
+		}
+		_, writeErr := io.WriteString(w, "\n")
+		return writeErr
 	}
-	fmt.Fprintln(w, buffer.String())
+	_, err := fmt.Fprintln(w, buffer.String())
+	return err
 }
 
 // clean applies credential redaction and terminal sanitization to any
@@ -94,28 +120,29 @@ func (a *App) clean(value string) string {
 	return sanitize(value)
 }
 
-func (a *App) renderResourceText(w io.Writer, resource *client.Resource) {
+func (a *App) renderResourceText(w io.Writer, resource *client.Resource) error {
+	out := &textWriter{w: w}
 	c := a.clean
-	fmt.Fprintf(w, "ID:                 %s\n", c(resource.ID))
-	fmt.Fprintf(w, "Type:               %s/%s\n", c(resource.Type.Name), c(resource.Type.Version))
-	fmt.Fprintf(w, "Owner:              %s/%s\n", c(resource.Owner.Kind), c(resource.Owner.ID))
-	fmt.Fprintf(w, "State:              %s\n", c(resource.Status.State))
-	fmt.Fprintf(w, "Generation:         %d (observed generation %d)\n", resource.Generation, resource.Status.ObservedGeneration)
-	fmt.Fprintf(w, "Created:            %s\n", formatTimestamp(resource.CreatedAt))
-	fmt.Fprintf(w, "Updated:            %s\n", formatTimestamp(resource.UpdatedAt))
+	out.printf("ID:                 %s\n", c(resource.ID))
+	out.printf("Type:               %s/%s\n", c(resource.Type.Name), c(resource.Type.Version))
+	out.printf("Owner:              %s/%s\n", c(resource.Owner.Kind), c(resource.Owner.ID))
+	out.printf("State:              %s\n", c(resource.Status.State))
+	out.printf("Generation:         %d (observed generation %d)\n", resource.Generation, resource.Status.ObservedGeneration)
+	out.printf("Created:            %s\n", formatTimestamp(resource.CreatedAt))
+	out.printf("Updated:            %s\n", formatTimestamp(resource.UpdatedAt))
 	if len(resource.Status.Conditions) > 0 {
-		fmt.Fprintln(w, "\nConditions:")
+		out.println("\nConditions:")
 		for _, condition := range resource.Status.Conditions {
 			line := fmt.Sprintf("  %s=%s %s (observed generation %d)",
 				c(condition.Type), c(condition.Status), c(condition.Reason), condition.ObservedGeneration)
 			if condition.Message != "" {
 				line += ": " + c(condition.Message)
 			}
-			fmt.Fprintln(w, line)
+			out.println(line)
 		}
 	}
 	if len(resource.References) > 0 {
-		fmt.Fprintln(w, "\nReferences (desired):")
+		out.println("\nReferences (desired):")
 		slots := make([]string, 0, len(resource.References))
 		for slot := range resource.References {
 			slots = append(slots, slot)
@@ -124,17 +151,17 @@ func (a *App) renderResourceText(w io.Writer, resource *client.Resource) {
 		for _, slot := range slots {
 			targets := append([]string(nil), resource.References[slot]...)
 			sort.Strings(targets)
-			fmt.Fprintf(w, "  %s: %s\n", c(slot), c(strings.Join(targets, ", ")))
+			out.printf("  %s: %s\n", c(slot), c(strings.Join(targets, ", ")))
 		}
 	}
 	if resource.LatestOperation != nil {
 		latest := resource.LatestOperation
-		fmt.Fprintf(w, "\nLatest operation:   %s (%s, %s, target generation %d)\n",
+		out.printf("\nLatest operation:   %s (%s, %s, target generation %d)\n",
 			c(latest.ID), c(latest.Capability), c(latest.State), latest.TargetGeneration)
 	}
-	switch {
-	case resource.Outputs == nil:
-		fmt.Fprint(w, "\nOutputs:            none published yet\n")
+	switch resource.Outputs {
+	case nil:
+		out.print("\nOutputs:            none published yet\n")
 	default:
 		outputs := resource.Outputs
 		freshness := "current"
@@ -142,46 +169,50 @@ func (a *App) renderResourceText(w io.Writer, resource *client.Resource) {
 			freshness = fmt.Sprintf("STALE — outputs describe generation %d, desired generation is %d",
 				outputs.ObservedGeneration, resource.Generation)
 		}
-		fmt.Fprintf(w, "\nOutputs (generation %d): %s\n", outputs.ObservedGeneration, freshness)
+		out.printf("\nOutputs (generation %d): %s\n", outputs.ObservedGeneration, freshness)
 		names := make([]string, 0, len(outputs.Values))
 		for name := range outputs.Values {
 			names = append(names, name)
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			fmt.Fprintf(w, "  %s: %s\n", c(name), formatOutputValue(outputs.Values[name]))
+			out.printf("  %s: %s\n", c(name), formatOutputValue(outputs.Values[name]))
 		}
 	}
+	return out.err
 }
 
-func (a *App) renderOperationText(w io.Writer, operation *client.Operation) {
+func (a *App) renderOperationText(w io.Writer, operation *client.Operation) error {
+	out := &textWriter{w: w}
 	c := a.clean
-	fmt.Fprintf(w, "ID:                 %s\n", c(operation.ID))
-	fmt.Fprintf(w, "Resource:           %s\n", c(operation.ResourceID))
+	out.printf("ID:                 %s\n", c(operation.ID))
+	out.printf("Resource:           %s\n", c(operation.ResourceID))
 	if operation.RetryOf != "" {
-		fmt.Fprintf(w, "Retry of:           %s\n", c(operation.RetryOf))
+		out.printf("Retry of:           %s\n", c(operation.RetryOf))
 	}
-	fmt.Fprintf(w, "Capability:         %s\n", c(operation.Capability))
-	fmt.Fprintf(w, "State:              %s\n", c(operation.State))
-	fmt.Fprintf(w, "Target generation:  %d\n", operation.TargetGeneration)
-	fmt.Fprintf(w, "Requested at:       %s\n", formatTimestamp(operation.RequestedAt))
+	out.printf("Capability:         %s\n", c(operation.Capability))
+	out.printf("State:              %s\n", c(operation.State))
+	out.printf("Target generation:  %d\n", operation.TargetGeneration)
+	out.printf("Requested at:       %s\n", formatTimestamp(operation.RequestedAt))
 	if operation.StartedAt != nil {
-		fmt.Fprintf(w, "Started at:         %s\n", formatTimestamp(*operation.StartedAt))
+		out.printf("Started at:         %s\n", formatTimestamp(*operation.StartedAt))
 	}
 	if operation.CompletedAt != nil {
-		fmt.Fprintf(w, "Completed at:       %s\n", formatTimestamp(*operation.CompletedAt))
+		out.printf("Completed at:       %s\n", formatTimestamp(*operation.CompletedAt))
 	}
 	if operation.Failure != nil {
-		fmt.Fprintf(w, "Failure:            %s\n", c(operation.Failure.Reason))
+		out.printf("Failure:            %s\n", c(operation.Failure.Reason))
 		if operation.Failure.Message != "" {
-			fmt.Fprintf(w, "  %s\n", c(operation.Failure.Message))
+			out.printf("  %s\n", c(operation.Failure.Message))
 		}
 	}
+	return out.err
 }
 
-func (a *App) renderOperationListText(w io.Writer, list *client.OperationList) {
+func (a *App) renderOperationListText(w io.Writer, list *client.OperationList) error {
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tCAPABILITY\tSTATE\tTARGET GENERATION\tREQUESTED\tCOMPLETED\tRETRY OF")
+	out := &textWriter{w: tw}
+	out.println("ID\tCAPABILITY\tSTATE\tTARGET GENERATION\tREQUESTED\tCOMPLETED\tRETRY OF")
 	for i := range list.Items {
 		operation := &list.Items[i]
 		completed := "-"
@@ -192,72 +223,95 @@ func (a *App) renderOperationListText(w io.Writer, list *client.OperationList) {
 		if operation.RetryOf != "" {
 			retryOf = a.clean(operation.RetryOf)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+		out.printf("%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
 			a.clean(operation.ID), a.clean(operation.Capability), a.clean(operation.State),
 			operation.TargetGeneration, formatTimestamp(operation.RequestedAt), completed, retryOf)
 	}
-	_ = tw.Flush()
+	if out.err != nil {
+		return out.err
+	}
+	return tw.Flush()
 }
 
 // renderResourceListText renders one inventory page. Summaries carry no
 // spec, outputs, or conditions by contract, so none are printed; detail
 // lives in `liftr resource get`.
-func (a *App) renderResourceListText(w io.Writer, list *client.ResourceList) {
+func (a *App) renderResourceListText(w io.Writer, list *client.ResourceList) error {
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTYPE\tOWNER\tSTATE\tGENERATION\tOBSERVED\tLATEST OPERATION")
+	out := &textWriter{w: tw}
+	out.println("ID\tTYPE\tOWNER\tSTATE\tGENERATION\tOBSERVED\tLATEST OPERATION")
 	for i := range list.Items {
 		summary := &list.Items[i]
 		latest := "-"
 		if summary.LatestOperation != nil {
 			latest = a.clean(summary.LatestOperation.ID) + "/" + a.clean(summary.LatestOperation.State)
 		}
-		fmt.Fprintf(tw, "%s\t%s/%s\t%s/%s\t%s\t%d\t%d\t%s\n",
+		out.printf("%s\t%s/%s\t%s/%s\t%s\t%d\t%d\t%s\n",
 			a.clean(summary.ID),
 			a.clean(summary.Type.Name), a.clean(summary.Type.Version),
 			a.clean(summary.Owner.Kind), a.clean(summary.Owner.ID),
 			a.clean(summary.Status.State), summary.Generation,
 			summary.Status.ObservedGeneration, latest)
 	}
-	_ = tw.Flush()
+	if out.err != nil {
+		return out.err
+	}
+	return tw.Flush()
 }
 
-func (a *App) renderResourceTypeListText(w io.Writer, list *client.ResourceTypeList) {
+func (a *App) renderResourceTypeListText(w io.Writer, list *client.ResourceTypeList) error {
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tVERSION\tDISPLAY NAME\tCAPABILITIES")
+	out := &textWriter{w: tw}
+	out.println("NAME\tVERSION\tDISPLAY NAME\tCAPABILITIES")
 	for _, item := range list.Items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+		out.printf("%s\t%s\t%s\t%s\n",
 			a.clean(item.Name), a.clean(item.Version), a.clean(item.DisplayName),
 			a.clean(strings.Join(item.Capabilities, " ")))
 	}
-	tw.Flush()
+	if out.err != nil {
+		return out.err
+	}
+	return tw.Flush()
 }
 
-func (a *App) renderResourceTypeDetailText(w io.Writer, detail *client.ResourceTypeDetail) {
-	fmt.Fprintf(w, "Name:               %s\n", a.clean(detail.Name))
-	fmt.Fprintf(w, "Version:            %s\n", a.clean(detail.Version))
-	fmt.Fprintf(w, "Display name:       %s\n", a.clean(detail.DisplayName))
-	fmt.Fprintf(w, "Description:        %s\n", a.clean(detail.Description))
-	fmt.Fprintf(w, "Capabilities:       %s\n", a.clean(strings.Join(detail.Capabilities, " ")))
-	fmt.Fprintln(w, "\nSpec schema:")
-	writeIndentedJSON(w, detail.SpecSchema)
-	if len(detail.OutputContract) > 0 {
-		fmt.Fprintln(w, "\nOutput contract:")
-		writeIndentedJSON(w, detail.OutputContract)
+func (a *App) renderResourceTypeDetailText(w io.Writer, detail *client.ResourceTypeDetail) error {
+	out := &textWriter{w: w}
+	out.printf("Name:               %s\n", a.clean(detail.Name))
+	out.printf("Version:            %s\n", a.clean(detail.Version))
+	out.printf("Display name:       %s\n", a.clean(detail.DisplayName))
+	out.printf("Description:        %s\n", a.clean(detail.Description))
+	out.printf("Capabilities:       %s\n", a.clean(strings.Join(detail.Capabilities, " ")))
+	out.println("\nSpec schema:")
+	if out.err != nil {
+		return out.err
 	}
+	if err := writeIndentedJSON(w, detail.SpecSchema); err != nil {
+		return err
+	}
+	if len(detail.OutputContract) > 0 {
+		out.println("\nOutput contract:")
+		if out.err != nil {
+			return out.err
+		}
+		return writeIndentedJSON(w, detail.OutputContract)
+	}
+	return nil
 }
 
 // renderAdmissionText prints the admitted mutation's Resource snapshot.
-func (a *App) renderAdmissionText(w io.Writer, verb string, resource *client.Resource) {
-	fmt.Fprintf(w, "%s %s\n", verb, a.clean(resource.ID))
-	fmt.Fprintf(w, "type:               %s/%s\n", a.clean(resource.Type.Name), a.clean(resource.Type.Version))
-	fmt.Fprintf(w, "generation:         %d\n", resource.Generation)
-	fmt.Fprintf(w, "state:              %s\n", a.clean(resource.Status.State))
+func (a *App) renderAdmissionText(w io.Writer, verb string, resource *client.Resource) error {
+	out := &textWriter{w: w}
+	out.printf("%s %s\n", verb, a.clean(resource.ID))
+	out.printf("type:               %s/%s\n", a.clean(resource.Type.Name), a.clean(resource.Type.Version))
+	out.printf("generation:         %d\n", resource.Generation)
+	out.printf("state:              %s\n", a.clean(resource.Status.State))
 	if resource.LatestOperation != nil {
-		fmt.Fprintf(w, "operation:          %s (%s, %s)\n",
+		out.printf("operation:          %s (%s, %s)\n",
 			a.clean(resource.LatestOperation.ID),
 			a.clean(resource.LatestOperation.Capability),
 			a.clean(resource.LatestOperation.State))
 	}
+	return out.err
 }
 
 // renderProblem writes the decoded RFC 9457 problem with its Liftr
@@ -274,21 +328,21 @@ func (a *App) renderProblem(apiErr *client.APIError) {
 	if code == "" {
 		code = "UNKNOWN"
 	}
-	fmt.Fprintf(w, "error: %s (%s)\n", a.clean(title), code)
+	_, _ = fmt.Fprintf(w, "error: %s (%s)\n", a.clean(title), code)
 	if apiErr.Problem.Detail != "" {
-		fmt.Fprintf(w, "  %s\n", a.clean(apiErr.Problem.Detail))
+		_, _ = fmt.Fprintf(w, "  %s\n", a.clean(apiErr.Problem.Detail))
 	}
 	if apiErr.Problem.CurrentGeneration != nil {
-		fmt.Fprintf(w, "  Current generation: %d\n", *apiErr.Problem.CurrentGeneration)
+		_, _ = fmt.Fprintf(w, "  Current generation: %d\n", *apiErr.Problem.CurrentGeneration)
 	}
 	if len(apiErr.Problem.Violations) > 0 {
-		fmt.Fprintln(w, "  Spec violations:")
+		_, _ = fmt.Fprintln(w, "  Spec violations:")
 		for _, violation := range apiErr.Problem.Violations {
-			fmt.Fprintf(w, "    - %s %s: %s\n",
+			_, _ = fmt.Fprintf(w, "    - %s %s: %s\n",
 				a.clean(violation.Path), a.clean(violation.Keyword), a.clean(violation.Message))
 		}
 		if apiErr.Problem.Truncated {
-			fmt.Fprintln(w, "    (violation list truncated by the server)")
+			_, _ = fmt.Fprintln(w, "    (violation list truncated by the server)")
 		}
 	}
 	requestID := apiErr.Problem.RequestID
@@ -296,6 +350,6 @@ func (a *App) renderProblem(apiErr *client.APIError) {
 		requestID = apiErr.RequestID
 	}
 	if requestID != "" {
-		fmt.Fprintf(w, "  Request ID: %s\n", a.clean(requestID))
+		_, _ = fmt.Fprintf(w, "  Request ID: %s\n", a.clean(requestID))
 	}
 }

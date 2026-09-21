@@ -58,7 +58,9 @@ func TestM21_5FreshInstallAppliesEveryMigrationAndSmokesLifecycle(t *testing.T) 
 	if state := world.state(t, "fresh-resource"); state != domain.ResourceStateReady {
 		t.Fatalf("fresh install state = %s, want Ready", state)
 	}
-	world.remove(t, "fresh-resource", "fresh-delete")
+	if err := world.remove(t, "fresh-resource", "fresh-delete"); err != nil {
+		t.Fatal(err)
+	}
 	world.drain(t)
 	if state := world.state(t, "fresh-resource"); state != domain.ResourceStateDeleted {
 		t.Fatalf("fresh install delete state = %s, want Deleted", state)

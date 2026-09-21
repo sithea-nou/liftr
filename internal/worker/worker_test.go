@@ -832,7 +832,7 @@ func TestRetryBackoffCapsAtMaximumDelay(t *testing.T) {
 			t.Fatal(err)
 		}
 		if message.AttemptCount >= 10 {
-			delay := message.AvailableAt.Sub(time.Now())
+			delay := time.Until(message.AvailableAt)
 			if delay < 500*time.Millisecond || delay > 600*time.Millisecond {
 				t.Fatalf("capped backoff delay=%v at attempt %d", delay, message.AttemptCount)
 			}

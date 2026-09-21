@@ -224,6 +224,6 @@ func operatorDigest(namespace string, parts ...string) []byte {
 }
 
 func writeFrame(h interface{ Write([]byte) (int, error) }, part string) {
-	fmt.Fprintf(h, "%08x", len(part))
+	_, _ = fmt.Fprintf(h, "%08x", len(part))
 	_, _ = h.Write([]byte(part))
 }

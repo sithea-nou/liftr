@@ -7,10 +7,7 @@ Backstage BFF.
 ## Prerequisites
 
 - Docker with Compose
-- Go toolchain from `go.mod`
-- Node.js 20 or newer (the tested local version is in
-  `integrations/backstage/.nvmrc`)
-- Corepack, bash, and curl
+- bash and curl
 
 No cloud credentials, Kubernetes cluster, or infrastructure CLI is required.
 
@@ -30,10 +27,22 @@ Open:
 http://localhost:3000/liftr
 ```
 
-The local host uses Backstage's guest **user** provider. The constrained BFF
+With OrbStack, the equivalent container DNS URL is:
+
+```text
+http://backstage-app.liftr.orb.local/liftr
+```
+
+Both browser origins are explicitly allowed by the demo Backstage backend;
+no wildcard CORS origin is enabled.
+
+The containerized host uses Backstage's guest **user** provider. The frontend
+is served by Nginx, and the Backstage backend runs from its built Node.js
+bundle. The constrained BFF
 still calls Backstage `httpAuth` and accepts user principals only. Between the
 BFF and `liftr-demo-server`, `insecure-development` sends no bearer token and
-is accepted only because both endpoints are literal-loopback HTTP. This is an
+is accepted only because the Backstage backend shares the demo server's
+container network namespace and the hop is literal-loopback HTTP. This is an
 explicit demo composition, not a fallback. Production Liftr and production
 Backstage authentication are unchanged.
 
@@ -41,10 +50,12 @@ Backstage authentication are unchanged.
 
 ```text
 Browser :3000
+  -> Nginx Backstage frontend container
   -> Backstage guest user session
-  -> constrained Liftr BFF :7007 (/api/liftr only)
-  -> Liftr developer API :18080 (/v1 only)
-  -> PostgreSQL, outbox workers, lifecycle
+  -> constrained Liftr BFF container :7007 (/api/liftr only)
+  -> shared network namespace -> 127.0.0.1:18080
+  -> Liftr developer API container (/v1 only)
+  -> PostgreSQL container, outbox workers, lifecycle
   -> deterministic demo provisioner
 
 Operator API:       http://127.0.0.1:18090/admin/v1
@@ -69,7 +80,8 @@ Use owner `team/demo` throughout.
 ### 1. Inventory and discovery
 
 Open the Liftr page. Inventory is read from `GET /v1/resources`, not the
-Backstage Catalog. Open each ResourceType from the list. `DemoApp/v1` shows:
+Backstage Catalog. Use **Resource Types** in the Liftr page navigation and open
+each contract. `DemoApp/v1` shows:
 
 - create, update, and delete capabilities
 - its draft 2020-12 spec contract
@@ -97,9 +109,8 @@ Spec:
 
 References:
 
-```json
-{}
-```
+`DemoDatabase/v1` has no dependency slots, so the Dependencies section is
+empty.
 
 Create it. The Resource page shows ID, type, `Pending`, generation, observed
 generation, Conditions, and latest Operation. The page polls bounded
@@ -120,18 +131,16 @@ Spec:
 {"image":"demo:v1","hold":false,"holdDelete":true}
 ```
 
-References:
-
-```json
-{"database":["backstage-db-a"]}
-```
+Under **Dependencies**, choose `backstage-db-a` in the **Database** picker.
+The picker is populated only from Resources visible to the signed-in developer
+and filters them against the `DemoApp/v1` reference contract.
 
 Expected state:
 
 ```text
 Pending
-DependenciesReady=False
-reason=WaitingForDependencies
+Dependencies Ready: Waiting
+Waiting for dependencies.
 ```
 
 The public API does not expose submission counts. To prove the private
@@ -164,7 +173,7 @@ backstage-db-a Ready
 -> backstage-app Ready
 ```
 
-Open **Operations** on the app to read
+Open the **Operations** tab on the app to read
 `GET /v1/resources/backstage-app/operations` through the BFF.
 
 ### 5. Delete protection
@@ -184,12 +193,8 @@ dependent lists.
 ### 6. Advanced reference update
 
 Create `DemoDatabase/v1` as `backstage-db-b` with the same held spec as
-AnchorA. On `backstage-app`, choose **Update** and change only the references
-editor to:
-
-```json
-{"database":["backstage-db-b"]}
-```
+AnchorA. On `backstage-app`, choose **Update** and change **Database** from
+`backstage-db-a` to `backstage-db-b` in the dependency picker.
 
 Keep this spec:
 
@@ -263,15 +268,14 @@ admin/generic proxy paths.
 
 ## Troubleshooting
 
-- Backstage app log: `.demo/backstage-app.log`
-- Backstage backend log: `.demo/backstage-backend.log`
+- Backstage logs: `docker compose --profile demo --profile backstage logs backstage-app backstage-backend`
 - Liftr native log: `.demo/server.log`
 - Liftr Compose log: `docker compose --profile demo logs demo-server`
 - If ports `3000` or `7007` are occupied, stop that process; the demo does not
   weaken loopback restrictions or select remote endpoints.
 - If fixed walkthrough IDs already exist, run `make demo-down` before startup.
 - If the browser defaults to delegated auth, verify the frontend config exposes
-  `liftr.auth.mode: insecure-development` and restart both Backstage processes.
+  `liftr.auth.mode: insecure-development` and recreate both Backstage containers.
 
 ## Plane Separation
 

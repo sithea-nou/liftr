@@ -354,7 +354,7 @@ func digestFile(path string, maxBytes int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > maxBytes {
 		return "", fmt.Errorf("file exceeds digest bound")
@@ -496,7 +496,7 @@ func declaredProviderConstraints(root string) (map[string]string, error) {
 				continue
 			}
 			declarations, valueDiagnostics := attribute.Expr.Value(nil)
-			if valueDiagnostics.HasErrors() || !declarations.IsKnown() || declarations.IsNull() || !(declarations.Type().IsObjectType() || declarations.Type().IsMapType()) {
+			if valueDiagnostics.HasErrors() || !declarations.IsKnown() || declarations.IsNull() || (!declarations.Type().IsObjectType() && !declarations.Type().IsMapType()) {
 				return fmt.Errorf("provider constraints must be literal")
 			}
 			iterator := declarations.ElementIterator()

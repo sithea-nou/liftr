@@ -66,7 +66,7 @@ func loadTokenFile(path string, warnings io.Writer) (string, error) {
 		return "", fmt.Errorf("token file %s is not a regular file", path)
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 && warnings != nil {
-		fmt.Fprintf(warnings, "warning: token file %s is readable beyond its owner\n", path)
+		_, _ = fmt.Fprintf(warnings, "warning: token file %s is readable beyond its owner\n", path)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

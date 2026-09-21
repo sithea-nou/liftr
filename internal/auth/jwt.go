@@ -4,6 +4,7 @@ package auth
 
 import (
 	"crypto"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rsa"
@@ -160,11 +161,18 @@ func parseECJWK(candidate jwk) (*ecPublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("EC coordinate")
 	}
+	if len(xBytes) != 32 || len(yBytes) != 32 {
+		return nil, fmt.Errorf("EC coordinate length")
+	}
+	encoded := make([]byte, 1+len(xBytes)+len(yBytes))
+	encoded[0] = 4
+	copy(encoded[1:], xBytes)
+	copy(encoded[1+len(xBytes):], yBytes)
+	if _, err := ecdh.P256().NewPublicKey(encoded); err != nil {
+		return nil, fmt.Errorf("EC point off curve")
+	}
 	curve := elliptic.P256()
 	x := new(big.Int).SetBytes(xBytes)
 	y := new(big.Int).SetBytes(yBytes)
-	if !curve.IsOnCurve(x, y) {
-		return nil, fmt.Errorf("EC point off curve")
-	}
 	return &ecPublicKey{public: &ecdsa.PublicKey{Curve: curve, X: x, Y: y}}, nil
 }

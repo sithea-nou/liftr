@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 )
@@ -27,10 +28,9 @@ func newResourceTypeCommand(a *App) *cobra.Command {
 					return exit(classifyInterrupted(cmd.Context(), a.reportReadFailure(err)))
 				}
 				if a.output == outputJSON {
-					return finishJSON(cmd, emitJSON(a.stdout, list.Raw))
+					return finishOutput(a, emitJSON(a.stdout, list.Raw))
 				}
-				a.renderResourceTypeListText(a.stdout, list)
-				return nil
+				return finishOutput(a, a.renderResourceTypeListText(a.stdout, list))
 			},
 		},
 		&cobra.Command{
@@ -46,10 +46,9 @@ func newResourceTypeCommand(a *App) *cobra.Command {
 					return exit(classifyInterrupted(cmd.Context(), a.reportReadFailure(err)))
 				}
 				if a.output == outputJSON {
-					return finishJSON(cmd, emitJSON(a.stdout, detail.Raw))
+					return finishOutput(a, emitJSON(a.stdout, detail.Raw))
 				}
-				a.renderResourceTypeDetailText(a.stdout, detail)
-				return nil
+				return finishOutput(a, a.renderResourceTypeDetailText(a.stdout, detail))
 			},
 		},
 	)
@@ -71,8 +70,9 @@ func interruptedNow(ctx context.Context) bool {
 	return ctx.Err() != nil
 }
 
-func finishJSON(cmd *cobra.Command, err error) error {
+func finishOutput(a *App, err error) error {
 	if err != nil {
+		_, _ = fmt.Fprintf(a.stderr, "error: %s\n", a.clean(err.Error()))
 		return exit(ExitFailure)
 	}
 	return nil

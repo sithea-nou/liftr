@@ -2,6 +2,7 @@
   "name": "@liftr/testhost-app",
   "version": "0.0.0",
   "private": true,
+  "license": "Apache-2.0",
   "scripts": {
     "build": "backstage-cli package build",
     "config:check": "backstage-cli config:check --config ../../app-config.yaml",
@@ -11,12 +12,15 @@
     "@backstage/core-plugin-api": "^1.10.0",
     "@backstage/frontend-defaults": "^0.5.0",
     "@backstage/frontend-plugin-api": "^0.18.0",
+    "@backstage/ui": "^0.17.1",
     "@liftr/plugin-liftr": "workspace:^",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.0"
   },
   "devDependencies": {
-    "@backstage/cli": "^0.32.0"
+    "@backstage/cli": "^0.32.0",
+    "@types/react": "^18.3.0"
   },
   "backstage": {
     "role": "frontend"

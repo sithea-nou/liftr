@@ -5,7 +5,6 @@ package crossplane
 import (
 	"context"
 
-	"github.com/sithea-nou/liftr/internal/provisioning"
 	"github.com/sithea-nou/liftr/internal/provisioning/crossplane/kube"
 )
 
@@ -33,15 +32,6 @@ const (
 	// server fault, authorization denial). Absence is unproven.
 	absenceUncertain
 )
-
-func (a absenceResolution) failure() failurePair {
-	switch a {
-	case kindNotServed:
-		return failurePair{provisioning.FailureUnsupported, reasonTargetKindUnregistered}
-	default:
-		return failurePair{provisioning.FailureUnavailable, reasonControlPlaneUnavailable}
-	}
-}
 
 // resolveAbsence performs the live served-GVR verification required behind
 // every absence-concluding 404.

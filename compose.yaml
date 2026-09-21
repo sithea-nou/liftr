@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: liftr
       POSTGRES_DB: liftr
     ports:
-      - "55432:5432"
+      - "127.0.0.1:55432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U liftr -d liftr"]
       interval: 5s
@@ -39,6 +39,9 @@ services:
       - "127.0.0.1:18080:18080"
       - "127.0.0.1:18090:18090"
       - "127.0.0.1:18099:18099"
+      # The Backstage backend shares this service's network namespace so its
+      # explicitly insecure demo connection remains literal-loopback only.
+      - "127.0.0.1:7007:7007"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18080/readyz >/dev/null || exit 1"]
       interval: 3s
@@ -59,3 +62,54 @@ services:
       - ./docs/openapi/v1:/spec:ro
     ports:
       - "127.0.0.1:18081:8080"
+
+  # NON-PRODUCTION Backstage host fixture. The BFF intentionally shares the
+  # demo server network namespace: 127.0.0.1:18080 remains a real loopback
+  # hop and Liftr's insecure-development hostname guard stays unchanged.
+  backstage-backend:
+    profiles: ["backstage"]
+    build:
+      context: ./integrations/backstage
+      dockerfile: test-host/Dockerfile
+      target: backstage-backend
+    network_mode: "service:demo-server"
+    depends_on:
+      demo-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7007/.backstage/health/v1/readiness').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  backstage-app:
+    profiles: ["backstage"]
+    build:
+      context: ./integrations/backstage
+      dockerfile: test-host/Dockerfile
+      target: backstage-app
+    depends_on:
+      backstage-backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backstage-test:
+    profiles: ["backstage"]
+    build:
+      context: ./integrations/backstage
+      dockerfile: test-host/Dockerfile
+      target: backstage-build
+    network_mode: "service:demo-server"
+    depends_on:
+      demo-server:
+        condition: service_healthy
+    environment:
+      LIFTR_BACKSTAGE_DEMO_BASE_URL: http://127.0.0.1:18080
+      LIFTR_BACKSTAGE_DEMO_CONTROL_URL: http://127.0.0.1:18099
+    command: ["corepack", "yarn@4.9.2", "vitest", "run", "plugins/liftr-backend/src/__tests__/demo.integration.test.ts"]

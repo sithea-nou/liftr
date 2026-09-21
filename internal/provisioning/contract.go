@@ -333,15 +333,6 @@ const (
 	OutputsInvalid OutputEvidenceState = "Invalid"
 )
 
-func (s OutputEvidenceState) valid() bool {
-	switch s {
-	case OutputsUnavailable, OutputsAvailable, OutputsInvalid:
-		return true
-	default:
-		return false
-	}
-}
-
 // OutputEvidence is the normalized output dimension of an ExecutionObservation.
 // Values are flat scalars only. Secret material never crosses this boundary:
 // implementations extract only explicitly registered non-secret outputs.
@@ -354,19 +345,6 @@ type OutputEvidence struct {
 	OutputMappingRef string
 	// Reason is a curated, client-safe classification for Invalid evidence.
 	Reason string
-}
-
-func (e OutputEvidence) validate() error {
-	if !e.State.valid() {
-		return fmt.Errorf("invalid output evidence state %q", e.State)
-	}
-	if e.State == OutputsAvailable && len(e.Values) == 0 {
-		return fmt.Errorf("available output evidence carries no values")
-	}
-	if e.State == OutputsInvalid && strings.TrimSpace(e.Reason) == "" {
-		return fmt.Errorf("invalid output evidence requires a curated reason")
-	}
-	return nil
 }
 
 // ExecutionObservation separates current execution from resource facts. A

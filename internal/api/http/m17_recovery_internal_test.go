@@ -3,7 +3,6 @@
 package httpapi
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,7 +41,6 @@ func TestPanicBeforeCommitRendersSanitizedProblem(t *testing.T) {
 	handler := withRecovery(nil, telemetry, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := newRequestID()
 		w.Header().Set("X-Request-ID", requestID)
-		r = r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, requestID))
 		panic("secret internal state leaked in panic value")
 	}))
 	recorder := httptest.NewRecorder()

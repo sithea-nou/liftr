@@ -27,10 +27,10 @@ func TestMutationWithoutMonitorMetadata(t *testing.T) {
 					w.Header().Set("Link", `</v1/operations/op-m>; rel="monitor"`)
 				}
 				w.WriteHeader(http.StatusAccepted)
-				fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Pending", 4))
+				_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Pending", 4)
 			case http.MethodGet:
 				jsonHeaders(w)
-				fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Ready", 5))
+				_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Ready", 5)
 			}
 		}))
 	}
@@ -39,7 +39,9 @@ func TestMutationWithoutMonitorMetadata(t *testing.T) {
 		server := newServer(false)
 		defer server.Close()
 		specFile := filepath.Join(t.TempDir(), "spec.json")
-		os.WriteFile(specFile, []byte(`{}`), 0o600)
+		if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
 
 		result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 			"resource", "update", "orders-db", "--spec", specFile, "--generation", "5")
@@ -55,7 +57,9 @@ func TestMutationWithoutMonitorMetadata(t *testing.T) {
 		server := newServer(false)
 		defer server.Close()
 		specFile := filepath.Join(t.TempDir(), "spec.json")
-		os.WriteFile(specFile, []byte(`{}`), 0o600)
+		if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
 
 		result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 			"resource", "update", "orders-db", "--spec", specFile, "--generation", "5", "--wait")
@@ -83,7 +87,7 @@ func TestCreateIdempotencyKeyGeneratedOncePerInvocation(t *testing.T) {
 		jsonHeaders(w)
 		w.Header().Set("Link", `</v1/operations/op-c>; rel="monitor"`)
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 1, `{}`, "Pending", 0))
+		_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 1, `{}`, "Pending", 0)
 	}))
 	defer server.Close()
 

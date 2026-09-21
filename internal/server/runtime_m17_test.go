@@ -227,7 +227,9 @@ func scrapeCounter(t *testing.T, telemetry *observability.Telemetry, name string
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == name {
 			var value float64
-			fmt.Sscanf(fields[1], "%f", &value)
+			if _, err := fmt.Sscanf(fields[1], "%f", &value); err != nil {
+				t.Fatal(err)
+			}
 			return value
 		}
 	}

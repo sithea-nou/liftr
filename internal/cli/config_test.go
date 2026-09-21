@@ -42,7 +42,9 @@ func TestLoadTokenFileRules(t *testing.T) {
 
 	t.Run("trims and accepts", func(t *testing.T) {
 		path := filepath.Join(dir, "token")
-		os.WriteFile(path, []byte("  token-value \n"), 0o600)
+		if err := os.WriteFile(path, []byte("  token-value \n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		got, err := loadTokenFile(path, nil)
 		if err != nil || got != "token-value" {
 			t.Fatalf("load = %q, err %v", got, err)
@@ -51,7 +53,9 @@ func TestLoadTokenFileRules(t *testing.T) {
 
 	t.Run("empty file refused", func(t *testing.T) {
 		path := filepath.Join(dir, "empty")
-		os.WriteFile(path, []byte("\n\n"), 0o600)
+		if err := os.WriteFile(path, []byte("\n\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := loadTokenFile(path, nil); err == nil || !strings.Contains(err.Error(), "empty") {
 			t.Fatalf("err = %v", err)
 		}
@@ -59,7 +63,9 @@ func TestLoadTokenFileRules(t *testing.T) {
 
 	t.Run("oversized credential refused without revealing length", func(t *testing.T) {
 		path := filepath.Join(dir, "huge")
-		os.WriteFile(path, []byte(strings.Repeat("x", client.MaxTokenBytes+1)), 0o600)
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", client.MaxTokenBytes+1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		_, err := loadTokenFile(path, nil)
 		if err == nil || !strings.Contains(err.Error(), "accepted size") {
 			t.Fatalf("err = %v", err)

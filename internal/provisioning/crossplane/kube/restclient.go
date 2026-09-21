@@ -184,7 +184,7 @@ func (c *restClient) do(ctx context.Context, method, endpoint, contentType strin
 		// classifies them as transient uncertainty.
 		return nil, 0, fmt.Errorf("kubernetes request failed: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, response.StatusCode, fmt.Errorf("read kubernetes response: %w", err)

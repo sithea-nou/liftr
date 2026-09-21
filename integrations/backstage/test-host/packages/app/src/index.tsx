@@ -10,6 +10,7 @@
 
 import { createApp } from '@backstage/frontend-defaults';
 import { liftrFrontendPlugin } from '@liftr/plugin-liftr';
+import '@backstage/ui/css/styles.css';
 import ReactDOM from 'react-dom/client';
 
 const app = createApp({

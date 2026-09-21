@@ -208,7 +208,7 @@ func (f *fixture) send(t *testing.T, method, path string, headers map[string]str
 
 func decodeBody(t *testing.T, response *http.Response) map[string]any {
 	t.Helper()
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	payload, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func decodeBody(t *testing.T, response *http.Response) map[string]any {
 
 func rawBody(t *testing.T, response *http.Response) []byte {
 	t.Helper()
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	payload, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatal(err)

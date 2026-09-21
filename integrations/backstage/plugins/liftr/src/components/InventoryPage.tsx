@@ -1,31 +1,70 @@
-/**
- * Resource inventory — the authoritative M15 listing.
- *
- * GET /v1/resources is the ONLY inventory source. Filters map 1:1 to M15
- * query parameters; filter changes restart cursor traversal; there is no
- * client-side global search, no counts, and no persisted state.
- */
+/** Authoritative M15 resource inventory. All filters map directly to GET /v1/resources. */
 
-import { Button, Grid, Typography } from '@material-ui/core';
 import React, { useCallback, useEffect, useState } from 'react';
+import {
+  Box,
+  Button,
+  Checkbox,
+  FormControlLabel,
+  Grid,
+  MenuItem,
+  TextField,
+  Typography,
+  makeStyles,
+} from '@material-ui/core';
+import AddIcon from '@material-ui/icons/Add';
+import { InfoCard, Link, Table } from '@backstage/core-components';
 import { useNavigate } from 'react-router-dom';
 import {
-  ResourceSummary,
   RESOURCE_STATES,
+  ResourceSummary,
   ValidatedResourceListQuery,
 } from '@liftr/plugin-liftr-common';
-import { InfoCard, Link, Table } from '@backstage/core-components';
-import { ResourceTypeIndex } from './ResourceTypesPage';
 import { LiftrApiError } from '../api/client';
-import { ProblemView, OwnerRefView, StateChip, gen } from './common';
 import { useLiftrClient } from '../hooks/useLiftrClient';
+import {
+  LiftrEmptyState,
+  LiftrPageHeading,
+  OperationStateChip,
+  OwnerRefView,
+  ProblemView,
+  StateChip,
+  formatTimestamp,
+} from './common';
+
+const useStyles = makeStyles(theme => ({
+  page: {
+    minWidth: 0,
+    width: '100%',
+    margin: 0,
+    '& .MuiGrid-item': { minWidth: 0 },
+  },
+  tableRegion: {
+    width: '100%',
+    maxWidth: '100%',
+    overflowX: 'auto',
+    WebkitOverflowScrolling: 'touch',
+    borderRadius: theme.shape.borderRadius,
+    '& table': { minWidth: 880 },
+  },
+  resourceId: {
+    overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
+  },
+  operationSummary: {
+    minWidth: 0,
+    flexWrap: 'wrap',
+  },
+  pagination: { flexWrap: 'wrap' },
+}));
 
 export const InventoryPage: React.FC = () => {
+  const classes = useStyles();
   const client = useLiftrClient();
   const navigate = useNavigate();
   const [query, setQuery] = useState<ValidatedResourceListQuery>({ limit: 20 });
   const [items, setItems] = useState<ResourceSummary[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | undefined>();
+  const [nextCursor, setNextCursor] = useState<string>();
   const [cursorStack, setCursorStack] = useState<Array<string | undefined>>([undefined]);
   const [error, setError] = useState<LiftrApiError | null>(null);
   const [loading, setLoading] = useState(true);
@@ -34,109 +73,119 @@ export const InventoryPage: React.FC = () => {
     let alive = true;
     setLoading(true);
     setNextCursor(undefined);
-    client
-      .listResources(query)
-      .then(r => {
+    client.listResources(query)
+      .then(result => {
         if (!alive) return;
-        setItems(r.items);
-        setNextCursor(r.nextCursor);
+        setItems(result.items);
+        setNextCursor(result.nextCursor);
         setError(null);
       })
-      .catch((e: LiftrApiError) => alive && setError(e))
+      .catch((nextError: LiftrApiError) => alive && setError(nextError))
       .finally(() => alive && setLoading(false));
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [client, JSON.stringify(query)]);
 
-  const applyFilter = useCallback(
-    (patch: Partial<ValidatedResourceListQuery>) => {
-      // Filter changes restart traversal (cursor binding on the server).
-      setCursorStack([undefined]);
-      setQuery(prev => ({ ...prev, ...patch, cursor: undefined }));
-    },
-    [],
-  );
+  const applyFilter = useCallback((patch: Partial<ValidatedResourceListQuery>) => {
+    setCursorStack([undefined]);
+    setQuery(previous => ({ ...previous, ...patch, cursor: undefined }));
+  }, []);
 
-  const goNext = () => {
-    if (!nextCursor) return;
-    setCursorStack(stack => [...stack, nextCursor]);
-    setQuery(prev => ({ ...prev, cursor: nextCursor }));
-  };
-  const goPrev = () => {
+  const goPrevious = () => {
     setCursorStack(stack => (stack.length > 1 ? stack.slice(0, -1) : stack));
-    setQuery(prev => ({ ...prev, cursor: cursorStack[cursorStack.length - 2] ?? undefined }));
+    setQuery(previous => ({ ...previous, cursor: cursorStack[cursorStack.length - 2] }));
   };
 
-  if (error) {
-    return <ProblemView error={error as unknown as Error & { problem?: unknown }} />;
-  }
-
-  const columns: Array<{ title: string; field?: string; render?: (r: ResourceSummary) => React.ReactNode }> = [
+  const columns = [
     {
-      title: 'ID',
+      title: 'Resource',
       field: 'id',
-      render: (r: ResourceSummary) => (
-        <Link to={`/liftr/resources/${encodeURIComponent(r.id)}`}>{r.id}</Link>
+      render: (resource: ResourceSummary) => (
+        <Box py={0.5}>
+          <Link to={`/liftr/resources/${encodeURIComponent(resource.id)}`}>
+            <Typography className={classes.resourceId} component="span" variant="subtitle2">{resource.id}</Typography>
+          </Link>
+          <Typography variant="caption" display="block" color="textSecondary">Generation {resource.generation.toString()}</Typography>
+        </Box>
       ),
     },
-    { title: 'Type', render: (r: ResourceSummary) => `${r.type.name}/${r.type.version}` },
-    { title: 'Owner', render: (r: ResourceSummary) => <OwnerRefView owner={r.owner} /> },
-    { title: 'State', render: (r: ResourceSummary) => <StateChip state={r.status.state} /> },
-    { title: 'Generation', render: (r: ResourceSummary) => `${gen(r.status.observedGeneration)} / ${gen(r.generation)}` },
+    { title: 'Type', render: (resource: ResourceSummary) => `${resource.type.name}/${resource.type.version}` },
+    { title: 'State', render: (resource: ResourceSummary) => <StateChip state={resource.status.state} /> },
     {
-      title: 'Latest Operation',
-      render: (r: ResourceSummary) =>
-        r.latestOperation ? (
-          <span>
-            {r.latestOperation.capability} · {r.latestOperation.state}
-          </span>
-        ) : (
-          '—'
-        ),
+      title: 'Latest operation',
+      render: (resource: ResourceSummary) => resource.latestOperation ? (
+        <Box className={classes.operationSummary} display="flex" alignItems="center" gridGap={8}>
+          <Typography variant="body2" style={{ textTransform: 'capitalize' }}>{resource.latestOperation.capability}</Typography>
+          <OperationStateChip state={resource.latestOperation.state} />
+        </Box>
+      ) : <Typography color="textSecondary">—</Typography>,
     },
+    { title: 'Owner', render: (resource: ResourceSummary) => <OwnerRefView owner={resource.owner} /> },
+    { title: 'Updated', render: (resource: ResourceSummary) => formatTimestamp(resource.updatedAt) },
   ];
 
   return (
-    <Grid container spacing={3}>
+    <Grid className={classes.page} container spacing={3}>
       <Grid item xs={12}>
-        <InfoCard title="Liftr Resources" subheader="Authorized inventory served live from Liftr (GET /v1/resources)">
-          <Button
-            variant="contained"
-            color="primary"
-            size="small"
-            style={{ marginBottom: 12 }}
-            onClick={() => navigate('/liftr/create')}
-          >
-            Create Resource
-          </Button>
+        <LiftrPageHeading
+          title="Liftr Resources"
+          description="Manage platform Resources without depending on how they are implemented."
+        />
+      </Grid>
+      <Grid item xs={12}>
+        <InfoCard>
           <InventoryFilters value={query} onChange={applyFilter} />
-          {error === null && items.length === 0 && !loading && (
-            <Typography variant="body2" color="textSecondary">
-              No resources visible to you. Visibility comes from your Liftr memberships.
-            </Typography>
+          {error && <ProblemView error={error} />}
+          {!error && !loading && items.length === 0 ? (
+            <LiftrEmptyState
+              title="No Resources found"
+              description="Liftr Resources are the developer-facing services and infrastructure your platform makes available. Create one or adjust the filters above."
+              action={(
+                <Button color="primary" variant="contained" startIcon={<AddIcon />} onClick={() => navigate('/liftr/create')}>
+                  Create Resource
+                </Button>
+              )}
+            />
+          ) : !error ? (
+            <div
+              className={classes.tableRegion}
+              role="region"
+              aria-label="Resource inventory table"
+              tabIndex={0}
+            >
+              <Table
+                title="Resources"
+                options={{ search: false, paging: false, padding: 'dense' }}
+                isLoading={loading}
+                columns={columns}
+                data={items}
+                onRowClick={(row: unknown) => {
+                  const resource = row as ResourceSummary;
+                  if (resource?.id) navigate(`/liftr/resources/${encodeURIComponent(resource.id)}`);
+                }}
+              />
+            </div>
+          ) : null}
+          {!error && items.length > 0 && (
+            <Box className={classes.pagination} mt={2} display="flex" gridGap={8}>
+              <Button variant="outlined" size="small" disabled={cursorStack.length <= 1 || loading} onClick={goPrevious}>
+                Previous
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                disabled={!nextCursor || loading}
+                onClick={() => {
+                  if (!nextCursor) return;
+                  setCursorStack(stack => [...stack, nextCursor]);
+                  setQuery(previous => ({ ...previous, cursor: nextCursor }));
+                }}
+              >
+                Next
+              </Button>
+            </Box>
           )}
-          <Table
-            options={{ search: false, paging: false, toolbar: false }}
-            isLoading={loading}
-            columns={columns}
-            data={items}
-            onRowClick={(row: unknown) => {
-              const r = row as ResourceSummary;
-              if (r?.id) navigate(`/liftr/resources/${encodeURIComponent(r.id)}`);
-            }}
-          />
-          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-            <button type="button" disabled={cursorStack.length <= 1 || loading} onClick={goPrev}>
-              Previous page
-            </button>
-            <button type="button" disabled={!nextCursor || loading} onClick={goNext}>
-              Next page
-            </button>
-          </div>
         </InfoCard>
       </Grid>
-      <ResourceTypeIndex />
     </Grid>
   );
 };
@@ -144,64 +193,76 @@ export const InventoryPage: React.FC = () => {
 const InventoryFilters: React.FC<{
   value: ValidatedResourceListQuery;
   onChange: (patch: Partial<ValidatedResourceListQuery>) => void;
-}> = ({ value, onChange }) => (
-  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-    <input
-      aria-label="owner kind"
-      placeholder="owner kind"
-      defaultValue={value.ownerKind ?? ''}
-      onBlur={e =>
-        onChange(
-          e.target.value.trim() === ''
-            ? { ownerKind: undefined, ownerId: undefined }
-            : { ownerKind: e.target.value.trim(), ownerId: value.ownerId ?? '' } as ValidatedResourceListQuery,
-        )
-      }
+}> = ({ value, onChange }) => {
+  const [ownerKind, setOwnerKind] = useState(value.ownerKind ?? '');
+  const [ownerId, setOwnerId] = useState(value.ownerId ?? '');
+  const [type, setType] = useState(value.type ?? '');
+  const [state, setState] = useState<NonNullable<ValidatedResourceListQuery['state']> | ''>(value.state ?? '');
+  const [includeDeleted, setIncludeDeleted] = useState(value.includeDeleted === true);
+  const apply = () => onChange({
+    ownerKind: ownerKind.trim() && ownerId.trim() ? ownerKind.trim() : undefined,
+    ownerId: ownerKind.trim() && ownerId.trim() ? ownerId.trim() : undefined,
+    type: type.trim() || undefined,
+    version: undefined,
+    state: state || undefined,
+    includeDeleted: includeDeleted || state === 'Deleted' || undefined,
+  });
+  return (
+  <Box mb={2} display="flex" gridGap={12} flexWrap="wrap" alignItems="center" aria-label="Resource filters">
+    <TextField
+      label="Owner kind"
+      variant="outlined"
+      size="small"
+      value={ownerKind}
+      onChange={event => setOwnerKind(event.target.value)}
     />
-    <input
-      aria-label="owner id"
-      placeholder="owner id"
-      defaultValue={value.ownerId ?? ''}
-      onBlur={e =>
-        onChange(
-          e.target.value.trim() === ''
-            ? { ownerKind: undefined, ownerId: undefined }
-            : { ownerKind: value.ownerKind ?? '', ownerId: e.target.value.trim() } as ValidatedResourceListQuery,
-        )
-      }
+    <TextField
+      label="Owner ID"
+      variant="outlined"
+      size="small"
+      value={ownerId}
+      onChange={event => setOwnerId(event.target.value)}
     />
-    <input
-      aria-label="type"
-      placeholder="type"
-      defaultValue={value.type ?? ''}
-      onBlur={e => onChange({ type: e.target.value.trim() === '' ? undefined : e.target.value.trim(), version: undefined })}
+    <TextField
+      label="Resource type"
+      variant="outlined"
+      size="small"
+      value={type}
+      onChange={event => setType(event.target.value)}
     />
-    <input
-      aria-label="version"
-      placeholder="version"
-      disabled={!value.type}
-      defaultValue={value.version ?? ''}
-      onBlur={e => onChange({ version: e.target.value.trim() === '' ? undefined : e.target.value.trim() })}
-    />
-    <select
-      aria-label="state"
-      value={value.state ?? ''}
-      onChange={e => onChange({ state: (e.target.value || undefined) as ValidatedResourceListQuery['state'] })}
+    <TextField
+      select
+      label="State"
+      variant="outlined"
+      size="small"
+      value={state}
+      style={{ minWidth: 140 }}
+      onChange={event => {
+        setState(event.target.value as NonNullable<ValidatedResourceListQuery['state']> | '');
+        if (event.target.value === 'Deleted') setIncludeDeleted(true);
+      }}
     >
-      <option value="">any state</option>
-      {RESOURCE_STATES.map(s => (
-        <option key={s} value={s}>
-          {s}
-        </option>
-      ))}
-    </select>
-    <label style={{ alignSelf: 'center' }}>
-      <input
-        type="checkbox"
-        checked={value.includeDeleted === true}
-        onChange={e => onChange({ includeDeleted: e.target.checked || undefined })}
-      />{' '}
-      include deleted
-    </label>
-  </div>
-);
+      <MenuItem value="">Any state</MenuItem>
+      {RESOURCE_STATES.map(state => <MenuItem key={state} value={state}>{state}</MenuItem>)}
+    </TextField>
+    <FormControlLabel
+      control={(
+        <Checkbox
+          color="primary"
+          checked={includeDeleted}
+          onChange={event => {
+            setIncludeDeleted(event.target.checked);
+            if (!event.target.checked && state === 'Deleted') setState('');
+          }}
+        />
+      )}
+      label="Include deleted"
+    />
+    <Button color="primary" variant="outlined" size="small" onClick={apply}>Apply filters</Button>
+    <Button size="small" onClick={() => {
+      setOwnerKind(''); setOwnerId(''); setType(''); setState(''); setIncludeDeleted(false);
+      onChange({ ownerKind: undefined, ownerId: undefined, type: undefined, version: undefined, state: undefined, includeDeleted: undefined });
+    }}>Clear</Button>
+  </Box>
+  );
+};

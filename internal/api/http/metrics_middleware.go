@@ -55,7 +55,7 @@ func newRouteMatchers(routes []route) []routeMatcher {
 // match returns the registered template for this request. Method mismatches
 // still resolve to their path template so a 405 cannot inflate "unmatched".
 func (m routeMatcher) matches(method, path string) bool {
-	if m.method != method && !(method == http.MethodHead && m.method == http.MethodGet) {
+	if m.method != method && (method != http.MethodHead || m.method != http.MethodGet) {
 		return false
 	}
 	return segmentsMatch(m.segments, path)

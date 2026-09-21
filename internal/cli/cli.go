@@ -132,8 +132,8 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer, stdin
 	if message == "" {
 		message = "invalid usage"
 	}
-	fmt.Fprintf(stderr, "error: %s\n", sanitize(message))
-	fmt.Fprintf(stderr, "run 'liftr --help' for usage\n")
+	_, _ = fmt.Fprintf(stderr, "error: %s\n", sanitize(message))
+	_, _ = fmt.Fprintln(stderr, "run 'liftr --help' for usage")
 	return ExitUsage
 }
 
@@ -165,8 +165,8 @@ func newVersionCommand(a *App) *cobra.Command {
 		Short: "Print the CLI version",
 		Args:  cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			fmt.Fprintf(a.stdout, "liftr version %s\n", a.version)
-			return nil
+			_, err := fmt.Fprintf(a.stdout, "liftr version %s\n", a.version)
+			return finishOutput(a, err)
 		},
 	}
 }

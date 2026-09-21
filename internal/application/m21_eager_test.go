@@ -216,9 +216,10 @@ func (f *eagerFixture) settleAnchorState(t *testing.T, id string, state domain.R
 		if err != nil {
 			return err
 		}
-		if state == domain.ResourceStateReady {
+		switch state {
+		case domain.ResourceStateReady:
 			execution.State = application.AttemptSucceeded
-		} else if state == domain.ResourceStateFailed {
+		case domain.ResourceStateFailed:
 			execution.State = application.AttemptFailed
 		}
 		return tx.Executions().SaveExecution(ctx, execution, execution.Version)

@@ -58,12 +58,6 @@ func (p *demoProvisioner) Capabilities() []provisioning.ProvisionerCapability {
 	return capabilities
 }
 
-func (p *demoProvisioner) submissionCount(operationID domain.OperationID) int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.submissions[operationID]
-}
-
 func (p *demoProvisioner) Submit(_ context.Context, request provisioning.ExecutionRequest) (provisioning.Submission, error) {
 	if err := request.Validate(); err != nil {
 		return provisioning.Submission{}, err

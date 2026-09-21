@@ -31,14 +31,14 @@ release.
 | Node.js | 24.x (`.nvmrc`; engines `>=20`) |
 | Yarn | 4.9.2 via `packageManager` + Corepack |
 | @backstage/backend-plugin-api | 1.10.0 |
-| @backstage/backend-defaults | ^0.8 line (resolved in yarn.lock) |
+| @backstage/backend-defaults | 0.17.7 |
 | @backstage/plugin-auth-node | 0.7.4 |
 | @backstage/config | 1.3.8 |
 | @backstage/errors | 1.3.1 |
 | @backstage/core-plugin-api | 1.12.9 |
 | @backstage/core-components | 0.16.4 |
 | @backstage/frontend-plugin-api | 0.18.0 |
-| @backstage/frontend-defaults | ^0.5 line (resolved in yarn.lock) |
+| @backstage/frontend-defaults | 0.5.5 |
 | @backstage/integration-react | 1.2.21 |
 | @backstage/cli | ^0.32 line (dist-workspace model) |
 | react / react-dom | 18.3.1 |
@@ -49,6 +49,13 @@ workspace (standard Backstage monorepo dedupe); the host fixture in this
 repository pins and proves exactly the set above. Do not assume compatibility
 with materially older or newer generations without re-running
 `make verify-backstage`.
+
+Yarn reports `YN0060` for this baseline because the legacy Material UI v4
+packages still published by these Backstage packages cap their React peer
+metadata at 17, while Backstage itself requires React 18. There is no
+overlapping version to declare. The immutable install, plugin tests, and host
+build validate the exact React 18 combination; missing-workspace-peer
+`YN0002` notices are not expected.
 
 ## Reproducible install
 
@@ -84,7 +91,10 @@ packaging; and that operator configuration loads against both plugins'
 `config-schema.json`. Run it with `yarn verify:host`. For M21.6 only, the same
 fixture is runnable on loopback with Backstage's guest user provider, an
 in-memory SQLite database, and explicit Liftr `insecure-development` mode via
-`make demo-backstage-up`. This does not define a production auth composition;
+`make demo-backstage-up`. The demo target builds and runs the frontend and
+backend as containers; the backend shares the Liftr demo server's network
+namespace so the intentionally strict literal-loopback development guard is
+preserved. This does not define a production auth composition;
 adopters still provide their own identity, database, and deployment wiring.
 
 Configuration reference: [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) and

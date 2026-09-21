@@ -51,7 +51,7 @@ func (c *httpClient) getJSON(ctx context.Context, rawURL string, maxBytes int64)
 	if err != nil {
 		return nil, invalid(identity.AuthFailureJWKSUnavailable)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return nil, invalid(identity.AuthFailureJWKSUnavailable)
 	}

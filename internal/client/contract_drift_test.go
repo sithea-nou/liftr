@@ -43,7 +43,7 @@ func loadOpenAPISchemas(t *testing.T) map[string]schemaShape {
 }
 
 func jsonTags(t reflect.Type) map[string]bool {
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {

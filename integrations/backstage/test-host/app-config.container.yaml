@@ -1,0 +1,15 @@
+# Container-only overlay. Public browser URLs remain localhost, while the
+# backend listener binds the shared demo-server network namespace.
+backend:
+  listeningAddress: 0.0.0.0:7007
+  cors:
+    origin:
+      - http://localhost:3000
+      - http://backstage-app.liftr.orb.local
+
+auth:
+  providers:
+    guest:
+      # The container executes the production bundle, but this fixture is an
+      # explicitly non-production, loopback-only demo.
+      dangerouslyAllowOutsideDevelopment: true

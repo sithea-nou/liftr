@@ -709,21 +709,6 @@ func specOf(raw map[string]any) map[string]any {
 	return typed
 }
 
-func mergeInto(target map[string]any, patch map[string]any) {
-	for key, value := range patch {
-		if asMap, ok := value.(map[string]any); ok {
-			existing, ok := target[key].(map[string]any)
-			if !ok {
-				existing = map[string]any{}
-			}
-			mergeInto(existing, asMap)
-			target[key] = existing
-			continue
-		}
-		target[key] = rawDeepCopyValue(value)
-	}
-}
-
 func rawDeepCopyValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:

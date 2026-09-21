@@ -89,7 +89,7 @@ func TestResourceTypeListAndJSONPurity(t *testing.T) {
 			return
 		}
 		jsonHeaders(w)
-		fmt.Fprint(w, listBody)
+		_, _ = fmt.Fprint(w, listBody)
 	}))
 	defer server.Close()
 
@@ -129,7 +129,7 @@ func TestResourceTypeGetPreservesSchemaVerbatim(t *testing.T) {
 			return
 		}
 		jsonHeaders(w)
-		fmt.Fprint(w, detail)
+		_, _ = fmt.Fprint(w, detail)
 	}))
 	defer server.Close()
 
@@ -159,7 +159,7 @@ func TestCreateDocumentModeFromStdinPreservesBytesAndHeaders(t *testing.T) {
 		w.Header().Set("Link", `</v1/operations/op-create>; rel="monitor"`)
 		w.Header().Set("Location", "/v1/resources/orders-db")
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 1, `{"storageGB":20}`, "Pending", 0))
+		_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 1, `{"storageGB":20}`, "Pending", 0)
 	}))
 	defer server.Close()
 
@@ -196,12 +196,14 @@ func TestCreateAssemblyModeBuildsEnvelope(t *testing.T) {
 		jsonHeaders(w)
 		w.Header().Set("Link", `</v1/operations/op-1>; rel="monitor"`)
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 1, `{}`, "Pending", 0))
+		_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 1, `{}`, "Pending", 0)
 	}))
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{"storageGB":20}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{"storageGB":20}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 		"resource", "create",
@@ -280,7 +282,7 @@ func TestExplicitIdempotencyKeyIsRespected(t *testing.T) {
 		w.Header().Set("Idempotency-Replayed", "true")
 		w.Header().Set("Link", `</v1/operations/op-original>; rel="monitor"`)
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 1, `{}`, "Running", 0))
+		_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 1, `{}`, "Running", 0)
 	}))
 	defer server.Close()
 
@@ -318,7 +320,7 @@ func TestResourceGetRendersOutputFreshness(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				jsonHeaders(w)
-				fmt.Fprint(w, tc.body)
+				_, _ = fmt.Fprint(w, tc.body)
 			}))
 			defer server.Close()
 			result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
@@ -344,7 +346,7 @@ func TestUpdatePreReadsGenerationAndSurfacesConflict(t *testing.T) {
 		case http.MethodGet:
 			gets.Add(1)
 			jsonHeaders(w)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Ready", 5))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Ready", 5)
 		case http.MethodPut:
 			puts.Add(1)
 			if r.Header.Get("If-Liftr-Generation") != "5" {
@@ -352,14 +354,16 @@ func TestUpdatePreReadsGenerationAndSurfacesConflict(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(http.StatusConflict)
-			fmt.Fprintf(w, `{"type":"https://liftr.dev/problems/generation-conflict","title":"Generation conflict",`+
+			_, _ = fmt.Fprintf(w, `{"type":"https://liftr.dev/problems/generation-conflict","title":"Generation conflict",`+
 				`"status":409,"code":"GENERATION_CONFLICT","requestId":"req-x","currentGeneration":9}`)
 		}
 	}))
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{"storageGB":40}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{"storageGB":40}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 		"resource", "update", "orders-db", "--spec", specFile)
@@ -387,13 +391,15 @@ func TestUpdateExplicitGenerationSkipsPreRead(t *testing.T) {
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-u>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 6, `{}`, "Pending", 5))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 6, `{}`, "Pending", 5)
 		}
 	}))
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 		"resource", "update", "orders-db", "--spec", specFile, "--generation", "5")
@@ -411,13 +417,13 @@ func TestDeleteSafetyGates(t *testing.T) {
 			switch r.Method {
 			case http.MethodGet:
 				jsonHeaders(w)
-				fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 4, `{}`, "Ready", 4))
+				_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 4, `{}`, "Ready", 4)
 			case http.MethodDelete:
 				deleteSeen.Add(1)
 				jsonHeaders(w)
 				w.Header().Set("Link", `</v1/operations/op-d>; rel="monitor"`)
 				w.WriteHeader(http.StatusAccepted)
-				fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 4, `{}`, "Deleting", 4))
+				_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 4, `{}`, "Deleting", 4)
 			}
 		}))
 	}
@@ -483,18 +489,18 @@ func TestWaitFollowsMonitorOperationToSuccess(t *testing.T) {
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-monitor>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Pending", 4))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Pending", 4)
 		case r.URL.Path == "/v1/operations/op-monitor":
 			polls.Add(1)
 			if polls.Load() >= 2 {
 				opState.Store("Succeeded")
 			}
 			jsonHeaders(w)
-			fmt.Fprintf(w, operationFixture, opState.Load())
+			_, _ = fmt.Fprintf(w, operationFixture, opState.Load())
 		case r.URL.Path == "/v1/resources/orders-db":
 			finalRead.Store(true)
 			jsonHeaders(w)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Ready", 5))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Ready", 5)
 		default:
 			t.Errorf("unexpected poll path %q", r.URL.Path)
 			http.NotFound(w, r)
@@ -503,7 +509,9 @@ func TestWaitFollowsMonitorOperationToSuccess(t *testing.T) {
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 		"-o", "json", "resource", "update", "orders-db", "--spec", specFile, "--generation", "5", "--wait", "--timeout", "30s")
@@ -528,10 +536,10 @@ func TestWaitOperationFailureExitFive(t *testing.T) {
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-monitor>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Pending", 4))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Pending", 4)
 		case r.URL.Path == "/v1/operations/op-monitor":
 			jsonHeaders(w)
-			fmt.Fprint(w, `{"id":"op-monitor","resourceId":"orders-db","capability":"update",`+
+			_, _ = fmt.Fprint(w, `{"id":"op-monitor","resourceId":"orders-db","capability":"update",`+
 				`"state":"Failed","targetGeneration":5,"requestedAt":"2026-08-23T09:00:00Z",`+
 				`"completedAt":"2026-08-23T09:01:00Z",`+
 				`"failure":{"reason":"ProvisionFailed","message":"the backend rejected the change"}}`)
@@ -540,7 +548,9 @@ func TestWaitOperationFailureExitFive(t *testing.T) {
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 		"resource", "update", "orders-db", "--spec", specFile, "--generation", "5", "--wait")
@@ -559,16 +569,18 @@ func TestWaitTimeoutExitFive(t *testing.T) {
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-monitor>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Pending", 4))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Pending", 4)
 		case r.URL.Path == "/v1/operations/op-monitor":
 			jsonHeaders(w)
-			fmt.Fprint(w, fmt.Sprintf(operationFixture, "Running"))
+			_, _ = fmt.Fprintf(w, operationFixture, "Running")
 		}
 	}))
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	start := time.Now()
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
@@ -591,18 +603,20 @@ func TestWaitAuthFailureMidPollExitsThree(t *testing.T) {
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-monitor>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Pending", 4))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Pending", 4)
 		case r.URL.Path == "/v1/operations/op-monitor":
 			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"type":"https://liftr.dev/problems/unauthenticated","title":"Unauthenticated",`+
+			_, _ = fmt.Fprint(w, `{"type":"https://liftr.dev/problems/unauthenticated","title":"Unauthenticated",`+
 				`"status":401,"code":"UNAUTHENTICATED","requestId":"req-auth"}`)
 		}
 	}))
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 		"resource", "update", "orders-db", "--spec", specFile, "--generation", "5", "--wait")
@@ -618,18 +632,20 @@ func TestWaitOperationVanishesIsProtocolFailure(t *testing.T) {
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-gone>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Pending", 4))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Pending", 4)
 		case r.URL.Path == "/v1/operations/op-gone":
 			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"type":"https://liftr.dev/problems/operation-not-found","title":"Operation not found",`+
+			_, _ = fmt.Fprint(w, `{"type":"https://liftr.dev/problems/operation-not-found","title":"Operation not found",`+
 				`"status":404,"code":"OPERATION_NOT_FOUND","requestId":"req-404"}`)
 		}
 	}))
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 		"resource", "update", "orders-db", "--spec", specFile, "--generation", "5", "--wait")
@@ -652,20 +668,16 @@ func TestWaitSuccessWithFailingFinalRead(t *testing.T) {
 		{"authentication failure exits three", http.StatusUnauthorized, ExitAuth},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			polls := atomic.Int32{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodPut:
 					jsonHeaders(w)
 					w.Header().Set("Link", `</v1/operations/op-final>; rel="monitor"`)
 					w.WriteHeader(http.StatusAccepted)
-					fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Pending", 4))
+					_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Pending", 4)
 				case r.URL.Path == "/v1/operations/op-final":
-					if polls.Add(1) >= 2 {
-						// keep Succeeded stable across repeated observations
-					}
 					jsonHeaders(w)
-					fmt.Fprint(w, fmt.Sprintf(operationFixture, "Succeeded"))
+					_, _ = fmt.Fprintf(w, operationFixture, "Succeeded")
 				case r.URL.Path == "/v1/resources/orders-db":
 					w.WriteHeader(tc.finalStatus)
 				}
@@ -673,7 +685,9 @@ func TestWaitSuccessWithFailingFinalRead(t *testing.T) {
 			defer server.Close()
 
 			specFile := filepath.Join(t.TempDir(), "spec.json")
-			os.WriteFile(specFile, []byte(`{}`), 0o600)
+			if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
 
 			result := runCLI(t, nil, map[string]string{"LIFTR_SERVER": server.URL, "LIFTR_TOKEN": secretTestToken},
 				"-o", "json", "resource", "update", "orders-db", "--spec", specFile, "--generation", "5", "--wait")
@@ -697,16 +711,18 @@ func TestInterruptDuringWaitExitsPromptly(t *testing.T) {
 			jsonHeaders(w)
 			w.Header().Set("Link", `</v1/operations/op-int>; rel="monitor"`)
 			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 5, `{}`, "Pending", 4))
+			_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 5, `{}`, "Pending", 4)
 		case r.URL.Path == "/v1/operations/op-int":
 			jsonHeaders(w)
-			fmt.Fprint(w, fmt.Sprintf(operationFixture, "Running"))
+			_, _ = fmt.Fprintf(w, operationFixture, "Running")
 		}
 	}))
 	defer server.Close()
 
 	specFile := filepath.Join(t.TempDir(), "spec.json")
-	os.WriteFile(specFile, []byte(`{}`), 0o600)
+	if err := os.WriteFile(specFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("LIFTR_SERVER", server.URL)
 	t.Setenv("LIFTR_TOKEN", secretTestToken)
 
@@ -762,7 +778,7 @@ func TestHostileProblemDetailIsSanitizedInTextMode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		fmt.Fprint(w, "{\"type\":\"https://liftr.dev/problems/resource-spec-invalid\",\"title\":\"Invalid\\u001b[31mESC\",\"status\":422,"+
+		_, _ = fmt.Fprint(w, "{\"type\":\"https://liftr.dev/problems/resource-spec-invalid\",\"title\":\"Invalid\\u001b[31mESC\",\"status\":422,"+
 			"\"detail\":\"line one\\nline two\\u001b]0;owned\\u0007\",\"code\":\"RESOURCE_SPEC_INVALID\",\"requestId\":\"req-h\"}")
 	}))
 	defer server.Close()
@@ -785,7 +801,7 @@ func TestTokenNeverAppearsInAnyOutput(t *testing.T) {
 		// A hostile or misconfigured server echoes the credential everywhere.
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, `{"type":"https://liftr.dev/problems/unauthenticated","title":"Unauthenticated %s",`+
+		_, _ = fmt.Fprintf(w, `{"type":"https://liftr.dev/problems/unauthenticated","title":"Unauthenticated %s",`+
 			`"status":401,"detail":"rejected credential %s","code":"UNAUTHENTICATED","requestId":"req-t"}`,
 			secretTestToken, secretTestToken)
 	}))
@@ -805,14 +821,18 @@ func TestTokenFileWarningAndPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	broadFile := filepath.Join(dir, "token-broad")
 	narrowFile := filepath.Join(dir, "token-narrow")
-	os.WriteFile(broadFile, []byte("file-token-value\n"), 0o644)
-	os.WriteFile(narrowFile, []byte(secretTestToken), 0o600)
+	if err := os.WriteFile(broadFile, []byte("file-token-value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(narrowFile, []byte(secretTestToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	var seenAuth atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenAuth.Store(r.Header.Get("Authorization"))
 		jsonHeaders(w)
-		fmt.Fprint(w, fmt.Sprintf(resourceFixtureTemplate, 1, `{}`, "Ready", 1))
+		_, _ = fmt.Fprintf(w, resourceFixtureTemplate, 1, `{}`, "Ready", 1)
 	}))
 	defer server.Close()
 

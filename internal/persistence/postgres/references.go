@@ -161,8 +161,6 @@ func (r *repositories) HasDependencyWaitsForOperation(ctx context.Context, opera
 	return exists, translateError(err)
 }
 
-const dependencyWaitBatchSize = 256
-
 func (r *repositories) PageDependencyWaitersByTarget(ctx context.Context, target domain.ResourceID, afterSequence uint64, limit int) ([]application.DependencyWait, uint64, error) {
 	rows, err := r.tx.Query(ctx, `SELECT operation_id, target_id, wait_seq, operation_version::text, registered_target_version::text
 		FROM operation_dependency_waits

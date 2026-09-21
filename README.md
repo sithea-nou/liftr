@@ -66,6 +66,17 @@ Liftr is in early development. The repository currently implements:
   It never exposes raw specs, secrets, provider diagnostics, payloads, handles,
   or backend state, and never offers force, cancel, terminal override, database
   mutation, or replacement Dispatch. Candidate listing remains deferred.
+- Provider-neutral Resource relationships and dependency-aware lifecycle
+  ([ADR-0022](docs/adr/0022-resource-relationships-and-dependency-aware-lifecycle.md)).
+  ResourceType contracts declare bounded typed reference slots; Resources
+  carry canonical desired references outside their opaque specs. Admission
+  enforces same-owner, readable, non-deleting targets and rejects cycles.
+  Workers gate create/update execution until every dependency is Ready at its
+  current generation, persist indexed waits, and wake dependents through the
+  outbox when target state changes. Desired and successfully applied reference
+  sets jointly protect dependencies from deletion during convergence. The
+  public API, CLI, and Backstage integration expose references without leaking
+  provider identifiers.
 - Initial tests and continuous integration.
 
 ## Future Direction
@@ -104,6 +115,30 @@ Check its health:
 ```sh
 curl http://localhost:8080/healthz
 ```
+
+### Durable server configuration
+
+Without `LIFTR_DATABASE_URL`, `liftr-server` intentionally serves health
+endpoints only. Durable composition requires an already-migrated PostgreSQL
+database plus the built-in Pulumi registration settings below; missing values
+are reported together as one startup configuration error.
+
+| Area | Variables |
+| --- | --- |
+| Listener and storage | `LIFTR_ADDR` (default `:8080`), `LIFTR_DATABASE_URL` |
+| Authentication | `LIFTR_AUTH_ISSUER`, `LIFTR_AUTH_AUDIENCE`; optional `LIFTR_AUTH_ALGORITHMS`, `LIFTR_AUTH_GROUP_CLAIM`, `LIFTR_AUTH_GROUP_PREFIX`, `LIFTR_AUTH_KIND_CLAIM`, `LIFTR_AUTH_GRANTS_FILE`. For local development only, use `LIFTR_AUTH_MODE=insecure` instead of issuer/audience. |
+| Pulumi runtime (required) | `LIFTR_PULUMI_ROOT`, `LIFTR_PULUMI_GO_EXECUTABLE`, `LIFTR_PULUMI_BACKEND_DIR`, `LIFTR_PULUMI_WORKSPACE_DIR`, `LIFTR_PULUMI_IDENTITY`, `LIFTR_PULUMI_NAMESPACE`, `LIFTR_PULUMI_PROGRAM_DIR` |
+| Built-in PostgreSQL platform binding (required) | `LIFTR_PG_LOCATION`, `LIFTR_PG_SKU_NAME`, `LIFTR_PG_SKU_TIER`, `LIFTR_PG_HA_MODE`, `LIFTR_PG_ADMIN_LOGIN` |
+| Pulumi child credentials | `ARM_SUBSCRIPTION_ID`, `ARM_TENANT_ID`, `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`; optional `PULUMI_CONFIG_PASSPHRASE` |
+| Optional platform features | `LIFTR_POLICY_FILE`, `LIFTR_OPENTOFU_CONFIG_FILE` |
+| Optional operator API | `LIFTR_ADMIN_ADDR`, `LIFTR_ADMIN_AUTH_AUDIENCE`, `LIFTR_ADMIN_AUTH_GRANTS_FILE`; optional `LIFTR_ADMIN_AUTH_ISSUER`, `LIFTR_ADMIN_AUTH_ALGORITHMS`, `LIFTR_ADMIN_AUTH_KIND_CLAIM` |
+| Observability | `LIFTR_LOG_LEVEL`, `LIFTR_LOG_FORMAT`, `LIFTR_METRICS_ADDR`, `LIFTR_OBSERVABILITY_SAMPLE_INTERVAL`, `LIFTR_OBSERVABILITY_LONG_RUNNING_WARN_AFTER`, `LIFTR_OBSERVABILITY_LONG_RUNNING_CRIT_AFTER`, `LIFTR_OBSERVABILITY_RECONCILIATION_SILENT_AFTER`, and standard `OTEL_*` settings |
+
+The built-in Pulumi registration is the private Azure PostgreSQL reference
+implementation described above; its live Azure acceptance status remains
+unvalidated. `LIFTR_OPENTOFU_CONFIG_FILE` may route current ResourceTypes to
+operator-qualified OpenTofu registrations but does not remove the built-in
+Pulumi default registration requirement.
 
 Use the CLI against it. Start the server in explicit development mode, then:
 
@@ -184,6 +219,14 @@ Production server startup does not apply migrations automatically.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance and [AGENTS.md](AGENTS.md) for the architectural constraints that govern changes.
+
+Community and project policies:
+
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security Policy](SECURITY.md)
+- [Support](SUPPORT.md)
+- [Governance](GOVERNANCE.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
