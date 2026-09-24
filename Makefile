@@ -68,10 +68,14 @@ test-acceptance-azure-storage-opentofu: prepare-acceptance-azure-storage-opentof
 
 test-acceptance-azure-storage: test-acceptance-azure-storage-pulumi test-acceptance-azure-storage-opentofu
 
+lint:
+	@command -v golangci-lint >/dev/null 2>&1 || (echo "golangci-lint is required. Install via: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest" && exit 1)
+	golangci-lint run ./...
+
 vet:
 	go vet ./...
 
-verify: fmt-check vet test
+verify: fmt-check lint vet test
 
 # ---- Local demo (examples/demo). Non-production: the demo server registers
 # ---- demo-only ResourceTypes and a deterministic provisioner, runs insecure

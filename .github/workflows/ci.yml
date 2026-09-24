@@ -10,21 +10,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_PASSWORD: liftr
-          POSTGRES_DB: liftr
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d liftr"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+
     env:
-      LIFTR_TEST_DATABASE_URL: postgres://postgres:liftr@localhost:5432/liftr?sslmode=disable
       LIFTR_TEST_PULUMI_ROOT: /home/runner/.pulumi
       LIFTR_TEST_OPENTOFU_ROOT: /home/runner/.opentofu
       LIFTR_TEST_OPENTOFU_BIN: /home/runner/.opentofu/bin/tofu
@@ -61,6 +48,12 @@ jobs:
           mkdir -p "$LIFTR_TEST_OPENTOFU_ROOT/bin"
           unzip -q "$archive" -d "$LIFTR_TEST_OPENTOFU_ROOT/bin"
           "$LIFTR_TEST_OPENTOFU_BIN" version -json
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+          install-mode: goinstall
 
       - name: Check formatting
         run: test -z "$(gofmt -l $(git ls-files '*.go'))"
