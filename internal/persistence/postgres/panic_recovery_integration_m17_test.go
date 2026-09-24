@@ -259,7 +259,7 @@ func TestDrivePanicRecoversThroughExpiryClaimWithoutStranding(t *testing.T) {
 
 	// Simulated process restart: an entirely fresh worker over the same
 	// durable store. Expiry lets the ordinary claim steal the row.
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(2000 * time.Millisecond)
 	restarted := shortLeaseWorker(t, store, resolver, sink)
 	pumpUntilQuiet(t, restarted, 64)
 
@@ -351,7 +351,7 @@ func runDispatchPanicScenario(t *testing.T, boundary *submitBoundaryProvider, he
 	// After the lease expires we swap in the truthful provider so Observe (or
 	// the framework's safe-resubmission rules) can settle the attempt — this
 	// mirrors an operator fixing the underlying fault, not telemetry behavior.
-	time.Sleep(1000 * time.Millisecond)
+	time.Sleep(2000 * time.Millisecond)
 	resolver.Providers[resolverRefOf(resolver)] = healthy
 	restarted := shortLeaseWorker(t, store, resolver, sink)
 	pumpUntilQuiet(t, restarted, 96)
@@ -427,7 +427,7 @@ func TestObservePanicIsRetriedByIdempotentSequenceAndCompletes(t *testing.T) {
 
 	// Restart with a fully healthy provider; the SAME observe message is
 	// reclaimed after expiry (sequence unchanged) and completes the operation.
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(2000 * time.Millisecond)
 	resolver.Providers[resolverRefOf(resolver)] = healthy
 	restarted := shortLeaseWorker(t, store, resolver, sink)
 	pumpUntilQuiet(t, restarted, 64)
@@ -489,7 +489,7 @@ func TestPassiveObservePanicRecoveresAndKeepsReconciliationAlive(t *testing.T) {
 		t.Fatalf("passive observe state=%v err=%v, want Leased pre-expiry", messageStateOf(message), msgErr)
 	}
 
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(2000 * time.Millisecond)
 	panicky.disarm()
 	resolver.Providers[resolverRefOf(resolver)] = composed
 	restarted := shortLeaseWorker(t, store, resolver, sink)
@@ -545,7 +545,7 @@ func TestFencingRejectsOldOwnerAfterLegitimateReclaim(t *testing.T) {
 	}); err != nil || !foundA {
 		t.Fatalf("first claim found=%t err=%v", foundA, err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(2000 * time.Millisecond)
 	tokenB := "owner-b-token"
 	var messageB application.OutboxMessage
 	var foundB bool

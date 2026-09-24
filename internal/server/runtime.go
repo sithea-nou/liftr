@@ -389,6 +389,9 @@ func (r *Runtime) StartWorker(ctx context.Context) {
 	if interval <= 0 {
 		interval = 250 * time.Millisecond
 	}
+	// Start the passive observer loop concurrently with the worker loop
+	r.worker.StartPassiveObserver(ctx, 5*time.Minute)
+
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
