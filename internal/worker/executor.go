@@ -519,10 +519,41 @@ func (w *Worker) passiveObserve(ctx context.Context, message application.OutboxM
 		} else if found {
 			return tx.Outbox().CompleteOutbox(ctx, message.ID, message.LeaseToken, "StaleObservation")
 		}
+		oldDrifted := false
+		for _, c := range current.Status.Conditions() {
+			if c.Type() == "Drifted" && c.Status() == domain.ConditionStatusTrue {
+				oldDrifted = true
+				break
+			}
+		}
+
 		status, err := w.Lifecycle.ApplyObservation(current.Resource, current.Status, observation.Resource, observedAt)
 		if err != nil {
 			return err
 		}
+
+		newDrifted := false
+		for _, c := range status.Conditions() {
+			if c.Type() == "Drifted" && c.Status() == domain.ConditionStatusTrue {
+				newDrifted = true
+				break
+			}
+		}
+
+		if !oldDrifted && newDrifted {
+			token, err := newToken()
+			if err != nil {
+				return err
+			}
+			event, err := domain.NewEvent(domain.EventID("drift-"+token), current.Resource.ID(), "", current.Version+1, "DriftDetected", "PassiveObservation", "Drift was passively detected from provider drift metrics.", observedAt)
+			if err != nil {
+				return err
+			}
+			if err := tx.Events().Append(ctx, event); err != nil {
+				return err
+			}
+		}
+
 		current.Status = status
 		if err := tx.Resources().SaveResource(ctx, current, current.Version); err != nil {
 			return err
