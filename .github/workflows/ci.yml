@@ -53,6 +53,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: v1.64.8
+          install-mode: goinstall
 
       - name: Check formatting
         run: test -z "$(gofmt -l $(git ls-files '*.go'))"
