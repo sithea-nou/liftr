@@ -37,6 +37,6 @@ func TestMain(m *testing.M) {
 			log.Printf("testcontainers-go failed to start postgres: %v. Tests requiring DB will be skipped.", err)
 		}
 	}
-	
+
 	os.Exit(m.Run())
 }
