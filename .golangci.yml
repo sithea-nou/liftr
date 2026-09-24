@@ -1,0 +1,29 @@
+linters:
+  disable-all: true
+  enable:
+    - depguard
+
+linters-settings:
+  depguard:
+    rules:
+      domain:
+        files:
+          - "internal/domain/**/*.go"
+          - "!**/*_test.go"
+        deny:
+          - pkg: "github.com/santhosh-tekuri/jsonschema"
+            desc: "domain layer must remain schema-blind"
+          - pkg: "github.com/sithea-nou/liftr/internal/resourcetypes"
+            desc: "domain layer must not depend on orchestration"
+          - pkg: "github.com/sithea-nou/liftr/internal/application"
+            desc: "domain layer must not depend on application logic"
+          - pkg: "github.com/sithea-nou/liftr/internal/api"
+            desc: "domain layer must not depend on API transport"
+          - pkg: "github.com/sithea-nou/liftr/internal/persistence"
+            desc: "domain layer must not depend on persistence"
+          - pkg: "net/http"
+            desc: "domain layer must not depend on HTTP transport"
+          - pkg: "github.com/sithea-nou/liftr/internal/provisioning"
+            desc: "domain layer must not depend on provisioner implementations"
+          - pkg: "k8s.io"
+            desc: "domain layer must not depend on kubernetes"
