@@ -5,7 +5,7 @@ go 1.26.6
 require (
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/hashicorp/hcl/v2 v2.22.0
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/pulumi/pulumi/sdk/v3 v3.263.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
