@@ -11,7 +11,7 @@
     "@backstage/core-components": "^0.16.0",
     "@backstage/core-plugin-api": "^1.10.0",
     "@backstage/frontend-plugin-api": "^0.18.0",
-    "@backstage/integration-react": "^1.2.0",
+    "@backstage/integration-react": "^1.2.22",
     "@liftr/plugin-liftr-common": "workspace:^",
     "@material-ui/core": "^4.12.2",
     "@material-ui/icons": "^4.11.3",
